@@ -43,7 +43,6 @@ incdir = include_directories('libaylp')
 
 executable('anyloop', project_source_files,
 	install: true,
-	install_dir: '/opt/anyloop',
 	dependencies: deps,
 	include_directories: incdir,
 	export_dynamic: true
@@ -52,7 +51,7 @@ executable('anyloop', project_source_files,
 shared_library('plugin_example', 'contrib/plugin_example.c',
 	name_prefix: '',
 	install: true,
-	install_dir: '/opt/anyloop',
+	install_dir: get_option('libdir') / 'anyloop',
 	dependencies: deps,
 	include_directories: incdir,
 	override_options: 'b_lundef=false'
