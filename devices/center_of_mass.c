@@ -18,22 +18,27 @@
 // grid of submatrices, with no multithreading. GCC is quite intelligent.
 /** Center of mass task for gsl_matrix_uchar.
 * Will write (y,x) coords (in that order) of the center of mass of the uchar
-* matrix at src to dst[0] and dst[1]. */
-void com_mat_uchar(gsl_matrix_uchar *src, double *dst)
+* matrix at src->mat to dst[0] and dst[1], subtracting src->threshold from
+* each pixel (clamping to zero) before accumulating. */
+void com_mat_uchar(struct aylp_com_src *src, double *dst)
 {
 	double y = 0.0, x = 0.0, s = 0.0;
 	// take weighted average
-	for (size_t i=0; i < src->size1; i++) {
-		for (size_t j=0; j < src->size2; j++) {
-			unsigned char el = src->data[i*src->tda + j];
+	for (size_t i=0; i < src->mat.size1; i++) {
+		for (size_t j=0; j < src->mat.size2; j++) {
+			unsigned char raw = src->mat.data[i*src->mat.tda + j];
+			unsigned char el = raw > src->threshold
+				? raw - src->threshold : 0;
 			y += i*el;
 			x += j*el;
 			s += el;
 		}
 	}
+	// if all pixels are at or below threshold, output centre
+	if (!s) { dst[0] = 0.0; dst[1] = 0.0; return; }
 	// set final values, scaling from 0:size-1 (given by y/s or x/s) to -1:1
-	dst[0] = -1.0 + 2*y/(s*(src->size1-1));
-	dst[1] = -1.0 + 2*x/(s*(src->size2-1));
+	dst[0] = -1.0 + 2*y/(s*(src->mat.size1-1));
+	dst[1] = -1.0 + 2*x/(s*(src->mat.size2-1));
 }
 
 
@@ -70,6 +75,7 @@ int center_of_mass_init(struct aylp_device *self)
 	data->region_height = 0;
 	data->region_width = 0;
 	data->thread_count = 1;
+	data->threshold = 0;
 	// parse parameters
 	if (!self->params) {
 		log_error("No params object found.");
@@ -91,6 +97,9 @@ int center_of_mass_init(struct aylp_device *self)
 				data->thread_count = 1;
 			}
 			log_trace("thread_count = %zu", data->thread_count);
+		} else if (!strcmp(key, "threshold")) {
+			data->threshold = (unsigned char)json_object_get_int(val);
+			log_trace("threshold = %u", data->threshold);
 		} else {
 			log_warn("Unknown parameter \"%s\"", key);
 		}
@@ -162,21 +171,28 @@ int center_of_mass_proc(struct aylp_device *self, struct aylp_state *state)
 			// inlined version of com_mat_uchar basically
 			for (size_t l=0; l < data->region_height; l++) {
 				for (size_t m=0; m < data->region_width; m++) {
-					unsigned char el;
-					el = state->matrix_uchar->data[
+					unsigned char raw;
+					raw = state->matrix_uchar->data[
 						(i*data->region_height + l)
 						* state->matrix_uchar->tda
 						+ j*data->region_width + m
 					];
+					unsigned char el = raw > data->threshold
+						? raw - data->threshold : 0;
 					y += l*el;
 					x += m*el;
 					s += el;
 				}
 			}
-			data->com->data[2*n] = -1.0
-				+ 2*y/(s*(data->region_height-1));
-			data->com->data[2*n+1] = -1.0
-				+ 2*x/(s*(data->region_width-1));
+			if (!s) {
+				data->com->data[2*n] = 0.0;
+				data->com->data[2*n+1] = 0.0;
+			} else {
+				data->com->data[2*n] = -1.0
+					+ 2*y/(s*(data->region_height-1));
+				data->com->data[2*n+1] = -1.0
+					+ 2*x/(s*(data->region_width-1));
+			}
 			n += 1;
 		}
 	}
@@ -232,8 +248,9 @@ int center_of_mass_proc_threaded(
 		xfree(data->tasks);
 		data->tasks = xmalloc(n_tasks * sizeof(struct aylp_task));
 		data->n_tasks = n_tasks;
-		// allocate the matrices we use for sources too
-		data->subaps = xmalloc(n_tasks * sizeof(gsl_matrix_uchar));
+		// allocate the com_src inputs for the tasks
+		xfree(data->com_srcs);
+		data->com_srcs = xmalloc(n_tasks * sizeof(struct aylp_com_src));
 	}
 	// allocate the com vector if needed
 	if (!data->com || data->com->size < n_tasks*2) {
@@ -246,17 +263,18 @@ int center_of_mass_proc_threaded(
 	for (size_t i=0; i < y_subap_count; i++) {
 		for (size_t j=0; j < x_subap_count; j++) {
 			// set source data
-			data->subaps[t] = gsl_matrix_uchar_submatrix(
+			data->com_srcs[t].mat = gsl_matrix_uchar_submatrix(
 				state->matrix_uchar,
 				i * data->region_height,
 				j * data->region_width,
 				data->region_height,
 				data->region_width
 			).matrix;
+			data->com_srcs[t].threshold = data->threshold;
 			// set task
 			data->tasks[t] = (struct aylp_task){
 				.func = (void(*)(void*,void*))com_mat_uchar,
-				.src = &data->subaps[t],
+				.src = &data->com_srcs[t],
 				.dst = (void *)(data->com->data+2*t),
 				.next_task = 0
 			};
@@ -288,6 +306,7 @@ int center_of_mass_fini_threaded(struct aylp_device *self)
 	}
 	xfree(data->threads);
 	xfree(data->tasks);
+	xfree(data->com_srcs);
 	xfree(self->device_data);
 	return 0;
 }

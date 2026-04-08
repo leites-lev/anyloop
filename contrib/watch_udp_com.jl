@@ -27,8 +27,8 @@ end
 
 println("listening on 64730 (matrix) and 64731 (vector)")
 
-L = 10
-M = 10
+L = 16
+M = 16
 l = vcat([repeat([i], M) for i in 1:L]...)
 m = repeat(1:M, L)
 

@@ -4,6 +4,12 @@
 #include "anyloop.h"
 #include "thread_pool.h"
 
+// src bundle passed to com_mat_uchar via the task runner
+struct aylp_com_src {
+	gsl_matrix_uchar mat;
+	unsigned char threshold;
+};
+
 struct aylp_center_of_mass_data {
 	// param: height of regions/subapertures
 	size_t region_height;
@@ -11,14 +17,16 @@ struct aylp_center_of_mass_data {
 	size_t region_width;
 	// param; set to 1 for no multithreading
 	size_t thread_count;
+	// param: subtract this value from each pixel before computing CoM
+	unsigned char threshold;
 	// array of threads
 	pthread_t *threads;
 	// array of tasks
 	struct aylp_task *tasks;
 	// number of tasks
 	size_t n_tasks;
-	// array of gsl_matrix_uchar inputs for the tasks
-	gsl_matrix_uchar *subaps;
+	// array of com_src inputs for the tasks (matrix view + threshold)
+	struct aylp_com_src *com_srcs;
 	// queue of tasks
 	struct aylp_queue queue;
 
