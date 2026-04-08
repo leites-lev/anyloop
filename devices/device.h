@@ -13,6 +13,7 @@
 #include "devices/stop_after_count.h"
 #include "devices/test_source.h"
 #include "devices/udp_sink.h"
+#include "devices/udp_source.h"
 #include "devices/vonkarman_stream.h"
 
 static const struct {
@@ -31,6 +32,7 @@ static const struct {
 	{ "anyloop:stop_after_count", stop_after_count_init },
 	{ "anyloop:test_source", test_source_init },
 	{ "anyloop:udp_sink", udp_sink_init },
+	{ "anyloop:udp_source", udp_source_init },
 	{ "anyloop:vonkarman_stream", vonkarman_stream_init },
 };
 

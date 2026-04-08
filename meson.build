@@ -36,6 +36,7 @@ project_source_files = [
 	'devices/stop_after_count.c',
 	'devices/test_source.c',
 	'devices/udp_sink.c',
+	'devices/udp_source.c',
 	'devices/vonkarman_stream.c',
 ]
 
