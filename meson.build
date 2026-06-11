@@ -41,6 +41,7 @@ project_source_files = [
 	'devices/udp_sink.c',
 	'devices/udp_source.c',
 	'devices/vonkarman_stream.c',
+	'devices/piplate_bridge.c',
 ]
 
 incdir = include_directories('libaylp')
@@ -60,4 +61,21 @@ shared_library('plugin_example', 'contrib/plugin_example.c',
 	include_directories: incdir,
 	override_options: 'b_lundef=false'
 )
+
+asi_sdk_dir = '/home/fsl/ASIStudio/lib'
+asi_lib = c.find_library('ASICamera2', dirs: [asi_sdk_dir], required: false)
+if asi_lib.found()
+	shared_library('asi_source', 'contrib/asi_source.c',
+		name_prefix: '',
+		install: true,
+		install_dir: get_option('libdir') / 'anyloop',
+		dependencies: deps + [asi_lib],
+		include_directories: [incdir, include_directories('contrib')],
+		build_rpath: asi_sdk_dir,
+		install_rpath: asi_sdk_dir,
+		override_options: 'b_lundef=false'
+	)
+else
+	message('ZWO ASI SDK not found at ' + asi_sdk_dir + '; asi_source will not be built')
+endif
 
