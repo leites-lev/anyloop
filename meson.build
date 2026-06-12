@@ -64,7 +64,8 @@ shared_library('plugin_example', 'contrib/plugin_example.c',
 
 asi_sdk_dir = '/home/fsl/ASIStudio/lib'
 asi_lib = c.find_library('ASICamera2', dirs: [asi_sdk_dir], required: false)
-if asi_lib.found()
+fs = import('fs')
+if asi_lib.found() and fs.exists('contrib/asi_source.c')
 	shared_library('asi_source', 'contrib/asi_source.c',
 		name_prefix: '',
 		install: true,

@@ -4,10 +4,9 @@
 #include "anyloop.h"
 
 struct aylp_piplate_bridge_data {
-	int spi_fd;	// /dev/spidev0.1 file descriptor
-	int gpio_fd;	// sysfs value fd for GPIO 25 (PiPlate frame select)
+	int serial_fd;	// /dev/ttyACM0 (or configured port) file descriptor
 	int index;	// which pipeline vector element to command
-	int board;	// PiPlate board address (0–7)
+	int board;	// DAQC board address (0–7)
 	int channel;	// DAC output channel (0–3)
 	double scale;	// volts per pipeline unit
 	double offset;	// volts at zero command
