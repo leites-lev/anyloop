@@ -1,13 +1,24 @@
 {
 	"pipeline": [
-		{
+		{      
 			"uri": "anyloop:test_source",
 			"params": {
 				"type": "vector",
-				"kind": "sine",
+				"kind": "constant",
 				"size1": 1,
-				"offset": 0.0,
-				"frequency": 3.14159
+				"offset": 0
+				
+			}
+		},
+		{
+			"uri": "anyloop:piplate_bridge",
+			"params": {
+				"port": "/dev/ttyACM0",
+				"board": 0,
+				"channel": 1,
+				"index": 0,
+				"scale": 2,
+				"offset": 0
 			}
 		},
 		{
@@ -17,17 +28,11 @@
 				"board": 0,
 				"channel": 0,
 				"index": 0,
-				"scale": 2.0,
+				"scale": 2,
 				"offset": 0
 			}
-		},
-		{
-			"uri": "anyloop:delay",
-			"params": {
-				"s": 0,
-				"ns": 5000000,
-				"_comment": "200 Hz loop rate"
-			}
 		}
+
+
 	]
 }
