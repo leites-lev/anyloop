@@ -27,7 +27,8 @@ struct aylp_pid_data {
 	// previous timestamp
 	struct timespec tp;
 	// pid params, clamp for maximum correction (by i term and in total)
-	double p, i, d, clamp;
+	double p, i, d, clamp, g;
+	double p_y, i_y, d_y, g_y;
 };
 
 // initialize pid device
@@ -40,4 +41,5 @@ int pid_proc(struct aylp_device *self, struct aylp_state *state);
 int pid_fini(struct aylp_device *self);
 
 #endif
+
 

@@ -19,6 +19,8 @@ int pid_init(struct aylp_device *self)
 	data->i = 0.0;
 	data->d = 0.0;
 	data->clamp = 1.0;
+	data->g = 1.0;
+	data->p_y = data->i_y = data->d_y = data->g_y = -1.0;
 
 	// parse parameters
 	if (!self->params) {
@@ -49,6 +51,13 @@ int pid_init(struct aylp_device *self)
 		} else if (!strcmp(key, "d")) {
 			data->d = json_object_get_double(val);
 			log_trace("d = %G", data->d);
+		} else if (!strcmp(key, "g")) {
+			data->g = json_object_get_double(val);
+			log_trace("g = %G", data->g);
+		} else if (!strcmp(key, "py")) { data->p_y = json_object_get_double(val);
+		} else if (!strcmp(key, "iy")) { data->i_y = json_object_get_double(val);
+		} else if (!strcmp(key, "dy")) { data->d_y = json_object_get_double(val);
+		} else if (!strcmp(key, "gy")) { data->g_y = json_object_get_double(val);
 		} else if (!strcmp(key, "clamp")) {
 			data->clamp = json_object_get_double(val);
 			if (data->clamp < 0)
@@ -58,6 +67,10 @@ int pid_init(struct aylp_device *self)
 			log_warn("Unknown parameter \"%s\"", key);
 		}
 	}
+	if (data->p_y < 0) data->p_y = data->p;
+	if (data->i_y < 0) data->i_y = data->i;
+	if (data->d_y < 0) data->d_y = data->d;
+	if (data->g_y < 0) data->g_y = data->g;
 	// make sure we didn't miss any params
 	if (!data->type) {
 		log_error("You must provide valid type param.");
@@ -130,17 +143,21 @@ int pid_proc(struct aylp_device *self, struct aylp_state *state)
 		}
 		// loop over elements and apply PID control
 		for (size_t j = 0; j < s->size; j++) {
+			double pj = j ? data->p : data->p_y;
+			double ij = j ? data->i : data->i_y;
+			double dj = j ? data->d : data->d_y;
+			double gj = j ? data->g : data->g_y;
 			// update accumulator and clamp if needed
-			a->data[j*a->stride] += dt * s->data[j*s->stride];
+			a->data[j*a->stride] = gj * a->data[j*a->stride] + dt * s->data[j*s->stride];
 			if (a->data[j*a->stride] > data->clamp)
 				a->data[j*a->stride] = data->clamp;
 			else if (a->data[j*a->stride] < -data->clamp)
 				a->data[j*a->stride] = -data->clamp;
 			// apply pid params to result
 			r->data[j*r->stride] =
-				- data->p * s->data[j*s->stride]
-				- data->i * a->data[j*a->stride]
-				- data->d * (
+				- pj * s->data[j*s->stride]
+				- ij * a->data[j*a->stride]
+				- dj * (
 					s->data[j*s->stride]
 					- p->data[j*p->stride]
 				) / dt
@@ -235,4 +252,5 @@ int pid_fini(struct aylp_device *self)
 	xfree(data);
 	return 0;
 }
+
 
