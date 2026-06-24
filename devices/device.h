@@ -18,6 +18,7 @@
 #include "devices/udp_source.h"
 #include "devices/vonkarman_stream.h"
 #include "devices/piplate_bridge.h"
+#include "devices/bode_plot.h"
 
 static const struct {
 	const char *uri;
@@ -40,6 +41,7 @@ static const struct {
 	{ "anyloop:udp_source", udp_source_init },
 	{ "anyloop:vonkarman_stream", vonkarman_stream_init },
 	{ "anyloop:piplate_bridge", piplate_bridge_init },
+	{ "anyloop:bode_plot", bode_plot_init },
 };
 
 // match an aylp_device with its initializer function and initialize it

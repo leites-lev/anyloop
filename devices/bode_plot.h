@@ -50,6 +50,19 @@ struct aylp_bode_plot_data {
 	double Y_sin;           // correlator: integral of y * sin(phi) dt
 	double prev_cos_term;   // trapezoidal integration baseline (cos)
 	double prev_sin_term;   // trapezoidal integration baseline (sin)
+	double prev_phi;        // injection phase from previous step (y[n] responds to phi[n-1])
+
+	// hardware FG mode (optional — bypasses software sine injection)
+	// Set fg_port to use the DAQC2 hardware function generator instead of computing
+	// sine in software.  The FG runs at 200 kHz so the output waveform is clean
+	// regardless of loop-rate jitter.  The piplate_bridge for the swept axis must
+	// NOT be in the pipeline when fg_port is set (they would fight over the port).
+	char  *fg_port;    // serial device, e.g. "/dev/ttyACM0"; NULL = software mode
+	int    fg_fd;      // open serial fd, -1 when unused
+	int    fg_board;   // DAQC2 board 0-7 (default 0)
+	int    fg_channel; // FG output channel 1 or 2 (default 1)
+	int    fg_level;   // amplitude: 1=eighth 2=quarter 3=half 4=full (default 1)
+	double fg_offset;  // DC center voltage in V, 0.0-4.095 (default 0 = hardware default 2.048V)
 
 	// results (one entry per frequency)
 	double *freqs;

@@ -42,6 +42,7 @@ project_source_files = [
 	'devices/udp_source.c',
 	'devices/vonkarman_stream.c',
 	'devices/piplate_bridge.c',
+	'devices/bode_plot.c'
 ]
 
 incdir = include_directories('libaylp')

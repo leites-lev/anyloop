@@ -17,8 +17,8 @@
 				"board": 0,
 				"channel": 1,
 				"index": 0,
-				"scale": 2,
-				"offset": 2.7
+				"scale": 0,
+				"offset": 1.79
 			}
 		},
 		{
@@ -28,8 +28,8 @@
 				"board": 0,
 				"channel": 0,
 				"index": 0,
-				"scale": 2,
-				"offset": 2.7
+				"scale": 0,
+				"offset": 2.438 
 			}
 		}
 
