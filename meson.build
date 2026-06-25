@@ -28,6 +28,7 @@ project_source_files = [
 	'devices/kdc101.c',
 	'devices/tic_t834.c',
 	'devices/clamp.c',
+	'devices/biquad_filter.c',
 	'devices/device.c',
 	'devices/delay.c',
 	'devices/file_sink.c',

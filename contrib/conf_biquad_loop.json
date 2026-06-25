@@ -1,0 +1,68 @@
+{
+	"_comment": {
+		"1": "Tip/tilt loop with a biquad filter ahead of the PID to keep",
+		"2": "loop gain off the ~80 Hz FSM resonance. Pipeline:",
+		"3": "  camera -> center_of_mass -> biquad_filter -> pid -> actuator",
+		"4": "fs is the measured loop rate (~333 Hz here; check with -p).",
+		"5": "Start with the lowpass below. To switch to a surgical notch,",
+		"6": "set mode=notch, f0=80, q~2.3 (see the commented block)."
+	},
+	"pipeline": [
+		{
+			"uri": "file:build/asi_source.so",
+			"params": {
+				"camera_name": "ASI290MM",
+				"width": 128,
+				"height": 128,
+				"exposure": 1000,
+				"gain": 200,
+				"bandwidth": 80
+			}
+		},
+		{
+			"uri": "anyloop:center_of_mass",
+			"params": {
+				"region_height": 8,
+				"region_width": 8,
+				"thread_count": 1
+			}
+		},
+		{
+			"uri": "anyloop:biquad_filter",
+			"params": {
+				"type": "vector",
+				"mode": "lowpass",
+				"f0": 30.0,
+				"q": 0.707,
+				"fs": 333.0,
+				"_note": "single-pole-style LP; corner sits in the decade between the ~10 Hz crossover and the 80 Hz resonance"
+			},
+			"_notch_alternative": {
+				"type": "vector",
+				"mode": "notch",
+				"f0": 80.0,
+				"q": 2.3,
+				"fs": 333.0
+			}
+		},
+		{
+			"uri": "anyloop:pid",
+			"params": {
+				"type": "vector",
+				"p": 0.05,
+				"iy": 40.0,
+				"i": 50.0,
+				"d": 0.0,
+				"clamp": 1.0,
+				"units": "rad"
+			}
+		},
+		{
+			"uri": "anyloop:file_sink",
+			"params": {
+				"filename": "error_after_filter.aylp",
+				"_note": "log the filtered command stream; move this before the biquad to capture the raw error for an FFT"
+			}
+		}
+	]
+}

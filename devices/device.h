@@ -5,6 +5,7 @@
 #include "devices/kdc101.h"
 #include "devices/tic_t834.h"
 #include "devices/clamp.h"
+#include "devices/biquad_filter.h"
 #include "devices/delay.h"
 #include "devices/file_sink.h"
 #include "devices/logger.h"
@@ -28,6 +29,7 @@ static const struct {
 	{ "anyloop:kdc101", kdc101_init },
 	{ "anyloop:tic_t834", tic_t834_init },
 	{ "anyloop:clamp", clamp_init },
+	{ "anyloop:biquad_filter", biquad_filter_init },
 	{ "anyloop:delay", delay_init },
 	{ "anyloop:file_sink", file_sink_init },
 	{ "anyloop:logger", logger_init },
