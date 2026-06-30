@@ -12,27 +12,29 @@
 // cos(w0)/sin(w0) of the *digital* frequency w0 = 2*pi*f0/fs (rather than from
 // the raw analog frequency), the realized feature lands exactly on f0 even when
 // f0 is a large fraction of Nyquist. See doc/devices/biquad_filter.md.
-static int biquad_filter_compute_coeffs(struct aylp_biquad_filter_data *data)
-{
+// compute one normalized coefficient set (slot k: 0=y/tip, 1=x/tilt) from f0/q
+static int biquad_filter_compute_one(
+	struct aylp_biquad_filter_data *data, size_t k, double f0, double q
+){
 	if (data->fs <= 0.0) {
 		log_error("biquad_filter: fs must be > 0 (got %G)", data->fs);
 		return -1;
 	}
-	if (data->f0 <= 0.0 || data->f0 >= data->fs / 2.0) {
+	if (f0 <= 0.0 || f0 >= data->fs / 2.0) {
 		log_error("biquad_filter: f0 must be in (0, fs/2)=(0, %G); "
-			"got %G", data->fs / 2.0, data->f0
+			"got %G", data->fs / 2.0, f0
 		);
 		return -1;
 	}
-	if (data->q <= 0.0) {
-		log_error("biquad_filter: q must be > 0 (got %G)", data->q);
+	if (q <= 0.0) {
+		log_error("biquad_filter: q must be > 0 (got %G)", q);
 		return -1;
 	}
 
-	double w0 = 2.0 * M_PI * data->f0 / data->fs;
+	double w0 = 2.0 * M_PI * f0 / data->fs;
 	double cw = cos(w0);
 	double sw = sin(w0);
-	double alpha = sw / (2.0 * data->q);
+	double alpha = sw / (2.0 * q);
 
 	// shared denominator (poles set width/damping)
 	double a0 = 1.0 + alpha;
@@ -56,11 +58,23 @@ static int biquad_filter_compute_coeffs(struct aylp_biquad_filter_data *data)
 	}
 
 	// normalize so a0 == 1
-	data->b0 = b0 / a0;
-	data->b1 = b1 / a0;
-	data->b2 = b2 / a0;
-	data->a1 = a1 / a0;
-	data->a2 = a2 / a0;
+	data->b0[k] = b0 / a0;
+	data->b1[k] = b1 / a0;
+	data->b2[k] = b2 / a0;
+	data->a1[k] = a1 / a0;
+	data->a2[k] = a2 / a0;
+	return 0;
+}
+
+
+// compute both coefficient sets: [1] from the base f0/q (x/tilt and matrix),
+// [0] from the per-axis f0_y/q_y overrides (y/tip), falling back to the base.
+static int biquad_filter_compute_coeffs(struct aylp_biquad_filter_data *data)
+{
+	double f0_y = data->f0_y > 0.0 ? data->f0_y : data->f0;
+	double q_y = data->q_y > 0.0 ? data->q_y : data->q;
+	if (biquad_filter_compute_one(data, 1, data->f0, data->q)) return -1;
+	if (biquad_filter_compute_one(data, 0, f0_y, q_y)) return -1;
 	return 0;
 }
 
@@ -82,16 +96,17 @@ static void biquad_filter_alloc_state(
 }
 
 
-// one Direct Form I step for element i, given input x; returns filter output
+// one Direct Form I step for element i, given input x; returns filter output.
+// k selects the coefficient set: 0 for element 0 (y/tip), 1 otherwise (x/tilt).
 static inline double biquad_filter_step(
-	struct aylp_biquad_filter_data *data, size_t i, double x
+	struct aylp_biquad_filter_data *data, size_t i, size_t k, double x
 ){
 	double y =
-		  data->b0 * x
-		+ data->b1 * data->x1[i]
-		+ data->b2 * data->x2[i]
-		- data->a1 * data->y1[i]
-		- data->a2 * data->y2[i]
+		  data->b0[k] * x
+		+ data->b1[k] * data->x1[i]
+		+ data->b2[k] * data->x2[i]
+		- data->a1[k] * data->y1[i]
+		- data->a2[k] * data->y2[i]
 	;
 	data->x2[i] = data->x1[i];
 	data->x1[i] = x;
@@ -146,6 +161,12 @@ int biquad_filter_init(struct aylp_device *self)
 		} else if (!strcmp(key, "q")) {
 			data->q = json_object_get_double(val);
 			log_trace("q = %G", data->q);
+		} else if (!strcmp(key, "f0y")) {
+			data->f0_y = json_object_get_double(val);
+			log_trace("f0y = %G", data->f0_y);
+		} else if (!strcmp(key, "qy")) {
+			data->q_y = json_object_get_double(val);
+			log_trace("qy = %G", data->q_y);
 		} else if (!strcmp(key, "fs")) {
 			data->fs = json_object_get_double(val);
 			log_trace("fs = %G", data->fs);
@@ -160,11 +181,17 @@ int biquad_filter_init(struct aylp_device *self)
 	}
 	if (biquad_filter_compute_coeffs(data)) return -1;
 
-	log_info("biquad_filter: %s f0=%G Hz Q=%G fs=%G Hz; "
-		"b=[%G %G %G] a=[1 %G %G]",
+	double f0_y = data->f0_y > 0.0 ? data->f0_y : data->f0;
+	double q_y = data->q_y > 0.0 ? data->q_y : data->q;
+	log_info("biquad_filter: %s fs=%G Hz; "
+		"x/tilt f0=%G Hz Q=%G b=[%G %G %G] a=[1 %G %G]; "
+		"y/tip f0=%G Hz Q=%G b=[%G %G %G] a=[1 %G %G]",
 		data->mode == AYLP_BIQUAD_FILTER_NOTCH ? "notch" : "lowpass",
-		data->f0, data->q, data->fs,
-		data->b0, data->b1, data->b2, data->a1, data->a2
+		data->fs,
+		data->f0, data->q,
+		data->b0[1], data->b1[1], data->b2[1], data->a1[1], data->a2[1],
+		f0_y, q_y,
+		data->b0[0], data->b1[0], data->b2[0], data->a1[0], data->a2[0]
 	);
 
 	// set types and units
@@ -191,7 +218,9 @@ int biquad_filter_proc(struct aylp_device *self, struct aylp_state *state)
 		gsl_vector *r = data->res_v;
 		for (size_t j = 0; j < s->size; j++) {
 			double x = s->data[j * s->stride];
-			r->data[j * r->stride] = biquad_filter_step(data, j, x);
+			// element 0 is y/tip (coeff set 0); the rest are x/tilt
+			size_t k = j ? 1 : 0;
+			r->data[j * r->stride] = biquad_filter_step(data, j, k, x);
 		}
 		state->vector = r;
 		break;
@@ -212,8 +241,9 @@ int biquad_filter_proc(struct aylp_device *self, struct aylp_state *state)
 		for (size_t y = 0; y < s->size1; y++) {
 			for (size_t x = 0; x < s->size2; x++) {
 				double in = s->data[y * s->tda + x];
+				// matrix input has no axis split; use base set
 				r->data[y * r->tda + x] =
-					biquad_filter_step(data, i++, in);
+					biquad_filter_step(data, i++, 1, in);
 			}
 		}
 		state->matrix = r;

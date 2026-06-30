@@ -1,0 +1,78 @@
+{
+	"_comment": {
+		"1": "Open-loop plant Bode of the y/tip axis: command -> FSM -> camera -> CoM.",
+		"2": "SOFTWARE injection: bode_plot replaces the y element with a sine each",
+		"3": "iteration, and the y piplate_bridge writes offset + sine*scale to the DAC",
+		"4": "every cycle. The bias (1.9368 V) therefore comes from a real per-iteration",
+		"5": "DAQ write, not the hardware FG's fg_offset (which does not actually bias",
+		"6": "the channel). No PID is in the loop, so the command IS the sine = open loop.",
+		"7": "Pipeline: camera -> center_of_mass -> bode_plot(replace y) -> drive y -> park x.",
+		"8": "Phase is measured from wall-clock time, so the freq axis is exact.",
+		"9": "Read the -180 deg crossing off fsm815_bode_y.pdf: that frequency is where",
+		"10": "the loop self-oscillates, and the gain there sets max py. Magnitude is now",
+		"11": "calibrated (CoM units per command unit) since amplitude is the real drive.",
+		"12": "Raise amplitude for SNR but keep the spot on the 72x72 sensor."
+	},
+	"pipeline": [
+		{
+			"uri": "file:/home/fsl/anyloop/build/asi_source.so",
+			"params": {
+				"camera_name": "ASI290MM",
+				"width":       72,
+				"height":      72,
+				"exposure":    1000,
+				"gain":        100,
+				"bandwidth":   80
+			}
+		},
+		{
+			"uri": "anyloop:center_of_mass",
+			"params": {
+				"region_height": 72,
+				"region_width":  72,
+				"threshold":     0
+			}
+		},
+		{
+			"_comment": "Replace the y/tip element (0) with the swept sine; read CoM y as response",
+			"uri": "anyloop:bode_plot",
+			"params": {
+				"sample_rate": 815.0,
+				"element":     0,
+				"inject":      "replace",
+				"output":      "raw",
+				"freq_start":  5.0,
+				"freq_end":    200.0,
+				"n_freqs":     40,
+				"n_settle":    100,
+				"n_cycles":    12.0,
+				"amplitude":   0.2,
+				"output_file": "fsm815_bode_y.pdf"
+			}
+		},
+		{
+			"_comment": "Drive y/tip: DAC ch1, writes offset(1.9368V) + sine*scale every iteration",
+			"uri": "anyloop:piplate_bridge",
+			"params": {
+				"port":    "/dev/ttyACM0",
+				"board":   0,
+				"channel": 1,
+				"index":   0,
+				"scale":   2,
+				"offset":  1.9368
+			}
+		},
+		{
+			"_comment": "Park x/tilt at its center voltage (scale 0) to hold the spot on-sensor",
+			"uri": "anyloop:piplate_bridge",
+			"params": {
+				"port":    "/dev/ttyACM0",
+				"board":   0,
+				"channel": 0,
+				"index":   1,
+				"scale":   0,
+				"offset":  2.5
+			}
+		}
+	]
+}

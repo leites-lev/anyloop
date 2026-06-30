@@ -1,22 +1,21 @@
 {
 	"_comment": {
-		"1": "Tip/tilt loop, pure P, with a notch on each axis' FSM resonance",
-		"2": "ahead of the PID. Pipeline:",
-		"3": "  camera -> center_of_mass -> biquad_filter(notch) -> pid -> actuator",
+		"1": "Tip/tilt loop with a biquad filter ahead of the PID to keep",
+		"2": "loop gain off the ~80 Hz FSM resonance. Pipeline:",
+		"3": "  camera -> center_of_mass -> biquad_filter -> pid -> actuator",
 		"4": "fs is the measured loop rate (~815 Hz here; check with -p).",
-		"5": "Notch targets the resonance (x ~82 Hz, y ~94 Hz from bode), NOT the",
-		"6": "45 Hz limit cycle, which is a subharmonic of the 94 Hz y resonance.",
-		"7": "Test: raise py and watch whether the 45 Hz onset threshold climbs."
+		"5": "Start with the lowpass below. To switch to a surgical notch,",
+		"6": "set mode=notch, f0=80, q~2.3 (see the commented block)."
 	},
 	"pipeline": [
 		{
 			"uri": "file:/home/fsl/anyloop/build/asi_source.so",
 			"params": {
 				"camera_name": "ASI290MM",
-				"width":       248,
-				"height":      248,
-				"exposure":    100,
-				"gain":        150,
+				"width":       72,
+				"height":      72,
+				"exposure":    1000,
+				"gain":        50,
 				"bandwidth":   100
 			}
 		},
@@ -31,9 +30,9 @@
 		{
 			"uri": "anyloop:center_of_mass",
 			"params": {
-				"region_height": 248,
-				"region_width":  248,
-				"threshold":     0
+				"region_height": 72,
+				"region_width":  72,
+				"threshold":     100
 			}
 		},
 		{
@@ -56,9 +55,8 @@
 			"uri": "anyloop:pid",
 			"params": {
 				"type": "vector",
-				"p": 1.68,
-				"py": 1.92,
-				"i": 420,
+				"p": 3,
+				"i": 600,
 				"d": 0,
 				"clamp": 1.0,
 				"units": "minmax"
@@ -82,20 +80,20 @@
 				"board": 0,
 				"channel": 0,
 				"index": 1,
-				"scale": -2,
-				"offset": 2.2
+				"scale": 0,
+				"offset": 2.63
 			}
 		},
 		{
-			"_comment" : "Tip, y axis (+)",
+			"_comment" : "Tip, y axis (+)1.9368",
 			"uri": "anyloop:piplate_bridge",
 			"params": {
 				"port": "/dev/ttyACM0",
 				"board": 0,
 				"channel": 1,
 				"index": 0,
-				"scale": 2,
-				"offset": 2.2
+				"scale": 0,
+				"offset": 0.94
 			}
 		},
 		{

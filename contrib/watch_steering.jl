@@ -29,24 +29,31 @@ end
 set_rcvbuf!(sock0, 131072)  # ~2 image frames
 set_rcvbuf!(sock1, 512)     # a handful of CoM packets
 
-for i in 1:10000
-    data0 = read(IOBuffer(recv(sock0)), AYLPChunk)
-    data1 = read(IOBuffer(recv(sock1)), AYLPChunk)
+for i in 1:100000
+    try
+        data0 = read(IOBuffer(recv(sock0)), AYLPChunk)
+        data1 = read(IOBuffer(recv(sock1)), AYLPChunk)
 
-    @assert length(data1.data) == 2
-    # CoM output is [y, x] each in -1:1, where 0 is centre of the frame
-    com_y = data1.data[1]
-    com_x = data1.data[2]
+        @assert length(data1.data) == 2
+        # CoM output is [y, x] each in -1:1, where 0 is centre of the frame
+        com_y = data1.data[1]
+        com_x = data1.data[2]
 
-    nrows, ncols = size(data0.data)
-    # convert from -1:1 to pixel coordinates
-    px = (com_x + 1) / 2 * (ncols - 1) + 1
-    py = (com_y + 1) / 2 * (nrows - 1) + 1
+        nrows, ncols = size(data0.data)
+        # convert from -1:1 to pixel coordinates
+        px = (com_x + 1) / 2 * (ncols - 1) + 1
+        py = (com_y + 1) / 2 * (nrows - 1) + 1
 
-    heatmap(data0.data, aspect_ratio=:equal, size=(800,800))
-    display(scatter!([px], [py],
-        marker=:cross, markersize=10, color=:magenta, label="CoM"
-    ))
+        heatmap(data0.data, aspect_ratio=:equal, size=(800,800))
+        display(scatter!([px], [py],
+            marker=:cross, markersize=10, color=:magenta, label="CoM"
+        ))
+    catch e
+        e isa InterruptException && rethrow()
+        # show why this iteration failed instead of crashing silently
+        @error "watch_steering iteration $i failed" exception=(e, catch_backtrace())
+        continue
+    end
 end
 
 close(sock0)

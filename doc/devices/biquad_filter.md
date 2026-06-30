@@ -38,6 +38,13 @@ Parameters
   - Quality factor. For a lowpass, ~0.707 is maximally flat (the default); for
     a notch, set it near the resonance's own Q (width = f0/Q) so the notch is
     about as wide as the peak it cancels.
+- `f0y` (float) (optional)
+  - Per-axis override of `f0` for element 0 (y/tip) of a vector; the base `f0`
+    then applies to elements >= 1 (x/tilt). Useful when the two steering axes
+    resonate at different frequencies. Defaults to `f0`. Ignored for matrix
+    input (every element uses the base set).
+- `qy` (float) (optional)
+  - Per-axis override of `q` for element 0 (y/tip). Defaults to `q`.
 - `fs` (float) (required)
   - Sample rate in Hz that the coefficients are designed for (your loop rate).
 - `units` (string) (optional)
