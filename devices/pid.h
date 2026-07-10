@@ -1,8 +1,30 @@
 #ifndef AYLP_DEVICES_PID_H_
 #define AYLP_DEVICES_PID_H_
 
+#include <stdbool.h>
 #include <time.h>
 #include "anyloop.h"
+
+// narrowband internal-model line rejection (vector [y,x] type only): one
+// adaptive quadrature oscillator per disturbance line. The two weights
+// integrate the error demodulated at the line frequency (filtered-x LMS),
+// which is the numerically robust realization of a resonator with poles ON
+// the unit circle: infinite loop gain exactly at f, so a stable sinusoidal
+// disturbance is rejected even above the loop's crossover, at the cost of a
+// notch in S only ~g*|P|/pi Hz wide instead of a broadband waterbed hit.
+struct aylp_pid_line {
+	double f;	// line frequency (Hz)
+	double g;	// adaptation gain (1/s); notch width ~ g*|P·S|/pi Hz
+	double phi;	// phase of the command->error path at f (rad); the
+			// demodulator is rotated by this so the weight update
+			// descends the true gradient. Defaults to the delay lag
+			// -2pi*f*line_delay; for lines below ~1.5x crossover the
+			// sensitivity function's phase advance matters too, so
+			// give an explicit line_phase there.
+	double a, b;	// quadrature weights (command units)
+	double th;	// running oscillator phase (rad)
+};
+#define AYLP_PID_MAX_LINES 8
 
 struct aylp_pid_data {
 	// param type in ["vector", "matrix"]
@@ -31,8 +53,17 @@ struct aylp_pid_data {
 	};
 	// previous timestamp
 	struct timespec tp;
-	// pid params, clamp for maximum correction (by i term and in total)
+	// pid params; clamp bounds the total correction, and the accumulator is
+	// bounded to clamp/|i| so the integral term can reach that limit but never
+	// wind past it (see acc_limit in pid.c)
 	double p, i, d, clamp, g;
+	// param: seconds to hold the command at zero, with the integrator kept
+	// empty, before the loop is allowed to act
+	double start_delay;
+	// CLOCK_MONOTONIC time of the first proc (s); 0 until seeded
+	double t0;
+	// true once the startup hold has been released
+	bool started;
 	double p_y, i_y, d_y, g_y;
 	// derivative filter: low-pass the D term at this cutoff (Hz) to limit
 	// noise amplification. <=0 disables it (pure derivative). Per-axis, with
@@ -54,6 +85,43 @@ struct aylp_pid_data {
 	// type only). Bilinear coeffs are recomputed each step from the live dt.
 	gsl_vector *lead_in_v;
 	gsl_vector *lead_out_v;
+	// dual-stage coarse channels (vector type only). When enabled, the device
+	// takes the usual 2-element [y, x] error but outputs 4 elements:
+	//   [0] x_fine  [1] y_fine  [2] x_coarse  [3] y_coarse
+	// The fine channels are the existing PID above; the coarse channels are an
+	// independent PID per axis with its own gains, gated with hysteresis on
+	// the VOLTAGE the fine channel is commanding: a coarse channel activates
+	// when its fine channel leaves [coarse_on_low, coarse_on_high] (i.e. is
+	// running out of travel) and deactivates when the fine channel returns
+	// within [coarse_off_low, coarse_off_high], at which point its output
+	// FREEZES at the value that brought the fine channel back in -- the
+	// coarse stage must hold the position it walked to, not snap back to bias.
+	bool coarse;
+	// coarse gains, same base-is-x / _y-inherits convention as p/p_y above
+	double coarse_p, coarse_i, coarse_d, coarse_g;
+	double coarse_p_y, coarse_i_y, coarse_d_y, coarse_g_y;
+	// the gate watches the fine channel's output voltage, so it needs the
+	// same volts = offset + cmd*scale mapping the DAC stage applies; these
+	// must mirror the piplate_bridge scale/offset of the fine channels
+	double fine_scale, fine_offset;		// x fine channel
+	double fine_scale_y, fine_offset_y;	// y fine channel
+	// hysteresis thresholds, in volts; the off window must sit inside the
+	// on window or the gate would chatter
+	double coarse_on_low, coarse_on_high;
+	double coarse_off_low, coarse_off_high;
+	// per-axis coarse state, indexed [0]=x, [1]=y
+	bool coarse_active[2];		// gate state
+	double coarse_acc[2];		// integrator accumulator
+	double coarse_pre[2];		// previous error, for the derivative
+	double coarse_res[2];		// last output; held while inactive
+	// start of the current status-report window (s); 0 until seeded
+	double diag_t0;
+	// narrowband line rejection, per axis: [0] = y (element 0), [1] = x
+	// (element 1); see struct aylp_pid_line above
+	struct aylp_pid_line line[2][AYLP_PID_MAX_LINES];
+	size_t n_lines[2];
+	// total command->error loop delay (s) used for the default demod phase
+	double line_delay;
 };
 
 // initialize pid device

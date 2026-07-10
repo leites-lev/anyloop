@@ -1,0 +1,98 @@
+{
+	"_comment": {
+		"1": "Open-loop plant Bode of the x/tilt axis: command -> FSM -> camera -> CoM.",
+		"2": "SOFTWARE injection: bode_plot replaces the x element (1; CoM is [y, x])",
+		"3": "with a sine each iteration, and piplate_bridge writes offset + sine*scale",
+		"4": "to DAC ch1 every cycle. Camera/CoM settings match the current steering",
+		"5": "geometry (64x64, exp 330, gain 100 -> 2310 Hz loop). Whole-frame CoM, no",
+		"6": "tracking/acquisition: bode_plot injects from the first frame, so there",
+		"7": "must be no acquisition phase contaminating the first sweep points.",
+		"8": "No PID is in the loop, so the command IS the sine = open loop. Phase is",
+		"9": "measured from wall-clock time and includes the full transport delay",
+		"10": "(measured separately: ~1.7 ms at this frame rate).",
+		"11": "baud 921600: the port is USB CDC so the wire ignores baud, but the",
+		"12": "bridge paces itself by it -- at 115200 it would cap at ~440 writes/s",
+		"13": "and mangle the injected sine at a 2310 Hz loop rate.",
+		"14": "y/tip (ch0) and the coarse channels are parked at their bias voltages."
+	},
+	"pipeline": [
+		{
+			"uri": "file:/home/fsl/anyloop_levfork/anyloop/build/asi_source.so",
+			"params": {
+				"camera_name": "ASI290MM",
+				"width": 64,
+				"height": 64,
+				"exposure": 330,
+				"gain": 100,
+				"bandwidth": 100,
+				"high_speed": 1,
+				"start_x": 920,
+				"start_y": 488
+			}
+		},
+		{
+			"uri": "anyloop:center_of_mass",
+			"params": {
+				"_note": "tracked 25x25 window, initialized on the beam (frame centre) with no acquisition phase: bode_plot injects from the first frame, and the stray reflection at ROI (10,28) must stay out of the sum. Output is image-normalized, same as the loop sees.",
+				"region_height": 25,
+				"region_width": 25,
+				"threshold": 20,
+				"track": true,
+				"init_y": 32,
+				"init_x": 32
+			}
+		},
+		{
+			"_comment": "Replace the x/tilt element (1) with the swept sine; read CoM x as response",
+			"uri": "anyloop:bode_plot",
+			"params": {
+				"sample_rate": 2310.0,
+				"element": 1,
+				"inject": "replace",
+				"output": "raw",
+				"freq_start": 5.0,
+				"freq_end": 300.0,
+				"n_freqs": 40,
+				"n_settle": 200,
+				"n_cycles": 12.0,
+				"amplitude": 0.2,
+				"output_file": "fsm2310_bode_x.pdf"
+			}
+		},
+		{
+			"_note": "same mapping as steering_tuned.json: ch0=y(idx0, parked), ch1=x(idx1, driven), ch2/ch3 coarse parked. skip_unchanged: only the driven channel costs wire time.",
+			"uri": "anyloop:piplate_bridge",
+			"params": {
+				"port": "/dev/ttyACM0",
+				"board": 0,
+				"channel": [
+					0,
+					1,
+					2,
+					3
+				],
+				"index": [
+					0,
+					1,
+					0,
+					0
+				],
+				"scale": [
+					0,
+					-2,
+					0,
+					0
+				],
+				"offset": [
+					2,
+					2,
+					0.8,
+					2.394
+				],
+				"baud": 460800,
+				"wait_response": false,
+				"skip_unchanged": true
+			}
+		}
+	]
+}

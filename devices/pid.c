@@ -1,10 +1,52 @@
 #include <time.h>
 #include <math.h>
+#include <stdbool.h>
 
 #include "anyloop.h"
 #include "logging.h"
 #include "xalloc.h"
 #include "pid.h"
+
+// seconds between coarse-mode status reports (fine voltages + gate state)
+#define PID_DIAG_PERIOD 5.0
+
+
+/** One step of the series lead section, as a pure function of its input and the
+* stored filter state. Keeping it pure lets the anti-windup logic below evaluate
+* a candidate command before deciding whether to commit the filter state. */
+static inline double lead_eval(bool on, double b0, double b1, double a1,
+	double raw, double lead_in, double lead_out)
+{
+	return on ? (b0*raw + b1*lead_in - a1*lead_out) : raw;
+}
+
+
+/** Largest |accumulator| whose integral term -i*a still fits inside the output
+* clamp. With i == 0 the accumulator does not reach the output at all, so just
+* keep it bounded. */
+static inline double acc_limit(double i, double clamp)
+{
+	return (i != 0.0) ? clamp / fabs(i) : clamp;
+}
+
+
+/** Parse a scalar or array param into dst[0..max); returns the count. */
+static size_t parse_double_list(struct json_object *val, double *dst, size_t max)
+{
+	if (json_object_is_type(val, json_type_array)) {
+		size_t n = json_object_array_length(val);
+		if (n > max) {
+			log_warn("pid: list truncated to %zu entries", max);
+			n = max;
+		}
+		for (size_t k = 0; k < n; k++)
+			dst[k] = json_object_get_double(
+				json_object_array_get_idx(val, k));
+		return n;
+	}
+	dst[0] = json_object_get_double(val);
+	return 1;
+}
 
 
 int pid_init(struct aylp_device *self)
@@ -20,6 +62,7 @@ int pid_init(struct aylp_device *self)
 	data->i = 0.0;
 	data->d = 0.0;
 	data->clamp = 1.0;
+	data->start_delay = 0.0;	// no startup hold by default
 	data->g = 1.0;
 	data->p_y = data->i_y = data->d_y = data->g_y = -1.0;
 	data->dfilt = 0.0;	// derivative filter off by default
@@ -31,6 +74,30 @@ int pid_init(struct aylp_device *self)
 	data->lead_g = 1.0;
 	data->lead_fz_y = data->lead_fp_y = 0.0;
 	data->lead_g_y = 1.0;
+	// coarse channels off by default; gains 0 so an enabled-but-untuned
+	// coarse channel commands nothing
+	data->coarse = false;
+	data->coarse_p = data->coarse_i = data->coarse_d = 0.0;
+	data->coarse_g = 1.0;
+	data->coarse_p_y = data->coarse_i_y = data->coarse_d_y = -1.0;
+	data->coarse_g_y = -1.0;
+	// fine-channel volts mapping has no sane default; required in coarse mode
+	data->fine_scale = data->fine_scale_y = 0.0;
+	data->fine_offset = data->fine_offset_y = 0.0;
+	// gate thresholds (V): on when the fine channel leaves [0.5, 3.5],
+	// off when it returns within [1, 3]
+	data->coarse_on_low = 0.5;
+	data->coarse_on_high = 3.5;
+	data->coarse_off_low = 1.0;
+	data->coarse_off_high = 3.0;
+
+	// line-rejection staging; assembled into data->line after the parse.
+	// index [1] = x (base params), [0] = y, matching the p/p_y convention
+	double lfreq[2][AYLP_PID_MAX_LINES];
+	double lphase[2][AYLP_PID_MAX_LINES];
+	size_t n_lphase[2] = {0, 0};
+	double lgain[2][AYLP_PID_MAX_LINES];
+	size_t n_lgain[2] = {0, 0};
 
 	// parse parameters
 	if (!self->params) {
@@ -81,6 +148,10 @@ int pid_init(struct aylp_device *self)
 		} else if (!strcmp(key, "deadbandy")) {
 			data->deadband_y = json_object_get_double(val);
 			log_trace("deadbandy = %G", data->deadband_y);
+		} else if (!strcmp(key, "start_delay")) {
+			data->start_delay = json_object_get_double(val);
+			if (data->start_delay < 0) data->start_delay = 0;
+			log_trace("start_delay = %G s", data->start_delay);
 		} else if (!strcmp(key, "clamp")) {
 			data->clamp = json_object_get_double(val);
 			if (data->clamp < 0)
@@ -104,6 +175,70 @@ int pid_init(struct aylp_device *self)
 		} else if (!strcmp(key, "lead_gy")) {
 			data->lead_g_y = json_object_get_double(val);
 			log_trace("lead_gy = %G", data->lead_g_y);
+		} else if (!strcmp(key, "lines")) {
+			data->n_lines[1] = parse_double_list(val, lfreq[1],
+				AYLP_PID_MAX_LINES);
+		} else if (!strcmp(key, "linesy")) {
+			data->n_lines[0] = parse_double_list(val, lfreq[0],
+				AYLP_PID_MAX_LINES);
+		} else if (!strcmp(key, "line_gain")) {
+			n_lgain[1] = parse_double_list(val, lgain[1],
+				AYLP_PID_MAX_LINES);
+		} else if (!strcmp(key, "line_gainy")) {
+			n_lgain[0] = parse_double_list(val, lgain[0],
+				AYLP_PID_MAX_LINES);
+		} else if (!strcmp(key, "line_delay")) {
+			data->line_delay = json_object_get_double(val);
+			log_trace("line_delay = %G s", data->line_delay);
+		} else if (!strcmp(key, "line_phase")) {
+			n_lphase[1] = parse_double_list(val, lphase[1],
+				AYLP_PID_MAX_LINES);
+		} else if (!strcmp(key, "line_phasey")) {
+			n_lphase[0] = parse_double_list(val, lphase[0],
+				AYLP_PID_MAX_LINES);
+		} else if (!strcmp(key, "coarse")) {
+			data->coarse = json_object_get_boolean(val);
+			log_trace("coarse = %d", data->coarse);
+		} else if (!strcmp(key, "coarse_p")) {
+			data->coarse_p = json_object_get_double(val);
+			log_trace("coarse_p = %G", data->coarse_p);
+		} else if (!strcmp(key, "coarse_i")) {
+			data->coarse_i = json_object_get_double(val);
+			log_trace("coarse_i = %G", data->coarse_i);
+		} else if (!strcmp(key, "coarse_d")) {
+			data->coarse_d = json_object_get_double(val);
+			log_trace("coarse_d = %G", data->coarse_d);
+		} else if (!strcmp(key, "coarse_g")) {
+			data->coarse_g = json_object_get_double(val);
+			log_trace("coarse_g = %G", data->coarse_g);
+		} else if (!strcmp(key, "coarse_py")) { data->coarse_p_y = json_object_get_double(val);
+		} else if (!strcmp(key, "coarse_iy")) { data->coarse_i_y = json_object_get_double(val);
+		} else if (!strcmp(key, "coarse_dy")) { data->coarse_d_y = json_object_get_double(val);
+		} else if (!strcmp(key, "coarse_gy")) { data->coarse_g_y = json_object_get_double(val);
+		} else if (!strcmp(key, "fine_scale")) {
+			data->fine_scale = json_object_get_double(val);
+			log_trace("fine_scale = %G", data->fine_scale);
+		} else if (!strcmp(key, "fine_offset")) {
+			data->fine_offset = json_object_get_double(val);
+			log_trace("fine_offset = %G", data->fine_offset);
+		} else if (!strcmp(key, "fine_scaley")) {
+			data->fine_scale_y = json_object_get_double(val);
+			log_trace("fine_scaley = %G", data->fine_scale_y);
+		} else if (!strcmp(key, "fine_offsety")) {
+			data->fine_offset_y = json_object_get_double(val);
+			log_trace("fine_offsety = %G", data->fine_offset_y);
+		} else if (!strcmp(key, "coarse_on_low_v")) {
+			data->coarse_on_low = json_object_get_double(val);
+			log_trace("coarse_on_low_v = %G", data->coarse_on_low);
+		} else if (!strcmp(key, "coarse_on_high_v")) {
+			data->coarse_on_high = json_object_get_double(val);
+			log_trace("coarse_on_high_v = %G", data->coarse_on_high);
+		} else if (!strcmp(key, "coarse_off_low_v")) {
+			data->coarse_off_low = json_object_get_double(val);
+			log_trace("coarse_off_low_v = %G", data->coarse_off_low);
+		} else if (!strcmp(key, "coarse_off_high_v")) {
+			data->coarse_off_high = json_object_get_double(val);
+			log_trace("coarse_off_high_v = %G", data->coarse_off_high);
 		} else {
 			log_warn("Unknown parameter \"%s\"", key);
 		}
@@ -112,8 +247,71 @@ int pid_init(struct aylp_device *self)
 	if (data->i_y < 0) data->i_y = data->i;
 	if (data->d_y < 0) data->d_y = data->d;
 	if (data->g_y < 0) data->g_y = data->g;
+	// assemble the line-rejection oscillators; a gain list shorter than
+	// the line list extends with its last element (scalar = same for all)
+	if ((data->n_lines[0] || data->n_lines[1])
+			&& data->type != AYLP_T_VECTOR) {
+		log_error("line rejection needs type=vector.");
+		return -1;
+	}
+	for (int ax = 0; ax < 2; ax++) for (size_t k = 0;
+			k < data->n_lines[ax]; k++) {
+		struct aylp_pid_line *ln = &data->line[ax][k];
+		ln->f = lfreq[ax][k];
+		if (ln->f <= 0.0) {
+			log_error("line frequency must be > 0; got %G", ln->f);
+			return -1;
+		}
+		if (k < n_lgain[ax]) ln->g = lgain[ax][k];
+		else if (n_lgain[ax]) ln->g = lgain[ax][n_lgain[ax]-1];
+		else if (n_lgain[1]) ln->g = lgain[1][n_lgain[1]-1];
+		else ln->g = 20.0;
+		ln->phi = (k < n_lphase[ax])
+			? lphase[ax][k] * M_PI / 180.0
+			: -2.0 * M_PI * ln->f * data->line_delay;
+		log_info("pid: %c line rejection at %G Hz, gain %G/s, "
+			"path phase %.1f deg", ax ? 'x' : 'y', ln->f, ln->g,
+			ln->phi * 180.0 / M_PI);
+	}
 	if (data->dfilt_y < 0) data->dfilt_y = data->dfilt;
 	if (data->deadband_y < 0) data->deadband_y = data->deadband;
+	// coarse-channel inheritance and hysteresis sanity
+	if (data->coarse_p_y < 0) data->coarse_p_y = data->coarse_p;
+	if (data->coarse_i_y < 0) data->coarse_i_y = data->coarse_i;
+	if (data->coarse_d_y < 0) data->coarse_d_y = data->coarse_d;
+	if (data->coarse_g_y < 0) data->coarse_g_y = data->coarse_g;
+	if (data->coarse && data->type != AYLP_T_VECTOR) {
+		log_error("coarse channels need type=vector.");
+		return -1;
+	}
+	if (data->coarse
+			&& (data->fine_scale == 0.0 || data->fine_scale_y == 0.0)) {
+		// without the volts mapping the gate would compare garbage
+		log_error("coarse mode needs fine_scale/fine_offset (and the y "
+			"variants) matching the DAC stage's scale/offset for "
+			"the fine channels.");
+		return -1;
+	}
+	// the off window must sit inside the on window: a fine voltage that is
+	// past an on threshold but already inside the off window would toggle
+	// the gate every iteration
+	if (data->coarse_off_low < data->coarse_on_low) {
+		log_warn("coarse_off_low_v (%G) < coarse_on_low_v (%G); "
+			"raising it", data->coarse_off_low, data->coarse_on_low);
+		data->coarse_off_low = data->coarse_on_low;
+	}
+	if (data->coarse_off_high > data->coarse_on_high) {
+		log_warn("coarse_off_high_v (%G) > coarse_on_high_v (%G); "
+			"lowering it",
+			data->coarse_off_high, data->coarse_on_high);
+		data->coarse_off_high = data->coarse_on_high;
+	}
+	if (data->coarse && data->coarse_off_low > data->coarse_off_high) {
+		log_error("coarse_off_low_v (%G) > coarse_off_high_v (%G); the "
+			"gate could never deactivate.",
+			data->coarse_off_low, data->coarse_off_high);
+		return -1;
+	}
 	// make sure we didn't miss any params
 	if (!data->type) {
 		log_error("You must provide valid type param.");
@@ -179,22 +377,27 @@ int pid_proc(struct aylp_device *self, struct aylp_state *state)
 
 	switch (data->type) {
 	case AYLP_T_VECTOR: {
-		gsl_vector *a = data->acc_v;
-		gsl_vector *p = data->pre_v;
-		gsl_vector *r = data->res_v;
 		gsl_vector *s = state->vector;
+		if (UNLIKELY(data->coarse && s->size != 2)) {
+			log_error("coarse mode needs a 2-element [y, x] error "
+				"vector; got %zu elements", s->size);
+			return -1;
+		}
+		// coarse mode fans the 2-element error out to 4 output channels:
+		// [x_fine, y_fine, x_coarse, y_coarse]
+		size_t out_size = data->coarse ? 4 : s->size;
 		// check if we need to (re)initialize
-		if (a->size != s->size) {
+		if (data->acc_v->size != s->size) {
 			xfree_type(gsl_vector, data->acc_v);
 			data->acc_v = xcalloc_type(gsl_vector, s->size);
 		}
-		if (p->size != s->size) {
+		if (data->pre_v->size != s->size) {
 			xfree_type(gsl_vector, data->pre_v);
 			data->pre_v = xcalloc_type(gsl_vector, s->size);
 		}
-		if (r->size != s->size) {
+		if (data->res_v->size != out_size) {
 			xfree_type(gsl_vector, data->res_v);
-			data->res_v = xmalloc_type(gsl_vector, s->size);
+			data->res_v = xmalloc_type(gsl_vector, out_size);
 		}
 		// derivative-filter state, zeroed so it starts at rest
 		if (data->dfd_v->size != s->size) {
@@ -210,8 +413,67 @@ int pid_proc(struct aylp_device *self, struct aylp_state *state)
 			xfree_type(gsl_vector, data->lead_out_v);
 			data->lead_out_v = xcalloc_type(gsl_vector, s->size);
 		}
+		// Read these only AFTER the reallocs above. They free the old vectors
+		// and install new ones, so any pointer captured beforehand dangles --
+		// and the very first proc always reallocs, because init() sizes these
+		// to zero.
+		gsl_vector *a = data->acc_v;
+		gsl_vector *p = data->pre_v;
+		gsl_vector *r = data->res_v;
+
+		// Startup hold: park the command at zero and keep the integrator
+		// empty until start_delay has elapsed. A coarse stage takes time to
+		// walk the beam near centre; without this the integrator spends that
+		// time winding on a huge error and the fine actuator is already at its
+		// rail the moment it is allowed to move.
+		if (UNLIKELY(!data->started)) {
+			double now = tp1.tv_sec + 1E-9 * tp1.tv_nsec;
+			if (data->t0 == 0.0) data->t0 = now;
+			if (now - data->t0 < data->start_delay) {
+				for (size_t j = 0; j < s->size; j++) {
+					a->data[j*a->stride] = 0.0;
+					// track the error so the derivative doesn't
+					// spike on the first live sample
+					p->data[j*p->stride] = s->data[j*s->stride];
+					data->dfd_v->data[
+						j*data->dfd_v->stride] = 0.0;
+					data->lead_in_v->data[
+						j*data->lead_in_v->stride] = 0.0;
+					data->lead_out_v->data[
+						j*data->lead_out_v->stride] = 0.0;
+				}
+				gsl_vector_set_zero(r);
+				// keep the coarse channels parked and untriggered too
+				for (int c = 0; c < 2; c++) {
+					data->coarse_active[c] = false;
+					data->coarse_acc[c] = 0.0;
+					data->coarse_res[c] = 0.0;
+					data->coarse_pre[c] = s->data[
+						(c ? 0 : 1) * s->stride];
+				}
+				// and the line-rejection weights empty
+				for (int ax = 0; ax < 2; ax++)
+				for (size_t k = 0; k < data->n_lines[ax]; k++)
+					data->line[ax][k].a =
+						data->line[ax][k].b = 0.0;
+				state->vector = data->res_v;
+				if (data->coarse) {
+					state->header.log_dim.y = r->size;
+					state->header.log_dim.x = 1;
+				}
+				break;
+			}
+			data->started = true;
+			if (data->start_delay > 0.0)
+				log_info("pid: released after %.2f s startup hold",
+					now - data->t0);
+		}
+
 		// loop over elements and apply PID control
 		for (size_t j = 0; j < s->size; j++) {
+			// coarse mode reorders the outputs: input is [y, x] but the
+			// output channels are [x_fine, y_fine, x_coarse, y_coarse]
+			size_t jr = data->coarse ? (j ? 0 : 1) : j;
 			double pj = j ? data->p : data->p_y;
 			double ij = j ? data->i : data->i_y;
 			double dj = j ? data->d : data->d_y;
@@ -222,15 +484,11 @@ int pid_proc(struct aylp_device *self, struct aylp_state *state)
 			// chattering on quantization/relay nonlinearities at the null
 			double e = s->data[j*s->stride];
 			if (e < dbj && e > -dbj) e = 0.0;
-			// update accumulator and clamp if needed
-			a->data[j*a->stride] = gj * a->data[j*a->stride] + dt * e;
-			if (a->data[j*a->stride] > data->clamp)
-				a->data[j*a->stride] = data->clamp;
-			else if (a->data[j*a->stride] < -data->clamp)
-				a->data[j*a->stride] = -data->clamp;
 			// derivative term, optionally low-passed at dfj Hz to limit
 			// noise gain: D = s/(1+s/wf) via backward Euler. Reduces to the
 			// raw difference (e-e_prev)/dt as the cutoff -> infinity.
+			// Computed before the integrator so the anti-windup check below
+			// can evaluate the whole command, not just its integral part.
 			double de = (e - p->data[j*p->stride]) / dt;
 			if (dfj > 0.0) {
 				double wf = 2.0*M_PI*dfj;
@@ -239,12 +497,6 @@ int pid_proc(struct aylp_device *self, struct aylp_state *state)
 					/ (1.0 + wf*dt);
 			}
 			data->dfd_v->data[j*data->dfd_v->stride] = de;
-			// raw PID output
-			double raw =
-				- pj * e
-				- ij * a->data[j*a->stride]
-				- dj * de
-			;
 			// per-axis series lead compensator on the PID output:
 			//   C(s) = g*(s + 2pi*fz) / (s + 2pi*fp)
 			// bilinear-transformed with the live dt so it tracks the
@@ -254,53 +506,212 @@ int pid_proc(struct aylp_device *self, struct aylp_state *state)
 			double fzj = j ? data->lead_fz : data->lead_fz_y;
 			double fpj = j ? data->lead_fp : data->lead_fp_y;
 			double glj = j ? data->lead_g  : data->lead_g_y;
-			double out = raw;
-			if (fpj > 0.0) {
+			bool lead_on = fpj > 0.0;
+			double b0 = 0.0, b1 = 0.0, a1 = 0.0;
+			if (lead_on) {
 				double k = 2.0 / dt;            // bilinear 2/T
 				double wz = 2.0*M_PI*fzj;
 				double wp = 2.0*M_PI*fpj;
 				double a0 = k + wp;             // normalizing term
-				double b0 = glj * (k + wz) / a0;
-				double b1 = glj * (wz - k) / a0;
-				double a1 = (wp - k) / a0;
-				double li = data->lead_in_v->data[j*data->lead_in_v->stride];
-				double lo = data->lead_out_v->data[j*data->lead_out_v->stride];
-				out = b0*raw + b1*li - a1*lo;
+				b0 = glj * (k + wz) / a0;
+				b1 = glj * (wz - k) / a0;
+				a1 = (wp - k) / a0;
+			}
+			double li = data->lead_in_v->data[j*data->lead_in_v->stride];
+			double lo = data->lead_out_v->data[j*data->lead_out_v->stride];
+
+			// --- integrator, with anti-windup ---------------------------
+			// The accumulator reaches the command as -ij*a, but the command
+			// is clamped to +-clamp. Bounding `a` at +-clamp (as this used
+			// to) therefore lets the integral term range over +-ij*clamp --
+			// ij times past anything the output can express. After a
+			// saturating transient the accumulator has to unwind all of that
+			// excess before the command even leaves the rail, so recovery
+			// takes ij times longer than it should. That is windup, and at
+			// ij=300 it is a factor of 300. Two guards:
+			//   1. bound the accumulator so |ij*a| <= clamp;
+			//   2. conditional integration -- when the command is already
+			//      railed, don't integrate a sample that pushes it further
+			//      into the rail (the leak still applies).
+			double a_prev = a->data[j*a->stride];
+			double a_leak = gj * a_prev;	// leak, before this sample's error
+			double a_try = a_leak + dt * e;
+			double a_max = acc_limit(ij, data->clamp);
+			if (a_try > a_max) a_try = a_max;
+			else if (a_try < -a_max) a_try = -a_max;
+
+			double raw = - pj*e - ij*a_try - dj*de;
+			double out = lead_eval(lead_on, b0, b1, a1, raw, li, lo);
+			// how far this sample's integration moved the command
+			double push = -ij * (a_try - a_leak);
+			if (UNLIKELY((out > data->clamp && push > 0.0)
+					|| (out < -data->clamp && push < 0.0))) {
+				a_try = a_leak;
+				raw = - pj*e - ij*a_try - dj*de;
+				out = lead_eval(lead_on, b0, b1, a1, raw, li, lo);
+			}
+			a->data[j*a->stride] = a_try;
+			if (lead_on) {
 				data->lead_in_v->data[j*data->lead_in_v->stride] = raw;
 				data->lead_out_v->data[j*data->lead_out_v->stride] = out;
 			}
-			r->data[j*r->stride] = out;
+			// narrowband internal-model line rejection ([y, x] only):
+			// each oscillator's weights integrate the error demodulated
+			// at its frequency, rotated by the command->error path
+			// phase (filtered-x LMS). Adding the remodulated weights to
+			// the command gives infinite loop gain exactly at f, so a
+			// steady line is rejected even above crossover.
+			if (j < 2 && data->n_lines[j]) {
+				double u = 0.0;
+				// like the integrator's conditional integration:
+				// don't adapt on samples the rail would distort
+				bool railed = out >= data->clamp
+					|| out <= -data->clamp;
+				for (size_t k = 0; k < data->n_lines[j]; k++) {
+					struct aylp_pid_line *ln =
+						&data->line[j][k];
+					ln->th += 2.0*M_PI*ln->f*dt;
+					if (ln->th > 2.0*M_PI)
+						ln->th -= 2.0*M_PI;
+					if (LIKELY(!railed)) {
+						double w = ln->g * dt * e;
+						ln->a -= w*cos(ln->th + ln->phi);
+						ln->b -= w*sin(ln->th + ln->phi);
+						// one line can never rail the
+						// command on its own
+						if (ln->a > data->clamp)
+							ln->a = data->clamp;
+						else if (ln->a < -data->clamp)
+							ln->a = -data->clamp;
+						if (ln->b > data->clamp)
+							ln->b = data->clamp;
+						else if (ln->b < -data->clamp)
+							ln->b = -data->clamp;
+					}
+					u += ln->a*cos(ln->th)
+						+ ln->b*sin(ln->th);
+				}
+				out += u;
+			}
+			r->data[jr*r->stride] = out;
 			// clamp result if needed
-			if (r->data[j*r->stride] > data->clamp)
-				r->data[j*r->stride] = data->clamp;
-			else if (r->data[j*r->stride] < -data->clamp)
-				r->data[j*r->stride] = -data->clamp;
+			if (r->data[jr*r->stride] > data->clamp)
+				r->data[jr*r->stride] = data->clamp;
+			else if (r->data[jr*r->stride] < -data->clamp)
+				r->data[jr*r->stride] = -data->clamp;
 			// update previous
 			p->data[j*p->stride] = e;
 		}
+		// coarse channels: an independent PID per axis, gated with
+		// hysteresis on the VOLTAGE the fine channel is commanding.
+		// Activates when the fine channel leaves [on_low, on_high] --
+		// i.e. is running out of travel -- and deactivates when the fine
+		// channel returns within [off_low, off_high], at which point the
+		// output FREEZES where it is: the coarse stage has walked in and
+		// taken over the offset, and must hold that position, not snap
+		// back to bias (which would just rail the fine channel again).
+		if (data->coarse) for (int c = 0; c < 2; c++) {
+			// c: 0 = x (input element 1, output 2), 1 = y (input 0, output 3)
+			double e = s->data[(c ? 0 : 1) * s->stride];
+			double cp = c ? data->coarse_p_y : data->coarse_p;
+			double ci = c ? data->coarse_i_y : data->coarse_i;
+			double cd = c ? data->coarse_d_y : data->coarse_d;
+			double cg = c ? data->coarse_g_y : data->coarse_g;
+			// the voltage the DAC stage will produce for this axis's
+			// fine command (result element c, already clamped above)
+			double fs = c ? data->fine_scale_y : data->fine_scale;
+			double fo = c ? data->fine_offset_y : data->fine_offset;
+			double v = fo + r->data[c*r->stride] * fs;
+			if (!data->coarse_active[c]
+					&& (v <= data->coarse_on_low
+						|| v >= data->coarse_on_high)) {
+				data->coarse_active[c] = true;
+				// track the error so the derivative doesn't spike
+				// on the first active sample
+				data->coarse_pre[c] = e;
+				log_info("pid: coarse %c on (fine channel at "
+					"%.2f V)", c ? 'y' : 'x', v);
+			} else if (data->coarse_active[c]
+					&& v >= data->coarse_off_low
+					&& v <= data->coarse_off_high) {
+				data->coarse_active[c] = false;
+				log_info("pid: coarse %c off (fine channel back "
+					"to %.2f V); holding output at %.4f",
+					c ? 'y' : 'x', v, data->coarse_res[c]);
+			}
+			if (data->coarse_active[c]) {
+				double de = (e - data->coarse_pre[c]) / dt;
+				// integrator with leak and anti-windup, as above
+				double a_leak = cg * data->coarse_acc[c];
+				double a_try = a_leak + dt * e;
+				double a_max = acc_limit(ci, data->clamp);
+				if (a_try > a_max) a_try = a_max;
+				else if (a_try < -a_max) a_try = -a_max;
+				double out = - cp*e - ci*a_try - cd*de;
+				double push = -ci * (a_try - a_leak);
+				if (UNLIKELY((out > data->clamp && push > 0.0)
+						|| (out < -data->clamp && push < 0.0))) {
+					a_try = a_leak;
+					out = - cp*e - ci*a_try - cd*de;
+				}
+				data->coarse_acc[c] = a_try;
+				if (out > data->clamp) out = data->clamp;
+				else if (out < -data->clamp) out = -data->clamp;
+				data->coarse_res[c] = out;
+				data->coarse_pre[c] = e;
+			}
+			r->data[(2 + c)*r->stride] = data->coarse_res[c];
+		}
 		state->vector = data->res_v;
+		if (data->coarse) {
+			// the output no longer has the input's shape; keep the
+			// header honest for downstream sinks
+			state->header.log_dim.y = r->size;
+			state->header.log_dim.x = 1;
+			// periodic status: the voltages the fine channels are
+			// commanding, and each coarse gate's state. The on/off
+			// transitions log immediately; this is the heartbeat in
+			// between, for watching how close the fine stage is to
+			// handing off.
+			double now = tp1.tv_sec + 1E-9 * tp1.tv_nsec;
+			if (UNLIKELY(!data->diag_t0)) data->diag_t0 = now;
+			if (UNLIKELY(now - data->diag_t0 >= PID_DIAG_PERIOD)) {
+				data->diag_t0 = now;
+				double vx = data->fine_offset
+					+ r->data[0] * data->fine_scale;
+				double vy = data->fine_offset_y
+					+ r->data[1*r->stride] * data->fine_scale_y;
+				log_info("pid: fine x %.3f V, y %.3f V | coarse "
+					"x %s (out %+.4f), y %s (out %+.4f)",
+					vx, vy,
+					data->coarse_active[0] ? "ON" : "off",
+					data->coarse_res[0],
+					data->coarse_active[1] ? "ON" : "off",
+					data->coarse_res[1]);
+			}
+		}
 		break;
 	}
 
 	case AYLP_T_MATRIX: {
-		gsl_matrix *a = data->acc_m;
-		gsl_matrix *p = data->pre_m;
-		gsl_matrix *r = data->res_m;
 		gsl_matrix *s = state->matrix;
 		// check if we need to (re)initialize
-		if (UNLIKELY(a->size1 != s->size1 || a->size2 != s->size2)) {
+		if (UNLIKELY(data->acc_m->size1 != s->size1
+				|| data->acc_m->size2 != s->size2)) {
 			xfree_type(gsl_matrix, data->acc_m);
 			data->acc_m = xcalloc_type(gsl_matrix,
 				s->size1, s->size2
 			);
 		}
-		if (UNLIKELY(p->size1 != s->size1 || p->size2 != s->size2)) {
+		if (UNLIKELY(data->pre_m->size1 != s->size1
+				|| data->pre_m->size2 != s->size2)) {
 			xfree_type(gsl_matrix, data->pre_m);
 			data->pre_m = xcalloc_type(gsl_matrix,
 				s->size1, s->size2
 			);
 		}
-		if (UNLIKELY(r->size1 != s->size1 || r->size2 != s->size2)) {
+		if (UNLIKELY(data->res_m->size1 != s->size1
+				|| data->res_m->size2 != s->size2)) {
 			xfree_type(gsl_matrix, data->res_m);
 			data->res_m = xmalloc_type(gsl_matrix,
 				s->size1, s->size2
@@ -313,19 +724,39 @@ int pid_proc(struct aylp_device *self, struct aylp_state *state)
 				s->size1, s->size2
 			);
 		}
+		// read only after the reallocs above; see the vector case
+		gsl_matrix *a = data->acc_m;
+		gsl_matrix *p = data->pre_m;
+		gsl_matrix *r = data->res_m;
+
+		// startup hold; see the vector case
+		if (UNLIKELY(!data->started)) {
+			double now = tp1.tv_sec + 1E-9 * tp1.tv_nsec;
+			if (data->t0 == 0.0) data->t0 = now;
+			if (now - data->t0 < data->start_delay) {
+				for (size_t y = 0; y < s->size1; y++)
+				for (size_t x = 0; x < s->size2; x++) {
+					a->data[y*a->tda+x] = 0.0;
+					p->data[y*p->tda+x] = s->data[y*s->tda+x];
+					r->data[y*r->tda+x] = 0.0;
+					data->dfd_m->data[y*data->dfd_m->tda+x] = 0.0;
+				}
+				state->matrix = data->res_m;
+				break;
+			}
+			data->started = true;
+			if (data->start_delay > 0.0)
+				log_info("pid: released after %.2f s startup hold",
+					now - data->t0);
+		}
 		// loop over elements and apply PID control
 		for (size_t y = 0; y < s->size1; y++) {
 			for (size_t x = 0; x < s->size2; x++) {
 				// deadband: ignore sub-threshold error (see vector case)
 				double e = s->data[y*s->tda+x];
 				if (e < data->deadband && e > -data->deadband) e = 0.0;
-				// update accumulator and clamp if needed
-				a->data[y*a->tda+x] += dt * e;
-				if (a->data[y*a->tda+x] > data->clamp)
-					a->data[y*a->tda+x] = data->clamp;
-				else if (a->data[y*a->tda+x] < -data->clamp)
-					a->data[y*a->tda+x] = -data->clamp;
-				// derivative term, optionally low-passed (see vector case)
+				// derivative term, optionally low-passed (see vector case);
+				// computed first so anti-windup sees the whole command
 				double de = (e - p->data[y*p->tda+x]) / dt;
 				if (data->dfilt > 0.0) {
 					double wf = 2.0*M_PI*data->dfilt;
@@ -334,12 +765,23 @@ int pid_proc(struct aylp_device *self, struct aylp_state *state)
 						/ (1.0 + wf*dt);
 				}
 				data->dfd_m->data[y*data->dfd_m->tda+x] = de;
-				// apply pid params to result
-				r->data[y*r->tda+x] =
-					- data->p * e
-					- data->i * a->data[y*a->tda+x]
-					- data->d * de
-				;
+				// integrator with anti-windup; see the vector case for why
+				// the accumulator is bounded by clamp/|i| and not by clamp
+				// (note this path has never applied the `g` leak)
+				double a_prev = a->data[y*a->tda+x];
+				double a_try = a_prev + dt * e;
+				double a_max = acc_limit(data->i, data->clamp);
+				if (a_try > a_max) a_try = a_max;
+				else if (a_try < -a_max) a_try = -a_max;
+				double out = - data->p*e - data->i*a_try - data->d*de;
+				double push = -data->i * (a_try - a_prev);
+				if (UNLIKELY((out > data->clamp && push > 0.0)
+						|| (out < -data->clamp && push < 0.0))) {
+					a_try = a_prev;
+					out = - data->p*e - data->i*a_try - data->d*de;
+				}
+				a->data[y*a->tda+x] = a_try;
+				r->data[y*r->tda+x] = out;
 				// clamp result if needed
 				if (r->data[y*r->tda+x] > data->clamp)
 					r->data[y*r->tda+x] = data->clamp;

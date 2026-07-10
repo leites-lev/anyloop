@@ -29,6 +29,7 @@ project_source_files = [
 	'devices/tic_t834.c',
 	'devices/clamp.c',
 	'devices/biquad_filter.c',
+	'devices/kalman_filter.c',
 	'devices/device.c',
 	'devices/delay.c',
 	'devices/file_sink.c',
@@ -43,7 +44,8 @@ project_source_files = [
 	'devices/udp_source.c',
 	'devices/vonkarman_stream.c',
 	'devices/piplate_bridge.c',
-	'devices/bode_plot.c'
+	'devices/bode_plot.c',
+	'devices/latency_test.c'
 ]
 
 incdir = include_directories('libaylp')

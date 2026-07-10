@@ -27,6 +27,7 @@ int udp_sink_init(struct aylp_device *self)
 	}
 	memset(&(data->dest_sa), 0, sizeof(data->dest_sa));
 	data->dest_sa.sin_family = AF_INET;
+	data->decimation = 1;
 	int got_params = 0;	// use this to check for params in case ip is 0
 	if (!self->params) {
 		log_error("No params object found.");
@@ -50,6 +51,9 @@ int udp_sink_init(struct aylp_device *self)
 			);
 			got_params |= 2;
 			log_trace("port = 0x%X", data->dest_sa.sin_port);
+		} else if (!strcmp(key, "decimation")) {
+			data->decimation = json_object_get_uint64(val);
+			log_trace("decimation = %zu", data->decimation);
 		} else {
 			log_warn("Unknown parameter \"%s\"", key);
 		}
@@ -57,6 +61,10 @@ int udp_sink_init(struct aylp_device *self)
 	// make sure we didn't miss any params
 	if (got_params != (1|2)) {
 		log_error("You must provide all params: ip, port.");
+		return -1;
+	}
+	if (!data->decimation) {
+		log_error("decimation must be nonzero.");
 		return -1;
 	}
 	// we're not using sendto(), so we need to connect() the socket first
@@ -81,6 +89,12 @@ int udp_sink_init(struct aylp_device *self)
 int udp_sink_proc(struct aylp_device *self, struct aylp_state *state)
 {
 	struct aylp_udp_sink_data *data = self->device_data;
+	// bail before get_contiguous_bytes(), which may copy the whole block
+	if (data->countdown) {
+		data->countdown -= 1;
+		return 0;
+	}
+	data->countdown = data->decimation - 1;
 	// make data contiguous
 	int needs_free = get_contiguous_bytes(&data->bytes, state);
 	if (needs_free < 0) return needs_free;

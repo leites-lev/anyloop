@@ -1,50 +1,97 @@
 {
 	"_comment": {
-		"1": "Tip/tilt loop with a biquad filter ahead of the PID to keep",
-		"2": "loop gain off the ~80 Hz FSM resonance. Pipeline:",
-		"3": "  camera -> center_of_mass -> biquad_filter -> pid -> actuator",
-		"4": "fs is the measured loop rate (~815 Hz here; check with -p).",
-		"5": "Start with the lowpass below. To switch to a surgical notch,",
-		"6": "set mode=notch, f0=80, q~2.3 (see the commented block)."
+		"1": "Tip/tilt loop, integrator-only, designed from the 2026-07-10",
+		"2": "measurements (fsm2310_bode_{x,y}.dat, latency_test): both axes",
+		"3": "are flat gain + pure delay up to 300 Hz -- x |P|=0.43, y |P|=0.30",
+		"4": "(minmax per command unit), delay ~1.4 ms plus ~0.6 ms of DAC",
+		"5": "update ZOH at baud 460800. No resonance below 300 Hz, so no",
+		"6": "biquad/notch is needed (the old 64/94/120 Hz numbers were from",
+		"7": "stale sweeps with different DAC step sizes and serial bufferbloat).",
+		"8": "Loop rate ~2400 Hz at 64x64. Crossover = i*|P|/2pi. Gains below",
+		"9": "are the winners of the 2026-07-10 closed-loop trials (30 s runs,",
+		"10": "PSD-scored): x residual 0.63 px, y 0.27 px vs 0.75/0.48 open.",
+		"11": "Do NOT raise i past ~600: the residual is dominated by vibration",
+		"12": "lines at 59.6 and 87.5 Hz that sit in the waterbed -- x gets",
+		"13": "WORSE at i=800 (0.68) and 900 (0.81). iy saturates at 1300",
+		"14": "(1700 is no better). Error-path notches at the lines helped the",
+		"15": "lines but their phase spill re-amplified 40-55 Hz; net wash.",
+		"16": "The real fixes for the lines are mechanical (59.6 is ~mains) or",
+		"17": "narrowband internal-model rejection, not more integrator gain.",
+		"18": "2026-07-10 (later): pid now has that internal-model rejection",
+		"19": "(lines/line_gain/line_phase params below). A/B-validated: kills",
+		"20": "x 22.08 Hz ~2-9x, x 59.63 ~3-5x, y 30.8 ~3-6x in PSD. Total RMS",
+		"21": "gain is small because the residual is broadband 25-100 Hz",
+		"22": "vibration, which narrowband rejection cannot touch. Lessons:",
+		"23": "keep oscillators >2 Hz apart (20.24+22.08 overlap and fight);",
+		"24": "keep gain <=20 on lines near crossover or the notch's local",
+		"25": "waterbed pumps 62-70 Hz; y 59.63 is NOT correctable from the y",
+		"26": "command (likely x crosstalk) -- do not add it back.",
+		"27": "VERIFIED 2026-07-10 evening, 120 s open + 120 s closed runs of",
+		"28": "exactly this config (steady state t>25 s, no rails, fs checked",
+		"29": "against the mains line): pointing error about the setpoint",
+		"30": "x 1.17 -> 0.63 px, y 5.18 -> 0.28 px (open loop parks ~5 px off",
+		"31": "in y and drifts ~1 px in x). Jitter about the mean: y 0.42 ->",
+		"32": "0.28; x 0.63 -> 0.63 -- a WASH in a quiet environment: closing",
+		"33": "x trades its line kills (22.08 Hz /2.8, via predictor+oscillator)",
+		"34": "against waterbed growth of the broadband 20-200 Hz floor. The x",
+		"35": "loop's real value is holding DC/drift and clamping the bad times:",
+		"36": "open-loop x jitter varied 0.63-0.91 px over the day while closed",
+		"37": "stayed 0.59-0.63. Do not judge tuning changes on <60 s runs or",
+		"38": "without a back-to-back baseline; the vibration environment is",
+		"39": "nonstationary (lines vary several-fold within hours)."
 	},
 	"pipeline": [
 		{
-			"uri": "file:/home/fsl/anyloop/build/asi_source.so",
+			"uri": "file:/home/fsl/anyloop_levfork/anyloop/build/asi_source.so",
 			"params": {
 				"camera_name": "ASI290MM",
-				"width":       72,
-				"height":      72,
-				"exposure":    1000,
-				"gain":        50,
-				"bandwidth":   100
+				"width":       64,
+				"height":      64,
+				"start_x":     920,
+				"start_y":     488,
+				"_note": "start_x/start_y centre the ROI on the beam's parked position, sensor ~(y 520, x 952) with the DAC biases below (coarse ch2=0.8 V, ch3=2.394 V). If the coarse biases change, re-derive these with a probe frame (0.7 V on ch2 moved the beam to y 507/x 947). 32x32 was tried 2026-07-10 and reverted: frame rate only rises 2400->~3060 Hz, delay drops just ~0.25 ms (camera fixed latency + DAC ZOH dominate), performance is identical, and the stray reflection ends up only 11 px from the beam. Remember CoM normalization: at 32x32 loop gain doubles, so i/iy and line gains must be halved (i=300/iy=700 was stable there).",
+				"exposure":    380,
+				"gain":        100,
+				"bandwidth":   100,
+				"high_speed":  1
 			}
 		},
 		{
 			"_comment": "Send raw frame to watch_steering.jl on port 64730",
+			"_note": "decimation must MATCH the 64731 sink below, so the frame and the CoM cross drawn together come from the same iteration. 64 gives ~36 Hz at a 2310 Hz loop -- about what a GR heatmap can redraw.",
 			"uri": "anyloop:udp_sink",
 			"params": {
-				"ip":   "127.0.0.1",
-				"port": "64730"
+				"ip":         "127.0.0.1",
+				"port":       "64730",
+				"decimation": 64
 			}
 		},
 		{
+			"_comment": "Track a 15x15 window centred on the previous CoM, so the stray reflection never enters the sum.",
+			"_note": "Output stays normalized across the whole 64x64 image, NOT the window: the setpoint is still frame centre and the PID gains below are unchanged. With the beam-centred ROI the stray reflection sits INSIDE the frame at ~(10, 28) and carries flux comparable to the beam, so the old whole-frame acquisition phase can settle between the two spots -- init the window on the beam (frame centre) explicitly instead. The reflection is 22 px from the beam, well outside the 15 px window.",
 			"uri": "anyloop:center_of_mass",
 			"params": {
-				"region_height": 72,
-				"region_width":  72,
-				"threshold":     100
+				"region_height":   15,
+				"region_width":    15,
+				"threshold":       20,
+				"track":           true,
+				"init_y":          32,
+				"init_x":          32
 			}
 		},
 		{
 			"_comment": "Send [y, x] CoM vector to watch_steering.jl on port 64731",
+			"_note": "keep decimation equal to the 64730 sink above",
 			"uri": "anyloop:udp_sink",
 			"params": {
-				"ip":   "127.0.0.1",
-				"port": "64731"
+				"ip":         "127.0.0.1",
+				"port":       "64731",
+				"decimation": 64
 			}
 		},
 		{
 			"_comment": "Send [y, x] CoM vector to watch_error_ts.jl on port 64732",
+			"_note": "NOT decimated: this is a time series, and dropping samples without an anti-alias filter folds high-frequency error back down into the band you're trying to read. The packets are ~48 bytes, so full rate is ~110 kB/s -- cheap.",
 			"uri": "anyloop:udp_sink",
 			"params": {
 				"ip":   "127.0.0.1",
@@ -52,14 +99,41 @@
 			}
 		},
 		{
+			"_note": "adaptive predictor (see doc/devices/kalman_filter.md): replaces the error with its own prediction ~2.1 ms (5 samples) ahead, so the pid acts on where the beam will be when the command lands. A/B-validated 2026-07-10: x steady-state RMS 0.91 -> 0.61 px alone, 0.59 with the pid line oscillators (they coexist fine); the 20-25 Hz lines drop ~5x. gainy is 0 because prediction on y PUMPED its 30.8 Hz line 3x -- y's ~62 Hz crossover loop reacts badly to the extra phase dynamics. Trains continuously; hands over along a 10 s ramp after start_delay.",
+			"uri": "anyloop:kalman_filter",
+			"params": {
+				"type": "vector",
+				"order": 60,
+				"horizon": 5,
+				"mu": 0.03,
+				"gain": 1.0,
+				"gainy": 0,
+				"ramp": 10.0,
+				"clamp": 1.0,
+				"start_delay": 2.0
+			}
+		},
+		{
+			"_note": "start_delay must be >= the piplate start_delay below. Holding the fine DAC channels without also holding the pid is useless: the integrator keeps winding on the large startup error behind the parked output, and the fine channel is at its rail the instant the hold expires. Base params are the x axis (element 1), *y the y axis (element 0). i sets the crossover: f_c = i*|P|/2pi with |P|x=0.43, |P|y=0.30.",
 			"uri": "anyloop:pid",
 			"params": {
 				"type": "vector",
-				"p": 3,
-				"i": 600,
+				"p": 0,
+				"py":0,
+				"i": 1200,
+				"iy": 1450,
 				"d": 0,
 				"clamp": 1.0,
-				"units": "minmax"
+				"units": "minmax",
+				"start_delay": 2.0,
+				"_lines": "narrowband below said 59.63 before internal-model rejection: one adaptive quadrature oscillator per measured disturbance line. Frequencies from 60 s high-res PSDs 2026-07-10; phases = measured bode plant phase + sensitivity phase at i=600/iy=1300 (empirically trimmed for 59.63). If i/iy change, the phases move -- re-derive or re-trim. Gain sets notch width ~g*|P*S|/pi Hz: 60 is fine below crossover, but 20 max near/above it (59.63) or the notch's own waterbed pumps 62-70 Hz.",
+				"lines": [22.08, 57.3],
+				"line_gain": [60, 20],
+				"line_phase": [56, 3],
+				"linesy": [30.80],
+				"line_gainy": [60],
+				"line_phasey": [60],
+				"line_delay": 0.002
 			}
 		},
 		{
@@ -71,29 +145,21 @@
 				"max": 1.0
 			}
 		},
-		
 		{
-			"_comment" : "Tilt, x axis (-)",
 			"uri": "anyloop:piplate_bridge",
 			"params": {
-				"port": "/dev/ttyACM0",
-				"board": 0,
-				"channel": 0,
-				"index": 1,
-				"scale": 0,
-				"offset": 2.63
-			}
-		},
-		{
-			"_comment" : "Tip, y axis (+)1.9368",
-			"uri": "anyloop:piplate_bridge",
-			"params": {
-				"port": "/dev/ttyACM0",
-				"board": 0,
-				"channel": 1,
-				"index": 0,
-				"scale": 0,
-				"offset": 0.94
+				"port":    "/dev/ttyACM0",
+				"board":   0,
+				"channel": [0,  1,  2, 3],
+				"index":   [0,  1,  0,    0],
+				"scale":   [2, -2,   0,   0],
+				"offset":  [2,  2, 0.8, 2.394],
+				"baud":    460800,
+				"_note1": "pid is NOT in coarse mode, so its output is plain [y, x]: ch0 (y fine, +2 V/unit) takes index 0, ch1 (x fine, -2 V/unit) index 1 -- verified by step test 2026-07-10 (ch0 -> CoM y, ch1 -> CoM x, positive i = negative feedback on both). Coarse scales are 0 (parked at bias) per the push-test rule: they had been left live at +-2 with unverified sign, which risks positive feedback; with the beam-centred ROI the fine stages have full authority and the coarse stages are not needed. The coarse biases (0.8, 2.394 V) are the ones the ROI position was derived under.",
+				"_note2": "baud 460800 is about pacing, not the wire: the port is USB CDC (baud is cosmetic) but the bridge throttles itself to ~440 cmds/s at the default 115200 -- at a 2310 Hz loop that is a ~2.3 ms command ZOH stacked on the 1.4 ms path delay. Measured 2026-07-10: the bridge drains ~1800 cmds/s; pacing at 460800 (~1770/s) keeps latency flat, while 921600 overruns the drain rate and bufferbloats ~10 ms into a full FIFO. Do not raise past 460800.",
+				"start_delay": [2.0, 2.0, 0, 0],
+				"wait_response": false,
+				"skip_unchanged": true
 			}
 		},
 		{

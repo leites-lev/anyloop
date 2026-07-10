@@ -1,5 +1,6 @@
 #include <pthread.h>
 #include <string.h>
+#include <time.h>
 
 #include "anyloop.h"
 #include "logging.h"
@@ -76,6 +77,13 @@ int center_of_mass_init(struct aylp_device *self)
 	data->region_width = 0;
 	data->thread_count = 1;
 	data->threshold = 0;
+	data->track = false;
+	data->init_y = -1;	// <0 => acquire from the brightest pixel
+	data->init_x = -1;
+	data->reacquire_after = 10;
+	data->acquire_seconds = 0.0;	// no acquisition phase by default
+	data->acquire_height = 0;	// 0 => the whole image
+	data->acquire_width = 0;
 	// parse parameters
 	if (!self->params) {
 		log_error("No params object found.");
@@ -100,6 +108,35 @@ int center_of_mass_init(struct aylp_device *self)
 		} else if (!strcmp(key, "threshold")) {
 			data->threshold = (unsigned char)json_object_get_int(val);
 			log_trace("threshold = %u", data->threshold);
+		} else if (!strcmp(key, "track")) {
+			data->track = json_object_get_boolean(val);
+			log_trace("track = %d", data->track);
+		} else if (!strcmp(key, "init_y")) {
+			data->init_y = json_object_get_int64(val);
+			log_trace("init_y = %ld", data->init_y);
+		} else if (!strcmp(key, "init_x")) {
+			data->init_x = json_object_get_int64(val);
+			log_trace("init_x = %ld", data->init_x);
+		} else if (!strcmp(key, "reacquire_after")) {
+			data->reacquire_after = json_object_get_uint64(val);
+			if (!data->reacquire_after) {
+				log_error("reacquire_after must be nonzero");
+				return -1;
+			}
+			log_trace("reacquire_after = %zu", data->reacquire_after);
+		} else if (!strcmp(key, "acquire_seconds")) {
+			data->acquire_seconds = json_object_get_double(val);
+			if (data->acquire_seconds < 0.0) {
+				log_error("acquire_seconds must be >= 0");
+				return -1;
+			}
+			log_trace("acquire_seconds = %G", data->acquire_seconds);
+		} else if (!strcmp(key, "acquire_height")) {
+			data->acquire_height = json_object_get_uint64(val);
+			log_trace("acquire_height = %zu", data->acquire_height);
+		} else if (!strcmp(key, "acquire_width")) {
+			data->acquire_width = json_object_get_uint64(val);
+			log_trace("acquire_width = %zu", data->acquire_width);
 		} else {
 			log_warn("Unknown parameter \"%s\"", key);
 		}
@@ -110,8 +147,23 @@ int center_of_mass_init(struct aylp_device *self)
 		);
 		return -1;
 	}
+	if ((data->init_y < 0) != (data->init_x < 0)) {
+		log_error("Provide both init_y and init_x, or neither");
+		return -1;
+	}
 
-	if (data->thread_count > 1) {
+	if (data->track) {
+		// the tracking window is a single region by definition, so there
+		// is nothing to hand out to a thread pool
+		if (data->thread_count > 1) {
+			log_warn("track mode uses one region; "
+				"ignoring thread_count = %zu", data->thread_count
+			);
+			data->thread_count = 1;
+		}
+		self->proc = &center_of_mass_proc_track;
+		self->fini = &center_of_mass_fini;
+	} else if (data->thread_count > 1) {
 		// start threads
 		data->threads = xmalloc(data->thread_count * sizeof(pthread_t));
 		for (size_t t = 0; t < data->thread_count; t++) {
@@ -211,6 +263,192 @@ int center_of_mass_proc(struct aylp_device *self, struct aylp_state *state)
 int center_of_mass_fini(struct aylp_device *self)
 {
 	xfree(self->device_data);
+	return 0;
+}
+
+
+/** Place the tracking window on the brightest pixel of the whole image.
+* Used to acquire on the first frame, and to recover after the beam has been
+* lost for reacquire_after frames. Note that this locks onto whatever is
+* brightest — if a stray reflection outpeaks the beam, pass init_y/init_x. */
+static void acquire_window(
+	struct aylp_center_of_mass_data *data, gsl_matrix_uchar *img
+) {
+	unsigned char best = 0;
+	size_t by = img->size1 / 2;
+	size_t bx = img->size2 / 2;
+	for (size_t i = 0; i < img->size1; i++) {
+		for (size_t j = 0; j < img->size2; j++) {
+			unsigned char v = img->data[i*img->tda + j];
+			if (v > best) { best = v; by = i; bx = j; }
+		}
+	}
+	data->win_y = by;
+	data->win_x = bx;
+}
+
+
+/** Slide the window centre so that a win_h by win_w window lies fully inside the
+* image. Callers must already have checked that the window is no bigger than the
+* image. */
+static void clamp_window(
+	struct aylp_center_of_mass_data *data,
+	size_t win_h, size_t win_w, size_t max_y, size_t max_x
+) {
+	size_t half_y = win_h / 2;
+	size_t half_x = win_w / 2;
+	if (data->win_y < half_y) data->win_y = half_y;
+	if (data->win_x < half_x) data->win_x = half_x;
+	if (data->win_y > max_y - win_h + half_y)
+		data->win_y = max_y - win_h + half_y;
+	if (data->win_x > max_x - win_w + half_x)
+		data->win_x = max_x - win_w + half_x;
+}
+
+
+static double com_monotonic_s(void)
+{
+	struct timespec t;
+	clock_gettime(CLOCK_MONOTONIC, &t);
+	return t.tv_sec + 1e-9 * t.tv_nsec;
+}
+
+
+/** Center of mass over a single window that follows the beam.
+*
+* Each frame the sum is taken over a region_height by region_width box centred
+* on the previous frame's center of mass, so anything outside that box — a stray
+* reflection elsewhere on the sensor, say — never enters the sum. The image
+* itself is untouched, so a udp_sink placed ahead of this device still shows the
+* whole frame.
+*
+* The output is normalized across the *whole image*, not the window. This is the
+* important part: the window chases the beam, so a window-relative coordinate
+* would sit near zero no matter where the beam actually was, and the loop would
+* have no error signal to act on. Normalizing to the image keeps the setpoint at
+* the image centre and keeps the error-per-pixel — hence the loop gain —
+* independent of the window size.
+*/
+int center_of_mass_proc_track(struct aylp_device *self, struct aylp_state *state)
+{
+	struct aylp_center_of_mass_data *data = self->device_data;
+	gsl_matrix_uchar *img = state->matrix_uchar;
+	size_t max_y = img->size1;
+	size_t max_x = img->size2;
+	if (UNLIKELY(data->region_height > max_y
+			|| data->region_width > max_x)) {
+		log_error("Tracking window is %zu by %zu but image is only "
+			"%zu by %zu", data->region_height, data->region_width,
+			max_y, max_x
+		);
+		return -1;
+	}
+	// allocate the com vector if needed; track mode emits a single y,x pair
+	if (UNLIKELY(!data->com || data->com->size < 2)) {
+		xfree_type(gsl_vector, data->com);
+		data->com = xmalloc_type(gsl_vector, 2);
+	}
+	if (UNLIKELY(!data->acquired)) {
+		if (data->init_y >= 0) {
+			data->win_y = (size_t)data->init_y;
+			data->win_x = (size_t)data->init_x;
+		} else {
+			acquire_window(data, img);
+		}
+		data->acquired = true;
+		data->acquiring = data->acquire_seconds > 0.0;
+		data->acquire_t0 = com_monotonic_s();
+		log_info("center_of_mass: acquired window at (%zu,%zu)%s",
+			data->win_y, data->win_x,
+			data->acquiring ? "; starting wide acquisition phase" : ""
+		);
+	}
+	// During the acquisition phase the sum runs over a wider window (the whole
+	// image by default). The point is that a wide window is flux-weighted over
+	// everything in it, so the centroid is dragged toward whichever spot carries
+	// the most light, rather than toward whichever spot the brightest-pixel scan
+	// happened to hit first in raster order. When the phase ends we narrow onto
+	// wherever that centroid settled.
+	size_t win_h = data->region_height;
+	size_t win_w = data->region_width;
+	if (UNLIKELY(data->acquiring)) {
+		win_h = data->acquire_height ? data->acquire_height : max_y;
+		win_w = data->acquire_width ? data->acquire_width : max_x;
+		if (win_h > max_y) win_h = max_y;
+		if (win_w > max_x) win_w = max_x;
+	}
+	clamp_window(data, win_h, win_w, max_y, max_x);
+	size_t org_y = data->win_y - win_h/2;
+	size_t org_x = data->win_x - win_w/2;
+
+	double y = 0.0, x = 0.0, s = 0.0;
+	for (size_t l = 0; l < win_h; l++) {
+		for (size_t m = 0; m < win_w; m++) {
+			unsigned char raw = img->data[
+				(org_y + l) * img->tda + org_x + m
+			];
+			unsigned char el = raw > data->threshold
+				? raw - data->threshold : 0;
+			// accumulate in image coordinates, not window ones
+			y += (org_y + l)*el;
+			x += (org_x + m)*el;
+			s += el;
+		}
+	}
+
+	if (LIKELY(s != 0.0)) {
+		double abs_y = y/s, abs_x = x/s;
+		data->last_y = -1.0 + 2*abs_y/(max_y - 1);
+		data->last_x = -1.0 + 2*abs_x/(max_x - 1);
+		// recentre the window for the next frame
+		data->win_y = (size_t)(abs_y + 0.5);
+		data->win_x = (size_t)(abs_x + 0.5);
+		data->lost = 0;
+	} else {
+		// Every pixel in the window is at or below threshold. Hold the
+		// last good output rather than reporting (0,0), which downstream
+		// reads as "perfectly centred" and would let the integrator park
+		// and then lurch when the beam reappears. If the beam stays gone,
+		// the window is stranded and can never find it again, so fall
+		// back to a full-image re-acquire.
+		if (++data->lost >= data->reacquire_after) {
+			if (data->lost == data->reacquire_after) {
+				log_warn("center_of_mass: no signal in window "
+					"for %zu frames; re-acquiring",
+					data->lost
+				);
+				// re-enter the wide phase: whatever stranded the
+				// window will likely strand it again if we drop
+				// straight back to the narrow one
+				data->acquiring = data->acquire_seconds > 0.0;
+				data->acquire_t0 = com_monotonic_s();
+			}
+			acquire_window(data, img);
+		}
+	}
+	// end of the acquisition phase: narrow onto wherever the centroid settled
+	if (UNLIKELY(data->acquiring)) {
+		double elapsed = com_monotonic_s() - data->acquire_t0;
+		if (elapsed >= data->acquire_seconds) {
+			data->acquiring = false;
+			log_info("center_of_mass: acquisition done after %.2f s; "
+				"narrowing window from %zu by %zu to %zu by %zu, "
+				"centred on (%zu,%zu)", elapsed, win_h, win_w,
+				data->region_height, data->region_width,
+				data->win_y, data->win_x
+			);
+		}
+	}
+	data->com->data[0] = data->last_y;
+	data->com->data[1] = data->last_x;
+
+	// zero-copy update of pipeline state
+	state->vector = data->com;
+	// housekeeping on the header
+	state->header.type = self->type_out;
+	state->header.units = self->units_out;
+	state->header.log_dim.y = 2;
+	state->header.log_dim.x = 1;
 	return 0;
 }
 

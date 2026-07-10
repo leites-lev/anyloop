@@ -1,0 +1,67 @@
+{
+	"_comment": {
+		"1": "End-to-end actuation latency test. Steps the x FINE channel",
+		"2": "(DAC ch1, 2 V bias, +-0.1 V) as a square wave and measures the",
+		"3": "time from handing the new command to the DAC stage to the CoM",
+		"4": "reporting the moved beam: serial write -> DAC -> FSM motion ->",
+		"5": "exposure -> readout/USB -> centroid. Reports departure (first",
+		"6": "motion) and 50% crossing latency, median/mean/min/max, plus the",
+		"7": "loop rate. Run:  build/anyloop contrib/conf_latency_test.json",
+		"8": "At 115200 baud one setDAC is ~2.3 ms of wire time -- that is",
+		"9": "part of the real feedback path and is included in the number."
+	},
+	"pipeline": [
+		{
+			"uri": "file:/home/fsl/anyloop_levfork/anyloop/build/asi_source.so",
+			"params": {
+				"camera_name": "ASI290MM",
+				"width":       112,
+				"height":      112,
+				"exposure":    330,
+				"gain":        100,
+				"bandwidth":   100,
+				"high_speed":  1
+			}
+		},
+		{
+			"_note": "wider window than the steering config (25 vs 15) so the commanded beam step cannot jump out of the tracking window between frames",
+			"uri": "anyloop:center_of_mass",
+			"params": {
+				"region_height":   25,
+				"region_width":    25,
+				"threshold":       20,
+				"track":           true,
+				"acquire_seconds": 5.0
+			}
+		},
+		{
+			"_note": "warmup must exceed acquire_seconds above. index_cmd 0 = x_fine (DAC ch1 below), index_err 1 = x in the CoM's [y, x]. low/high +-0.25 with scale -2 is a 1 V step around the 2 V bias (DAC 1.5-2.5 V); raise it if calibration reports step/sigma < 8.",
+			"uri": "anyloop:latency_test",
+			"params": {
+				"index_cmd":  0,
+				"index_err":  1,
+				"out_size":   4,
+				"low":        -0.25,
+				"high":       0.25,
+				"period":     0.25,
+				"warmup":     6.0,
+				"cal_cycles": 3,
+				"n_steps":    40
+			}
+		},
+		{
+			"_note": "same channel mapping as steering_tuned.json: ch0=y_fine(idx1) ch1=x_fine(idx0) ch2=Ycoarse(idx3) ch3=Xcoarse(idx2). skip_unchanged means only the stepped channel costs wire time after the first iteration.",
+			"uri": "anyloop:piplate_bridge",
+			"params": {
+				"port":    "/dev/ttyACM0",
+				"board":   0,
+				"channel": [0,  1,  2, 3],
+				"index":   [1,  0,  3,    2],
+				"scale":   [2, -2, 0,    0],
+				"offset":  [2,  2, 0.8, 2.394],
+				"wait_response": false,
+				"skip_unchanged": true
+			}
+		}
+	]
+}

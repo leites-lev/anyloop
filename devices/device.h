@@ -6,6 +6,7 @@
 #include "devices/tic_t834.h"
 #include "devices/clamp.h"
 #include "devices/biquad_filter.h"
+#include "devices/kalman_filter.h"
 #include "devices/delay.h"
 #include "devices/file_sink.h"
 #include "devices/logger.h"
@@ -20,6 +21,7 @@
 #include "devices/vonkarman_stream.h"
 #include "devices/piplate_bridge.h"
 #include "devices/bode_plot.h"
+#include "devices/latency_test.h"
 
 static const struct {
 	const char *uri;
@@ -30,6 +32,7 @@ static const struct {
 	{ "anyloop:tic_t834", tic_t834_init },
 	{ "anyloop:clamp", clamp_init },
 	{ "anyloop:biquad_filter", biquad_filter_init },
+	{ "anyloop:kalman_filter", kalman_filter_init },
 	{ "anyloop:delay", delay_init },
 	{ "anyloop:file_sink", file_sink_init },
 	{ "anyloop:logger", logger_init },
@@ -44,6 +47,7 @@ static const struct {
 	{ "anyloop:vonkarman_stream", vonkarman_stream_init },
 	{ "anyloop:piplate_bridge", piplate_bridge_init },
 	{ "anyloop:bode_plot", bode_plot_init },
+	{ "anyloop:latency_test", latency_test_init },
 };
 
 // match an aylp_device with its initializer function and initialize it

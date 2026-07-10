@@ -14,6 +14,10 @@ struct aylp_udp_sink_data {
 	struct iovec iovecs[2];
 	// gsl_block_uchar that we will copy pointer to data to
 	gsl_block_uchar bytes;
+	// send only every decimation'th iteration (1 = send every one)
+	size_t decimation;
+	// counts iterations since the last send
+	size_t countdown;
 };
 
 // initialize udp_sink device

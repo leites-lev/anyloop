@@ -23,13 +23,20 @@ const DEFAULT_SECONDS = 30.0  # rolling time-series window length, seconds
 # --seconds/-s SECS: length of the rolling time-series window in seconds
 #                 (default 10 s). Longer windows show more history and give
 #                 finer spectral resolution at the cost of slower updates.
-# --pixel/-p SIZE: region (subaperture) size in pixels, used to convert the
-#                 center_of_mass output (normalized to -1:1 across the region)
-#                 into pixels for the time-series panels (default 248). The
-#                 conversion is pixels = value * (SIZE - 1)/2. Only affects the
-#                 time series; the spectrum is unchanged.
-# --fmin/-m HZ:   lower limit of the spectrum frequency axis in Hz (default 0).
-#                 Ignored unless it is below the effective max frequency.
+# --pixel/-p SIZE: the pixel span the center_of_mass output is normalized across,
+#                 used to convert it into pixels for the time-series panels
+#                 (default 64). The conversion is pixels = value * (SIZE - 1)/2.
+#                 With track mode this is the IMAGE size (asi_source width /
+#                 height), because the tracking window reports absolute image
+#                 coordinates; without track it is the region/subaperture size.
+#                 Assumes a square frame. Only affects the time series and the
+#                 --com readout; the spectrum is unchanged.
+# --fmin/-m HZ:   lower limit of the spectrum frequency axis in Hz (default 0,
+#                 i.e. from DC). Ignored unless it is below the effective max
+#                 frequency. Set it above your drift/1-f corner to actually see
+#                 what's underneath: the 0 dB reference and the peak search both
+#                 follow the displayed band, so cutting the low end rescales the
+#                 plot rather than just sliding the axis. --fmin 0 turns it off.
 # --fmax/-F HZ:   upper limit of the spectrum frequency axis in Hz (default:
 #                 Nyquist = fs/2). Values above Nyquist are clamped to it.
 # --xtick/-x SPACING: spacing between spectrum x-axis ticks in Hz (default:
@@ -42,7 +49,7 @@ function parse_args(args)
     timestamp = false
     seconds = DEFAULT_SECONDS
     com = false
-    pixel = 248.0   # region size in pixels (default 248x248)
+    pixel = 64.0    # span the CoM is normalized across (image size in track mode)
     fmin  = 0.0     # spectrum min frequency (Hz); 0 = from DC
     fmax  = 0.0     # spectrum max frequency (Hz); 0 = auto (Nyquist)
     xtick = 0.0     # spectrum x-axis tick spacing (Hz); 0 = auto
@@ -98,11 +105,11 @@ function parse_args(args)
 end
 
 const OUTFILE, TIMESTAMP, SECONDS, COM, PIXEL, FMIN, FMAX, XTICK = parse_args(ARGS)
-# center_of_mass output is normalized to -1:1 across the region; convert to
-# pixels with value * (PIXEL - 1)/2 for the time-series panels
+# center_of_mass output is normalized to -1:1 across PIXEL px -- the whole image
+# in track mode, the region otherwise; convert to pixels with value*(PIXEL-1)/2
 const PIX_PER_UNIT = (PIXEL - 1) / 2
 const N = max(round(Int, SECONDS * FS), 2)
-const SAVE_EVERY = 40.0  # seconds between saves
+const SAVE_EVERY = 400.0  # seconds between saves
 
 # build the name to save under, inserting a timestamp if requested
 function save_path()
@@ -118,26 +125,66 @@ if !bind(sock, ip"0.0.0.0", 64732)
 end
 println("listening on 64732 ([y, x] CoM error)")
 
-# --com: text readout of the centroid, no plotting
+# --com: text readout of the centroid, no plotting. Reports, per axis:
+#   pos    running-mean position (normalized -1:1), for the resting spot location
+#   std    total RMS jitter of the position (px) -- includes real motion + noise
+#   noise  x1-x2 measurement-noise floor: std(Δ)/√2 over successive-sample
+#          differences (px). Differencing cancels the common-mode true position
+#          (and slow drift), leaving √2× the per-sample noise, so this is the
+#          floor the sensor can't beat regardless of how the beam moves.
+#   motion √(std² - noise²): the real beam motion left after removing the noise
+#          floor. motion ≈ 0 with std ≈ noise means all you see is sensor noise
+#          (or a centroid pinned by background -- confirm with a push test).
+# Note std/motion are CUMULATIVE, so slow drift inflates them over a long run;
+# noise stays put. Ratios matter more than absolutes.
 if COM
-    println("--com: printing [y, x] CoM (~5 Hz) with running mean of valid samples; Ctrl-C to stop")
-    let sum_y = 0.0, sum_x = 0.0, n = 0, last_print = 0.0
+    println("--com: [y,x] CoM stats (~2 Hz); Ctrl-C to stop")
+    println("  std = total RMS jitter; noise = x1-x2 floor std(Δ)/√2; ",
+            "motion = √(std²-noise²); all px")
+    println("  normalized across ", round(Int, PIXEL), " px (",
+            round(PIX_PER_UNIT, digits=1), " px/unit)")
+    let n = 0, sum_y = 0.0, sum_x = 0.0, sqy = 0.0, sqx = 0.0,
+        nd = 0, sdy = 0.0, sdx = 0.0, sdqy = 0.0, sdqx = 0.0,
+        prev_y = 0.0, prev_x = 0.0, prev_valid = false, last_print = 0.0
         while true
             chunk = read(IOBuffer(recv(sock)), AYLPChunk)
             @assert length(chunk.data) == 2 "expected 2-element [y,x] vector"
             y = chunk.data[1]; x = chunk.data[2]
             # skip non-finite centroids (empty/low-signal frames) so one bad
-            # frame doesn't poison the cumulative mean with NaN
+            # frame doesn't poison the running statistics with NaN
             if isfinite(y) && isfinite(x)
-                sum_y += y; sum_x += x; n += 1
+                n += 1
+                sum_y += y; sum_x += x; sqy += y*y; sqx += x*x
+                # only difference against an immediately-preceding valid sample,
+                # so a dropped NaN frame doesn't widen the interval and bias the
+                # noise estimate high
+                if prev_valid
+                    dy = y - prev_y; dx = x - prev_x
+                    nd += 1
+                    sdy += dy; sdx += dx; sdqy += dy*dy; sdqx += dx*dx
+                end
+                prev_y = y; prev_x = x; prev_valid = true
+            else
+                prev_valid = false
             end
             now = time()
-            if now - last_print >= 0.2
-                mean_str = n > 0 ?
-                    string("y=", round(sum_y/n, digits=4), " x=", round(sum_x/n, digits=4)) :
-                    "(no valid samples yet)"
-                println("y=", round(y, digits=4), "  x=", round(x, digits=4),
-                        "   mean: ", mean_str, "  (", n, " valid)")
+            if now - last_print >= 0.5 && n > 1
+                std_y = sqrt(max(sqy/n - (sum_y/n)^2, 0.0)) * PIX_PER_UNIT
+                std_x = sqrt(max(sqx/n - (sum_x/n)^2, 0.0)) * PIX_PER_UNIT
+                nf_y = nd > 1 ?
+                    sqrt(max(sdqy/nd - (sdy/nd)^2, 0.0)) / sqrt(2) * PIX_PER_UNIT : NaN
+                nf_x = nd > 1 ?
+                    sqrt(max(sdqx/nd - (sdx/nd)^2, 0.0)) / sqrt(2) * PIX_PER_UNIT : NaN
+                mot_y = sqrt(max(std_y^2 - nf_y^2, 0.0))
+                mot_x = sqrt(max(std_x^2 - nf_x^2, 0.0))
+                r(v) = round(v, sigdigits=3)
+                println("y  pos=", round(sum_y/n, digits=4),
+                        "  std=", r(std_y), "  noise=", r(nf_y),
+                        "  motion=", r(mot_y))
+                println("x  pos=", round(sum_x/n, digits=4),
+                        "  std=", r(std_x), "  noise=", r(nf_x),
+                        "  motion=", r(mot_x), "   (N=", n, ")")
+                flush(stdout)   # stdout is block-buffered when piped/redirected
                 last_print = now
             end
         end
@@ -190,19 +237,46 @@ const t_last = Ref(0.0) # wall-clock time of the previous packet
 const AVG_DELAY = 5.0   # seconds to wait after the first packet before showing RMS
 const tstart = Ref(0.0) # wall-clock time of the first packet
 
-# RMS (in px) about the window mean (the moving average) over the newest nvalid
-# samples of an oldest->newest window — i.e. the std dev of the on-screen signal,
-# excluding any DC bias. The tail selection skips the zero-prefilled part of the
+# Mean and RMS-about-the-mean, both in px, over the newest nvalid samples of an
+# oldest->newest window. The tail selection skips the zero-prefilled part of the
 # ring before it has filled.
-function rms_px(win, nvalid, scale)
-    nvalid < 1 && return NaN
+#
+# These are two different things and both are worth seeing. The mean is the
+# beam's steady-state offset from the setpoint: center_of_mass reports absolute
+# image coordinates (in track mode the window follows the beam but the output is
+# still normalized across the whole image), so the PID's setpoint is 0 = frame
+# centre, and a nonzero mean is real pointing error. The RMS about that mean is
+# the jitter. Drawing ±RMS about zero — as this used to — puts the lines nowhere
+# near the trace as soon as the beam rests off centre.
+function mean_rms_px(win, nvalid, scale)
+    nvalid < 1 && return (NaN, NaN)
     v = @view win[end-nvalid+1:end]
     m = sum(v) / nvalid
-    return sqrt(sum(x -> abs2(x - m), v) / nvalid) * scale
+    r = sqrt(sum(x -> abs2(x - m), v) / nvalid)
+    return (m * scale, r * scale)
 end
 
 # oldest -> newest copy of a ring buffer, given the next-write index i
 snapshot(buf, i) = vcat(buf[i:end], buf[1:i-1])
+
+# Inclusive index range of the bins whose frequency lies in [fmin, fmax]. freqs
+# is increasing, so a binary search suffices. Falls back to the whole spectrum if
+# the band somehow selects nothing.
+function band_range(freqs, fmin, fmax)
+    lo = searchsortedfirst(freqs, fmin)
+    hi = searchsortedlast(freqs, fmax)
+    (lo > hi || lo < 1 || hi > length(freqs)) && return 1:length(freqs)
+    return lo:hi
+end
+
+# Amplitude spectrum in dB, referenced to the loudest bin inside [fmin, fmax].
+# Bins outside the band can therefore come out above 0 dB; they're off-axis and
+# clipped by ylim, which is the point — the band sets the scale.
+function todb(spec, freqs, fmin, fmax)
+    r = band_range(freqs, fmin, fmax)
+    ref = maximum(@view spec[r])
+    return 20 .* log10.(spec ./ max(ref, 1e-12))
+end
 
 # Up to n dominant spectral peaks within [0, fmax], as (freq, dB) pairs sorted
 # by descending magnitude. Picks local maxima (a bin above both neighbors) so a
@@ -280,22 +354,30 @@ let last_save = time()
         # vibration content under the peak-normalized dB scale
         spec_y = abs.(rfft((sy .- sum(sy)/N) .* hann))
         spec_x = abs.(rfft((sx .- sum(sx)/N) .* hann))
-        db_y   = 20 .* log10.(spec_y ./ max(maximum(spec_y), 1e-12))
-        db_x   = 20 .* log10.(spec_x ./ max(maximum(spec_x), 1e-12))
+        # 0 dB is the loudest bin *inside the displayed band*, not the loudest bin
+        # anywhere. Otherwise raising --fmin only slides the axis: low-frequency
+        # drift still sets the reference, and everything you were trying to look
+        # at stays pinned near the -60 dB floor. With the default fmin=0 and
+        # fmax=Nyquist the band is the whole spectrum, so this changes nothing.
+        db_y   = todb(spec_y, freqs, fmin, fmax)
+        db_x   = todb(spec_x, freqs, fmin, fmax)
 
-        # windowed RMS error (px) over the real, on-screen samples; shown only
-        # after the warmup so an early noisy estimate isn't displayed
+        # windowed mean + RMS error (px) over the real, on-screen samples; shown
+        # only after the warmup so an early noisy estimate isn't displayed
         nvalid   = min(np, N)
         show_rms = tstart[] > 0.0 && time() - tstart[] >= AVG_DELAY
-        rms_y_px = show_rms ? rms_px(sy, nvalid, PIX_PER_UNIT) : NaN
-        rms_x_px = show_rms ? rms_px(sx, nvalid, PIX_PER_UNIT) : NaN
+        mean_y_px, rms_y_px = show_rms ? mean_rms_px(sy, nvalid, PIX_PER_UNIT) : (NaN, NaN)
+        mean_x_px, rms_x_px = show_rms ? mean_rms_px(sx, nvalid, PIX_PER_UNIT) : (NaN, NaN)
 
         p1 = plot(tvec, sy .* PIX_PER_UNIT;
                   label="y (tip)", ylabel="error (px)", color=:blue, lw=1,
                   title="Time series   (fs ≈ $(round(fs, digits=1)) Hz)")
         if show_rms
-            hline!(p1, [rms_y_px, -rms_y_px]; color=:black, ls=:dash, lw=1,
-                   label="RMS = $(round(rms_y_px, sigdigits=3)) px")
+            hline!(p1, [mean_y_px]; color=:black, ls=:dot, lw=1,
+                   label="mean = $(round(mean_y_px, sigdigits=3)) px")
+            hline!(p1, [mean_y_px + rms_y_px, mean_y_px - rms_y_px];
+                   color=:black, ls=:dash, lw=1,
+                   label="RMS about mean = $(round(rms_y_px, sigdigits=3)) px")
         end
         # 5 dominant peaks in the displayed band, recomputed every frame
         peaks_y = top_peaks(freqs, db_y, fmin, fmax, 5)
@@ -310,8 +392,11 @@ let last_save = time()
         p3 = plot(tvec, sx .* PIX_PER_UNIT;
                   label="x (tilt)", xlabel="time (s)", ylabel="error (px)", color=:red, lw=1)
         if show_rms
-            hline!(p3, [rms_x_px, -rms_x_px]; color=:black, ls=:dash, lw=1,
-                   label="RMS = $(round(rms_x_px, sigdigits=3)) px")
+            hline!(p3, [mean_x_px]; color=:black, ls=:dot, lw=1,
+                   label="mean = $(round(mean_x_px, sigdigits=3)) px")
+            hline!(p3, [mean_x_px + rms_x_px, mean_x_px - rms_x_px];
+                   color=:black, ls=:dash, lw=1,
+                   label="RMS about mean = $(round(rms_x_px, sigdigits=3)) px")
         end
         p4 = plot(freqs, db_x;
                   label="x (tilt)", xlabel="freq (Hz)", ylabel="dB", color=:red, lw=1,

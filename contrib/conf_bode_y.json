@@ -1,77 +1,91 @@
 {
 	"_comment": {
 		"1": "Open-loop plant Bode of the y/tip axis: command -> FSM -> camera -> CoM.",
-		"2": "SOFTWARE injection: bode_plot replaces the y element with a sine each",
-		"3": "iteration, and the y piplate_bridge writes offset + sine*scale to the DAC",
-		"4": "every cycle. The bias (1.9368 V) therefore comes from a real per-iteration",
-		"5": "DAQ write, not the hardware FG's fg_offset (which does not actually bias",
-		"6": "the channel). No PID is in the loop, so the command IS the sine = open loop.",
-		"7": "Pipeline: camera -> center_of_mass -> bode_plot(replace y) -> drive y -> park x.",
-		"8": "Phase is measured from wall-clock time, so the freq axis is exact.",
-		"9": "Read the -180 deg crossing off fsm815_bode_y.pdf: that frequency is where",
-		"10": "the loop self-oscillates, and the gain there sets max py. Magnitude is now",
-		"11": "calibrated (CoM units per command unit) since amplitude is the real drive.",
-		"12": "Raise amplitude for SNR but keep the spot on the 72x72 sensor."
+		"2": "SOFTWARE injection: bode_plot replaces the y element (0; CoM is [y, x])",
+		"3": "with a sine each iteration, and piplate_bridge writes offset + sine*scale",
+		"4": "to DAC ch0 every cycle. See conf_bode_x.json for the full rationale",
+		"5": "(whole-frame CoM, no acquisition phase, baud 921600 pacing, 2310 Hz loop).",
+		"6": "x/tilt (ch1) and the coarse channels are parked at their bias voltages.",
+		"7": "Amplitude starts lower than x: the y mechanical gain was ~3x x on the",
+		"8": "old (stale) sweeps; raise it if |H| comes back small."
 	},
 	"pipeline": [
 		{
-			"uri": "file:/home/fsl/anyloop/build/asi_source.so",
+			"uri": "file:/home/fsl/anyloop_levfork/anyloop/build/asi_source.so",
 			"params": {
 				"camera_name": "ASI290MM",
-				"width":       72,
-				"height":      72,
-				"exposure":    1000,
-				"gain":        100,
-				"bandwidth":   80
+				"width": 64,
+				"height": 64,
+				"exposure": 330,
+				"gain": 100,
+				"bandwidth": 100,
+				"high_speed": 1,
+				"start_x": 920,
+				"start_y": 488
 			}
 		},
 		{
 			"uri": "anyloop:center_of_mass",
 			"params": {
-				"region_height": 72,
-				"region_width":  72,
-				"threshold":     0
+				"_note": "tracked 25x25 window, initialized on the beam (frame centre) with no acquisition phase: bode_plot injects from the first frame, and the stray reflection at ROI (10,28) must stay out of the sum. Output is image-normalized, same as the loop sees.",
+				"region_height": 25,
+				"region_width": 25,
+				"threshold": 20,
+				"track": true,
+				"init_y": 32,
+				"init_x": 32
 			}
 		},
 		{
 			"_comment": "Replace the y/tip element (0) with the swept sine; read CoM y as response",
 			"uri": "anyloop:bode_plot",
 			"params": {
-				"sample_rate": 815.0,
-				"element":     0,
-				"inject":      "replace",
-				"output":      "raw",
-				"freq_start":  5.0,
-				"freq_end":    200.0,
-				"n_freqs":     40,
-				"n_settle":    100,
-				"n_cycles":    12.0,
-				"amplitude":   0.2,
-				"output_file": "fsm815_bode_y.pdf"
+				"sample_rate": 2310.0,
+				"element": 0,
+				"inject": "replace",
+				"output": "raw",
+				"freq_start": 5.0,
+				"freq_end": 300.0,
+				"n_freqs": 40,
+				"n_settle": 200,
+				"n_cycles": 12.0,
+				"amplitude": 0.15,
+				"output_file": "fsm2310_bode_y.pdf"
 			}
 		},
 		{
-			"_comment": "Drive y/tip: DAC ch1, writes offset(1.9368V) + sine*scale every iteration",
+			"_note": "same mapping as steering_tuned.json: ch0=y(idx0, driven), ch1=x(idx1, parked), ch2/ch3 coarse parked.",
 			"uri": "anyloop:piplate_bridge",
 			"params": {
-				"port":    "/dev/ttyACM0",
-				"board":   0,
-				"channel": 1,
-				"index":   0,
-				"scale":   2,
-				"offset":  1.9368
-			}
-		},
-		{
-			"_comment": "Park x/tilt at its center voltage (scale 0) to hold the spot on-sensor",
-			"uri": "anyloop:piplate_bridge",
-			"params": {
-				"port":    "/dev/ttyACM0",
-				"board":   0,
-				"channel": 0,
-				"index":   1,
-				"scale":   0,
-				"offset":  2.5
+				"port": "/dev/ttyACM0",
+				"board": 0,
+				"channel": [
+					0,
+					1,
+					2,
+					3
+				],
+				"index": [
+					0,
+					1,
+					0,
+					0
+				],
+				"scale": [
+					2,
+					0,
+					0,
+					0
+				],
+				"offset": [
+					2,
+					2,
+					0.8,
+					2.394
+				],
+				"baud": 460800,
+				"wait_response": false,
+				"skip_unchanged": true
 			}
 		}
 	]
