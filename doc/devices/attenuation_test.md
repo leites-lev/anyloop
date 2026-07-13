@@ -48,8 +48,11 @@ overlay on top, the attenuation curve in the middle with the strongest
 attenuated and amplified frequencies annotated, and at the bottom the error
 variance contributed by each 5 Hz band (the PSD integrated over the band, open
 vs closed), with the top closed-loop bands tagged with their share of the
-total closed-loop error variance. Finally it raises `AYLP_DONE` to stop the
-loop.
+total closed-loop error variance. A second page reports the run's start date
+and time, the `config` summary, the mean (pointing offset about the setpoint)
+and RMS-about-mean (jitter) for each element open vs closed, and a table of the
+RMS each 10 Hz band contributes from 0-300 Hz — all scaled to pixels by
+`pixel_scale`. Finally it raises `AYLP_DONE` to stop the loop.
 
 Parameters
 ----------
@@ -72,6 +75,16 @@ Parameters
 - `labels` (string) (optional)
   - Comma-separated names for the vector elements, used in the plot titles
     (e.g. `"y,x"` for a center-of-mass error). [default: element indices]
+- `pixel_scale` (float) (optional)
+  - Multiplier converting one output unit to pixels, used only for the report
+    on the PDF's second page (start time, per-band RMS table, and per-axis
+    mean/jitter). For an `anyloop:center_of_mass` source, which emits
+    `-1 + 2*px/(dim-1)` across the frame, this is `(dim-1)/2` (e.g. `31.5` at
+    64x64). Leave at the default to report in raw units. [default: 1]
+- `config` (string) (optional)
+  - Free-text summary of the loop configuration, printed verbatim on the PDF's
+    second page. Newlines (`\n`) start new lines. Use it to record the pid /
+    kalman / line-rejection settings the run was taken under. [default: none]
 - `output_file` (string) (optional)
   - PDF filename; the `.dat` file takes the same name with the extension
     replaced. [default: "attenuation.pdf"]

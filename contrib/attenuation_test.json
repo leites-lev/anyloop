@@ -83,6 +83,7 @@
 		{
 			"_note1": "THE TEST. Sits after the CoM sinks so the watchers still see the true error, and before the kalman so the open-phase recording is the raw error, not a prediction. start_delay covers the 2 s pid/piplate start_delay holds plus CoM window acquisition. settle_time 25 s matches the loop notes' steady-state threshold (pid acquisition + kalman 10 s handover ramp).",
 			"_note2": "nfft 4096 at the ~2400 Hz loop rate gives ~0.6 Hz bins -- enough to resolve the 22.08 / 30.8 / 59.63 Hz lines. Sample rate is measured from timestamps, not assumed. Outputs land in the working directory: attenuation.pdf and attenuation.dat (freq, then psd_open/psd_closed/atten_dB per axis).",
+			"_note3": "pixel_scale converts the normalized CoM output to pixels for the report: center_of_mass emits -1..+1 across the whole frame (norm = -1 + 2*px/(dim-1)), so at 64x64 one output unit = (64-1)/2 = 31.5 px. If width/height change, update this (e.g. 32x32 -> 15.5). config is a free-text summary of the tuned loop that is printed verbatim on page 2 of the PDF, next to the run's start date/time, the per-10 Hz-band RMS table (in px), and the mean (pointing offset) and RMS-about-mean (jitter) for each axis, open vs closed. Keep config in sync with the pid/kalman/line params below.",
 			"uri": "anyloop:attenuation_test",
 			"params": {
 				"start_delay": 3.0,
@@ -91,7 +92,9 @@
 				"closed_time": 200.0,
 				"nfft":        4096,
 				"labels":      "y,x",
-				"output_file": "attenuation.pdf"
+				"pixel_scale": 31.5,
+				"config":      "camera ASI290MM 64x64, ROI start (920,488), ~2310 Hz loop\npid: integrator-only (p=py=d=0), i=600 iy=1300, units=minmax\nlines x=[22.08,57.3] gain=[60,20] phase=[56,3]\nlinesy=[30.8] gainy=[60] phasey=[60], line_delay=0.002\nkalman: order=60 horizon=5 mu=0.03 gain=1.0 gainy=0 ramp=10\npiplate: fine ch0(+2)/ch1(-2), coarse parked, baud 460800",
+				"output_file": "attenuation2.pdf"
 			}
 		},
 		{
@@ -116,8 +119,8 @@
 				"type": "vector",
 				"p": 0,
 				"py":0,
-				"i": 1200,
-				"iy": 1450,
+				"i": 600,
+				"iy": 1300,
 				"d": 0,
 				"clamp": 1.0,
 				"units": "minmax",

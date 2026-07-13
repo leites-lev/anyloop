@@ -1,6 +1,8 @@
 #ifndef AYLP_DEVICES_ATTENUATION_TEST_H_
 #define AYLP_DEVICES_ATTENUATION_TEST_H_
 
+#include <time.h>
+
 #include "anyloop.h"
 
 // measurement phases, in order
@@ -21,11 +23,14 @@ struct aylp_attenuation_test_data {
 	size_t nfft;		// Welch segment length, power of 2 (default 4096)
 	char *output_file;	// PDF filename (default "attenuation.pdf")
 	char *labels;		// comma-separated element labels (optional)
+	double pixel_scale;	// px per output unit for the report (default 1)
+	char *config;		// config summary printed on the PDF (optional)
 
 	// state
 	unsigned phase;
 	int analyzed;		// analysis has run (success or not)
 	double t0;		// timestamp of first proc call
+	time_t start_wall;	// wall-clock time of first proc call
 	size_t n_elem;		// vector length, latched on first proc call
 
 	// recorded error, interleaved [sample*n_elem + elem]

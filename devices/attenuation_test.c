@@ -17,13 +17,28 @@ static const char *PLOT_SCRIPT =
 	"import matplotlib\n"
 	"matplotlib.use('PDF')\n"
 	"import matplotlib.pyplot as plt\n"
+	"from matplotlib.backends.backend_pdf import PdfPages\n"
 	"import numpy as np\n"
-	"data=np.loadtxt(sys.argv[1])\n"
+	"datpath=sys.argv[1]\n"
+	"data=np.loadtxt(datpath)\n"
 	"labels=sys.argv[3].split(',') if len(sys.argv)>3 and sys.argv[3] else []\n"
+	"# metadata written as # comment lines by the C side\n"
+	"meta={}; stats={}; cfg=[]\n"
+	"for line in open(datpath):\n"
+	"    if not line.startswith('#'): continue\n"
+	"    b=line[1:].strip()\n"
+	"    if b.startswith('start='): meta['start']=b[6:]\n"
+	"    elif b.startswith('pixel_scale='): meta['ps']=float(b.split('=',1)[1])\n"
+	"    elif b.startswith('stat '):\n"
+	"        p=b.split(); stats[int(p[1])]=[float(x) for x in p[2:6]]\n"
+	"    elif b.startswith('config '): cfg.append(b[7:])\n"
+	"ps=meta.get('ps',1.0)\n"
+	"ulab='px' if ps!=1.0 else 'unit'\n"
 	"freq=data[:,0]\n"
 	"n_elem=(data.shape[1]-1)//3\n"
 	"m=freq>0\n"
 	"f=freq[m]\n"
+	"pdf=PdfPages(sys.argv[2])\n"
 	"fig,axes=plt.subplots(3,n_elem,figsize=(6.5*n_elem,13),sharex='row',squeeze=False)\n"
 	"for e in range(n_elem):\n"
 	"    po=data[:,1+3*e][m]; pc=data[:,2+3*e][m]; att=data[:,3+3*e][m]\n"
@@ -82,7 +97,51 @@ static const char *PLOT_SCRIPT =
 	"    ax.grid(True,which='both',ls='--',alpha=0.5)\n"
 	"fig.suptitle('Closed-loop attenuation')\n"
 	"plt.tight_layout()\n"
-	"plt.savefig(sys.argv[2],format='pdf',bbox_inches='tight')\n"
+	"pdf.savefig(fig,bbox_inches='tight')\n"
+	"plt.close(fig)\n"
+	"# second page: run config, mean/jitter summary, and the RMS that each\n"
+	"# 10 Hz band contributes (open vs closed), all scaled to pixels\n"
+	"df=f[1]-f[0] if len(f)>1 else 1.0\n"
+	"edges=np.arange(0,310,10)\n"
+	"def bandrms(psd):\n"
+	"    return [ps*np.sqrt(np.sum(psd[(f>=lo)&(f<lo+10)])*df) for lo in edges[:-1]]\n"
+	"bo={e:bandrms(data[:,1+3*e][m]) for e in range(n_elem)}\n"
+	"bc={e:bandrms(data[:,2+3*e][m]) for e in range(n_elem)}\n"
+	"fig2=plt.figure(figsize=(6.5*max(n_elem,1),13))\n"
+	"fig2.suptitle('Run configuration and per-band RMS')\n"
+	"info=[]\n"
+	"if 'start' in meta: info.append('Started: '+meta['start'])\n"
+	"info.append('pixel_scale: %g %s per output unit'%(ps,ulab))\n"
+	"for e in range(n_elem):\n"
+	"    lab=labels[e] if e<len(labels) else 'elem %d'%e\n"
+	"    if e in stats:\n"
+	"        mo,so,mc,sc=stats[e]\n"
+	"        info.append('%s: mean %+.3f -> %+.3f %s;  RMS about mean %.3f -> %.3f %s   (open -> closed)'%(lab,ps*mo,ps*mc,ulab,ps*so,ps*sc,ulab))\n"
+	"txt='\\n'.join(info)\n"
+	"if cfg: txt+='\\n\\nConfig used:\\n'+'\\n'.join(cfg)\n"
+	"fig2.text(0.03,0.97,txt,va='top',ha='left',family='monospace',fontsize=8)\n"
+	"col=['band (Hz)']\n"
+	"for e in range(n_elem):\n"
+	"    lab=labels[e] if e<len(labels) else 'elem %d'%e\n"
+	"    col+=['%s open'%lab,'%s closed'%lab]\n"
+	"rows=[]\n"
+	"for i,lo in enumerate(edges[:-1]):\n"
+	"    r=['%d-%d'%(lo,lo+10)]\n"
+	"    for e in range(n_elem): r+=['%.4f'%bo[e][i],'%.4f'%bc[e][i]]\n"
+	"    rows.append(r)\n"
+	"tot=['total 0-300']\n"
+	"for e in range(n_elem):\n"
+	"    tot+=['%.4f'%np.sqrt(np.sum(np.array(bo[e])**2)),'%.4f'%np.sqrt(np.sum(np.array(bc[e])**2))]\n"
+	"rows.append(tot)\n"
+	"axt=fig2.add_axes([0.03,0.02,0.94,0.70]); axt.axis('off')\n"
+	"axt.set_title('RMS contributed by each 10 Hz band (%s)'%ulab,fontsize=9)\n"
+	"tb=axt.table(cellText=rows,colLabels=col,loc='upper center',cellLoc='center')\n"
+	"tb.auto_set_font_size(False); tb.set_fontsize(7); tb.scale(1,1.15)\n"
+	"for j in range(len(col)): tb[0,j].set_facecolor('#dddddd')\n"
+	"for j in range(len(col)): tb[len(rows),j].set_facecolor('#eeeeee')\n"
+	"pdf.savefig(fig2,bbox_inches='tight')\n"
+	"plt.close(fig2)\n"
+	"pdf.close()\n"
 	"print('Saved attenuation plot to '+sys.argv[2])\n";
 
 
@@ -159,6 +218,24 @@ static void extract_element(const double *buf, size_t n, size_t n_elem,
 {
 	for (size_t i = 0; i < n; i++)
 		out[i] = buf[i*n_elem + e];
+}
+
+
+// mean and RMS-about-mean (population std) of one element of a phase buffer,
+// in raw output units; the report scales both by pixel_scale
+static void phase_stats(const double *buf, size_t n, size_t n_elem, size_t e,
+	double *mean, double *rms)
+{
+	double s = 0.0, s2 = 0.0;
+	for (size_t i = 0; i < n; i++) {
+		double v = buf[i*n_elem + e];
+		s += v;
+		s2 += v*v;
+	}
+	double m = n ? s/n : 0.0;
+	double var = n ? s2/n - m*m : 0.0;
+	*mean = m;
+	*rms = var > 0.0 ? sqrt(var) : 0.0;
 }
 
 
@@ -285,6 +362,32 @@ static int analyze_and_plot(struct aylp_attenuation_test_data *data)
 		data->open_t_last - data->open_t_first,
 		data->closed_t_last - data->closed_t_first,
 		data->labels ? data->labels : "");
+	// report metadata for the PDF: start time, unit->px scale, per-element
+	// mean and RMS-about-mean (raw units; the plot scales by pixel_scale),
+	// and the caller-supplied config summary (one line each)
+	char start_str[32] = "";
+	struct tm tmv;
+	if (localtime_r(&data->start_wall, &tmv))
+		strftime(start_str, sizeof start_str, "%Y-%m-%d %H:%M:%S", &tmv);
+	fprintf(f, "# start=%s\n", start_str);
+	fprintf(f, "# pixel_scale=%g\n", data->pixel_scale);
+	for (size_t e = 0; e < n_elem; e++) {
+		double mo, so, mc, sc;
+		phase_stats(data->open_buf, data->open_n, n_elem, e, &mo, &so);
+		phase_stats(data->closed_buf, data->closed_n, n_elem, e,
+			&mc, &sc);
+		fprintf(f, "# stat %zu %g %g %g %g\n", e, mo, so, mc, sc);
+	}
+	if (data->config) {
+		const char *p = data->config;
+		while (*p) {
+			const char *nl = strchr(p, '\n');
+			int len = nl ? (int)(nl - p) : (int)strlen(p);
+			fprintf(f, "# config %.*s\n", len, p);
+			if (!nl) break;
+			p = nl + 1;
+		}
+	}
 	fprintf(f, "# freq_Hz");
 	for (size_t e = 0; e < n_elem; e++)
 		fprintf(f, " psd_open_%zu psd_closed_%zu atten_dB_%zu",
@@ -348,6 +451,7 @@ int attenuation_test_init(struct aylp_device *self)
 	data->settle_time = 5.0;
 	data->nfft        = 4096;
 	data->output_file = xstrdup("attenuation.pdf");
+	data->pixel_scale = 1.0;
 
 	if (!self->params) {
 		log_error("No params object found.");
@@ -380,6 +484,13 @@ int attenuation_test_init(struct aylp_device *self)
 			xfree(data->labels);
 			data->labels = xstrdup(json_object_get_string(val));
 			log_trace("labels = %s", data->labels);
+		} else if (!strcmp(key, "pixel_scale")) {
+			data->pixel_scale = json_object_get_double(val);
+			log_trace("pixel_scale = %G", data->pixel_scale);
+		} else if (!strcmp(key, "config")) {
+			xfree(data->config);
+			data->config = xstrdup(json_object_get_string(val));
+			log_trace("config = %s", data->config);
 		} else {
 			log_warn("Unknown parameter \"%s\"", key);
 		}
@@ -392,6 +503,10 @@ int attenuation_test_init(struct aylp_device *self)
 	}
 	if (data->nfft < 64 || (data->nfft & (data->nfft - 1))) {
 		log_error("nfft must be a power of 2 and >= 64.");
+		return -1;
+	}
+	if (data->pixel_scale <= 0.0) {
+		log_error("pixel_scale must be > 0.");
 		return -1;
 	}
 	if (data->labels && strchr(data->labels, '\'')) {
@@ -419,6 +534,7 @@ int attenuation_test_proc(struct aylp_device *self, struct aylp_state *state)
 
 	if (!data->t0) {
 		data->t0 = now;
+		data->start_wall = time(NULL);
 		data->n_elem = state->vector->size;
 	}
 	double elapsed = now - data->t0;
@@ -497,6 +613,7 @@ int attenuation_test_fini(struct aylp_device *self)
 	xfree(data->closed_buf);
 	xfree(data->output_file);
 	xfree(data->labels);
+	xfree(data->config);
 	xfree(data);
 	return 0;
 }
