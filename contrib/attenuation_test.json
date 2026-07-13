@@ -1,0 +1,158 @@
+{
+	"_comment": {
+		"1": "Open-vs-closed attenuation measurement of the tip/tilt loop.",
+		"2": "This is steering_tuned.json (same camera, CoM, kalman, pid,",
+		"3": "clamp, and piplate settings) with one extra device --",
+		"4": "anyloop:attenuation_test -- inserted between the CoM and the",
+		"5": "kalman/pid stages. It holds the loop OPEN for open_time",
+		"6": "seconds (it zeroes the error feeding the kalman/pid, so the",
+		"7": "integrator and line oscillators stay parked and the DAC sits",
+		"8": "at its bias) while recording the raw CoM error, then lets the",
+		"9": "loop CLOSE, waits settle_time seconds for acquisition and",
+		"10": "kalman re-convergence (the loop notes say steady state needs",
+		"11": "t > 25 s), records for closed_time seconds, then computes",
+		"12": "Welch PSDs of both phases and writes attenuation.dat plus",
+		"13": "attenuation.pdf: per-axis open/closed PSD overlays, the",
+		"14": "closed/open ratio in dB vs frequency with the strongest",
+		"15": "attenuated (green) and amplified (red, waterbed) frequencies",
+		"16": "annotated, and the error variance contributed by each 5 Hz",
+		"17": "band (open vs closed, top closed bands tagged with their %",
+		"18": "of the total). Each phase's sample rate is measured from its",
+		"19": "own timestamps, and the open PSD is re-gridded onto the",
+		"20": "closed-phase frequency axis, so the closed loop running",
+		"21": "slower (DAC writes) does not skew the frequencies. The loop",
+		"22": "stops by itself when the test is done. EDIT open_time /",
+		"23": "closed_time below to taste; the 2026-07-10 verification used",
+		"24": "120 s + 120 s, and the loop notes warn that runs under 60 s",
+		"25": "are not trustworthy because the vibration environment is",
+		"26": "nonstationary."
+	},
+	"pipeline": [
+		{
+			"uri": "file:/home/fsl/anyloop_levfork/anyloop/build/asi_source.so",
+			"params": {
+				"camera_name": "ASI290MM",
+				"width":       64,
+				"height":      64,
+				"start_x":     920,
+				"start_y":     488,
+				"exposure":    430,
+				"gain":        100,
+				"bandwidth":   100,
+				"high_speed":  1
+			}
+		},
+		{
+			"_comment": "Send raw frame to watch_steering.jl on port 64730",
+			"uri": "anyloop:udp_sink",
+			"params": {
+				"ip":         "127.0.0.1",
+				"port":       "64730",
+				"decimation": 64
+			}
+		},
+		{
+			"_comment": "Track a 15x15 window centred on the previous CoM, init on the beam at frame centre (see steering_tuned.json notes).",
+			"uri": "anyloop:center_of_mass",
+			"params": {
+				"region_height":   15,
+				"region_width":    15,
+				"threshold":       20,
+				"track":           true,
+				"init_y":          32,
+				"init_x":          32
+			}
+		},
+		{
+			"_comment": "Send [y, x] CoM vector to watch_steering.jl on port 64731",
+			"uri": "anyloop:udp_sink",
+			"params": {
+				"ip":         "127.0.0.1",
+				"port":       "64731",
+				"decimation": 64
+			}
+		},
+		{
+			"_comment": "Send [y, x] CoM vector to watch_error_ts.jl on port 64732 (full rate)",
+			"uri": "anyloop:udp_sink",
+			"params": {
+				"ip":   "127.0.0.1",
+				"port": "64732"
+			}
+		},
+		{
+			"_note1": "THE TEST. Sits after the CoM sinks so the watchers still see the true error, and before the kalman so the open-phase recording is the raw error, not a prediction. start_delay covers the 2 s pid/piplate start_delay holds plus CoM window acquisition. settle_time 25 s matches the loop notes' steady-state threshold (pid acquisition + kalman 10 s handover ramp).",
+			"_note2": "nfft 4096 at the ~2400 Hz loop rate gives ~0.6 Hz bins -- enough to resolve the 22.08 / 30.8 / 59.63 Hz lines. Sample rate is measured from timestamps, not assumed. Outputs land in the working directory: attenuation.pdf and attenuation.dat (freq, then psd_open/psd_closed/atten_dB per axis).",
+			"uri": "anyloop:attenuation_test",
+			"params": {
+				"start_delay": 3.0,
+				"open_time":   120.0,
+				"settle_time": 25.0,
+				"closed_time": 120.0,
+				"nfft":        4096,
+				"labels":      "y,x",
+				"output_file": "attenuation.pdf"
+			}
+		},
+		{
+			"_note": "adaptive predictor, settings verified 2026-07-10 (see steering_tuned.json). During the open phase it trains on zeros and outputs ~0; settle_time above covers its re-convergence after the loop closes.",
+			"uri": "anyloop:kalman_filter",
+			"params": {
+				"type": "vector",
+				"order": 60,
+				"horizon": 5,
+				"mu": 0.03,
+				"gain": 1.0,
+				"gainy": 0,
+				"ramp": 10.0,
+				"clamp": 1.0,
+				"start_delay": 2.0
+			}
+		},
+		{
+			"_note": "gains and line rejection exactly as tuned in steering_tuned.json 2026-07-10; do not change them here or the measurement no longer reflects the tuned loop.",
+			"uri": "anyloop:pid",
+			"params": {
+				"type": "vector",
+				"p": 0,
+				"py":0,
+				"i": 1200,
+				"iy": 1450,
+				"d": 0,
+				"clamp": 1.0,
+				"units": "minmax",
+				"start_delay": 2.0,
+				"lines": [22.08, 57.3],
+				"line_gain": [60, 20],
+				"line_phase": [56, 3],
+				"linesy": [30.80],
+				"line_gainy": [60],
+				"line_phasey": [60],
+				"line_delay": 0.002
+			}
+		},
+		{
+			"uri": "anyloop:clamp",
+			"params": {
+				"type": "vector",
+				"min": -1.0,
+				"max": 1.0
+			}
+		},
+		{
+			"uri": "anyloop:piplate_bridge",
+			"params": {
+				"port":    "/dev/ttyACM0",
+				"board":   0,
+				"channel": [0,  1,  2, 3],
+				"index":   [0,  1,  0,    0],
+				"scale":   [2, -2,   0,   0],
+				"offset":  [2,  2, 0.8, 2.364],
+				"baud":    460800,
+				"start_delay": [2.0, 2.0, 0, 0],
+				"wait_response": false,
+				"skip_unchanged": true
+			}
+		}
+	]
+}

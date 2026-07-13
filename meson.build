@@ -45,7 +45,8 @@ project_source_files = [
 	'devices/vonkarman_stream.c',
 	'devices/piplate_bridge.c',
 	'devices/bode_plot.c',
-	'devices/latency_test.c'
+	'devices/latency_test.c',
+	'devices/attenuation_test.c'
 ]
 
 incdir = include_directories('libaylp')

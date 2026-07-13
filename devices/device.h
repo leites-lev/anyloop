@@ -22,6 +22,7 @@
 #include "devices/piplate_bridge.h"
 #include "devices/bode_plot.h"
 #include "devices/latency_test.h"
+#include "devices/attenuation_test.h"
 
 static const struct {
 	const char *uri;
@@ -48,6 +49,7 @@ static const struct {
 	{ "anyloop:piplate_bridge", piplate_bridge_init },
 	{ "anyloop:bode_plot", bode_plot_init },
 	{ "anyloop:latency_test", latency_test_init },
+	{ "anyloop:attenuation_test", attenuation_test_init },
 };
 
 // match an aylp_device with its initializer function and initialize it
