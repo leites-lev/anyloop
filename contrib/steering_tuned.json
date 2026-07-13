@@ -153,7 +153,7 @@
 				"channel": [0,  1,  2, 3],
 				"index":   [0,  1,  0,    0],
 				"scale":   [2, -2,   0,   0],
-				"offset":  [2,  2, 0.8, 2.364],
+				"offset":  [2,  2, 0.9, 2.364],
 				"baud":    460800,
 				"_note1": "pid is NOT in coarse mode, so its output is plain [y, x]: ch0 (y fine, +2 V/unit) takes index 0, ch1 (x fine, -2 V/unit) index 1 -- verified by step test 2026-07-10 (ch0 -> CoM y, ch1 -> CoM x, positive i = negative feedback on both). Coarse scales are 0 (parked at bias) per the push-test rule: they had been left live at +-2 with unverified sign, which risks positive feedback; with the beam-centred ROI the fine stages have full authority and the coarse stages are not needed. The coarse biases (0.8, 2.394 V) are the ones the ROI position was derived under.",
 				"_note2": "baud 460800 is about pacing, not the wire: the port is USB CDC (baud is cosmetic) but the bridge throttles itself to ~440 cmds/s at the default 115200 -- at a 2310 Hz loop that is a ~2.3 ms command ZOH stacked on the 1.4 ms path delay. Measured 2026-07-10: the bridge drains ~1800 cmds/s; pacing at 460800 (~1770/s) keeps latency flat, while 921600 overruns the drain rate and bufferbloats ~10 ms into a full FIFO. Do not raise past 460800.",
