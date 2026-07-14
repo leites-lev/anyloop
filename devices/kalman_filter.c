@@ -16,8 +16,10 @@ static void kalman_filter_alloc_state(
 	if (data->n == n) return;
 	xfree(data->hist);
 	xfree(data->w);
+	xfree(data->bypass_cnt);
 	data->hist = xcalloc(n * data->hist_len, sizeof(double));
 	data->w = xcalloc(n * data->order, sizeof(double));
+	data->bypass_cnt = xcalloc(n, sizeof(size_t));
 	data->n = n;
 	data->head = 0;
 	data->n_seen = 0;
@@ -101,6 +103,9 @@ int kalman_filter_init(struct aylp_device *self)
 			data->start_delay = json_object_get_double(val);
 			if (data->start_delay < 0) data->start_delay = 0;
 			log_trace("start_delay = %G s", data->start_delay);
+		} else if (!strcmp(key, "bypass")) {
+			data->bypass = json_object_get_double(val);
+			log_trace("bypass = %G", data->bypass);
 		} else {
 			log_warn("Unknown parameter \"%s\"", key);
 		}
@@ -198,6 +203,25 @@ int kalman_filter_proc(struct aylp_device *self, struct aylp_state *state)
 		double a = frac * (j == 0 ? data->gain_y : data->gain);
 		data->hist[j * data->hist_len + data->head] = z;
 		double *w = data->w + j*p;
+		// transient bypass: pass the raw input through and freeze
+		// training while a large disturbance is in flight, and for
+		// hist_len more samples so no training pair or prediction
+		// window straddles the transient (see kalman_filter.h)
+		if (data->bypass > 0.0 && (z > data->bypass
+				|| z < -data->bypass)) {
+			if (!data->bypass_cnt[j])
+				log_debug("kalman_filter: bypass ON "
+					"(element %zu, z = %.4f)", j, z);
+			data->bypass_cnt[j] = data->hist_len + 1;
+		}
+		if (data->bypass_cnt[j]) {
+			data->bypass_cnt[j] -= 1;
+			if (!data->bypass_cnt[j])
+				log_debug("kalman_filter: bypass off "
+					"(element %zu)", j);
+			r->data[j * r->stride] = z;
+			continue;
+		}
 		if (can_train) {
 			// train: predict the sample just written from the
 			// window ending `horizon` samples before it
@@ -250,6 +274,7 @@ int kalman_filter_fini(struct aylp_device *self)
 	xfree(data->hist);
 	xfree(data->w);
 	xfree(data->xbuf);
+	xfree(data->bypass_cnt);
 	if (data->res_v) xfree_type(gsl_vector, data->res_v);
 	xfree(data);
 	return 0;

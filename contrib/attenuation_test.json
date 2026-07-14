@@ -57,7 +57,7 @@
 			"params": {
 				"region_height":   15,
 				"region_width":    15,
-				"threshold":       20,
+				"threshold":       30,
 				"track":           true,
 				"init_y":          32,
 				"init_x":          32
@@ -86,52 +86,59 @@
 			"_note3": "pixel_scale converts the normalized CoM output to pixels for the report: center_of_mass emits -1..+1 across the whole frame (norm = -1 + 2*px/(dim-1)), so at 64x64 one output unit = (64-1)/2 = 31.5 px. If width/height change, update this (e.g. 32x32 -> 15.5). config is a free-text summary of the tuned loop that is printed verbatim on page 2 of the PDF, next to the run's start date/time, the per-10 Hz-band RMS table (in px), and the mean (pointing offset) and RMS-about-mean (jitter) for each axis, open vs closed. Keep config in sync with the pid/kalman/line params below.",
 			"uri": "anyloop:attenuation_test",
 			"params": {
-				"start_delay": 3.0,
-				"open_time":   200.0,
-				"settle_time": 25.0,
-				"closed_time": 200.0,
+				"start_delay": 100.0,
+				"open_time":   500.0,
+				"settle_time": 100.0,
+				"closed_time": 500.0,
 				"nfft":        4096,
 				"labels":      "y,x",
 				"pixel_scale": 31.5,
-				"config":      "camera ASI290MM 64x64, ROI start (920,488), ~2310 Hz loop\npid: integrator-only (p=py=d=0), i=600 iy=1300, units=minmax\nlines x=[22.08,57.3] gain=[60,20] phase=[56,3]\nlinesy=[30.8] gainy=[60] phasey=[60], line_delay=0.002\nkalman: order=60 horizon=5 mu=0.03 gain=1.0 gainy=0 ramp=10\npiplate: fine ch0(+2)/ch1(-2), coarse parked, baud 460800",
-				"output_file": "attenuation2.pdf"
+				"config":      "100, 500, 100, 500, 4096: camera ASI290MM 64x64, ROI start (920,488), ~2310 Hz loop\npid: i=1050 iy=1500 + LEAD (s+2pi*8)/(s+2pi*32) both axes -> fc 64/65 Hz, PM 67, model Ms 2.0\n(design: grid search over attenuation9 open PSD; lead trades <8 Hz gain for +37 deg at 16-64 Hz)\nlines x=[9.8,12.0,21.7,24.9,57.5,83.3] gain=[40,60,60,40,20,15] phase=[40.8,37.7,32.6,31.9,19.1,-2.7]\nlinesy=[5.64,11.3,21.1,29.6,57.5] gainy=[50,50,40,30,15] phasey=[52.3,38.6,32.8,31.0,19.3]\nphases = plant+sensitivity WITH lead: phi=-360*f*tau + angle(1/(1+L))\nkalman: order=80 horizon=5 mu=0.03 gain=1.0 gainy=1.0 ramp=10\npiplate: fine ch0(+2)/ch1(-2), coarse bias 2.55/1.65 (bode @ 2.52/1.62), baud 460800",
+				"output_file": "attenuation10_lead_fc64.pdf"
 			}
 		},
 		{
-			"_note": "adaptive predictor, settings verified 2026-07-10 (see steering_tuned.json). During the open phase it trains on zeros and outputs ~0; settle_time above covers its re-convergence after the loop closes.",
+			"_note": "adaptive predictor (see steering_tuned.json). During the open phase it trains on zeros and outputs ~0; settle_time above covers its re-convergence after the loop closes. DO NOT set gain<1: run 4 (attenuation4_kalman07_h6, gain 0.7 + horizon 6) collapsed the x loop -- sensitivity crossover 28->15 Hz, closed/open ratio 0.94 vs 0.60 -- and the bode at the same bias (fsm2310_bode_x_bias105) shows |P|x unchanged, so the blend itself is what broke it (NLMS trains on the blended closed-loop signal and finds a bad equilibrium). gain 1.0 / horizon 5 is the verified best (run 2: x 0.384 px).",
 			"uri": "anyloop:kalman_filter",
 			"params": {
+				"_note2": "retuned 2026-07-14 from the fine (240-pt) bode sweeps: order 60->80 = ceil(2*fs/58.08), two full periods of the dominant high line in the regression window (the old 60 spanned only 38.5 Hz and up). horizon 5 confirmed by the delay budget: tau_loop/Ts = 3.93 frames + ~0.5 fr exposure smear + ~0.65 fr DAC command ZOH (bridge paces ~1770 cmds/s) -> ceil = 5. mu 0.03 kept: tracking time order/(mu*fs) = 1.15 s < the ~1.7 s line-wander timescale, misadjustment mu/2 = 1.5%.",
 				"type": "vector",
-				"order": 60,
+				"order": 80,
 				"horizon": 5,
 				"mu": 0.03,
 				"gain": 1.0,
-				"gainy": 0,
+				"gainy": 1.0,
 				"ramp": 10.0,
 				"clamp": 1.0,
 				"start_delay": 2.0
 			}
 		},
 		{
-			"_note": "gains and line rejection exactly as tuned in steering_tuned.json 2026-07-10; do not change them here or the measurement no longer reflects the tuned loop.",
+			"_note4": "LEAD-COMPENSATED design (2026-07-14 evening, from a grid search of i x lead over the measured attenuation9 open PSD, constraints PM>=45 deg and Ms=max|S|<=2.0, plant Kx=0.427 Ky=0.300 tau=1.81 ms): C(s) = i/s * (s+2pi*8)/(s+2pi*32). The lead's +37 deg near 16-64 Hz buys crossover fc 46->64 Hz (x) and 24->65 Hz (y) at PM 67; its price is 4x less gain below 8 Hz (fz/fp=0.25), which the budget can afford (0-10 Hz closed was 0.050/0.040 px). Predicted from the model: x 10-30 Hz 0.207->0.186, y 10-30 0.246->0.128 px; the model is conservative (ignores oscillators+NLMS, overpredicted attenuation9 by ~25%). i=1050/iy=1500 place |L|=1 at 64/65 Hz WITH the lead's HF gain ~1. ROLLBACK if 60-120 Hz blows up or a line pumps: i=680, iy=500, no lead_* params, and the attenuation9 phase lists (77.8,75.6,63.6,58.7,13.8,-24.3 / 76.5,42.6,26.8,-13.7 at lines 9.8,11.6,21.1,24.9,57.5,83.7 / 5.64,21.1,29.6,57.5).",
+			"_note5": "OSCILLATOR PHASES (attenuation8 lesson, VALIDATED by attenuation9: x 0.400->0.282 px, y 0.253->0.221): the default phi=-360*f*line_delay compensates the PLANT only, but the closed-loop command->error path is P*S and phase(S) was +45..+84 deg at these lines -- every notch realized ~0.7 Hz above its oscillator. Correct formula: phi = -360*f*tau + angle(1/(1+L(f))), with L including the LEAD section now (that is why these phases are ~30 deg, not ~70: the lead flattens phase(S) in-band). RECOMPUTE whenever i, iy, lead_*, or bias (K) changes. Line centers on the multi-run measured positions (they wander ~0.5 Hz/run: x 20.9<->22.6, so 21.7 center; y 11.28 is rock-steady across runs and finally gets its own oscillator -- it was y's largest un-notched line at 0.095 px). Gains: notch half-width df=g*K/(4pi), >= the observed wander; cap 20/15 near/above crossover (x 57.5 at 0.90*fc, y 57.5 at 0.88*fc, x 83.3 at 1.3*fc).",
+			"_note6": "kalman gainy 1.0 (first y try since 2026-07-10): the old 'prediction pumps y 30.8 Hz' failure happened when fc_y was 62 Hz; y now crosses at 24 Hz and its dominant residual is the predictable 10-30 Hz cluster (0.107 px broadband in 20-30 even with lines notched) plus 57.5 Hz -- exactly what the NLMS eats on x. If this run shows a y line pumped >2x vs attenuation8, set gainy back to 0 (never 0<gainy<1).",
 			"uri": "anyloop:pid",
 			"params": {
 				"type": "vector",
 				"p": 0,
 				"py":0,
-				"i": 600,
-				"iy": 1300,
+				"i": 1050,
+				"iy": 1500,
 				"d": 0,
+				"lead_fz": 8,
+				"lead_fp": 32,
+				"lead_fzy": 8,
+				"lead_fpy": 32,
 				"clamp": 1.0,
 				"units": "minmax",
 				"start_delay": 2.0,
-				"lines": [22.08, 57.3],
-				"line_gain": [60, 20],
-				"line_phase": [56, 3],
-				"linesy": [30.80],
-				"line_gainy": [60],
-				"line_phasey": [60],
-				"line_delay": 0.002
+				"lines": [9.8, 12.0, 21.7, 24.9, 57.5, 83.3],
+				"line_gain": [40, 60, 60, 40, 20, 15],
+				"line_phase": [40.8, 37.7, 32.6, 31.9, 19.1, -2.7],
+				"linesy": [5.64, 11.3, 21.1, 29.6, 57.5],
+				"line_gainy": [50, 50, 40, 30, 15],
+				"line_phasey": [52.3, 38.6, 32.8, 31.0, 19.3],
+				"line_delay": 0.0018
 			}
 		},
 		{
@@ -150,7 +157,7 @@
 				"channel": [0,  1,  2, 3],
 				"index":   [0,  1,  0,    0],
 				"scale":   [2, -2,   0,   0],
-				"offset":  [2,  2, 0.9, 2.364],
+				"offset":  [2,  2, 2.52, 1.65],
 				"baud":    460800,
 				"start_delay": [2.0, 2.0, 0, 0],
 				"wait_response": false,
@@ -159,3 +166,4 @@
 		}
 	]
 }
+

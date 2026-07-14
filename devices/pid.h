@@ -85,37 +85,6 @@ struct aylp_pid_data {
 	// type only). Bilinear coeffs are recomputed each step from the live dt.
 	gsl_vector *lead_in_v;
 	gsl_vector *lead_out_v;
-	// dual-stage coarse channels (vector type only). When enabled, the device
-	// takes the usual 2-element [y, x] error but outputs 4 elements:
-	//   [0] x_fine  [1] y_fine  [2] x_coarse  [3] y_coarse
-	// The fine channels are the existing PID above; the coarse channels are an
-	// independent PID per axis with its own gains, gated with hysteresis on
-	// the VOLTAGE the fine channel is commanding: a coarse channel activates
-	// when its fine channel leaves [coarse_on_low, coarse_on_high] (i.e. is
-	// running out of travel) and deactivates when the fine channel returns
-	// within [coarse_off_low, coarse_off_high], at which point its output
-	// FREEZES at the value that brought the fine channel back in -- the
-	// coarse stage must hold the position it walked to, not snap back to bias.
-	bool coarse;
-	// coarse gains, same base-is-x / _y-inherits convention as p/p_y above
-	double coarse_p, coarse_i, coarse_d, coarse_g;
-	double coarse_p_y, coarse_i_y, coarse_d_y, coarse_g_y;
-	// the gate watches the fine channel's output voltage, so it needs the
-	// same volts = offset + cmd*scale mapping the DAC stage applies; these
-	// must mirror the piplate_bridge scale/offset of the fine channels
-	double fine_scale, fine_offset;		// x fine channel
-	double fine_scale_y, fine_offset_y;	// y fine channel
-	// hysteresis thresholds, in volts; the off window must sit inside the
-	// on window or the gate would chatter
-	double coarse_on_low, coarse_on_high;
-	double coarse_off_low, coarse_off_high;
-	// per-axis coarse state, indexed [0]=x, [1]=y
-	bool coarse_active[2];		// gate state
-	double coarse_acc[2];		// integrator accumulator
-	double coarse_pre[2];		// previous error, for the derivative
-	double coarse_res[2];		// last output; held while inactive
-	// start of the current status-report window (s); 0 until seeded
-	double diag_t0;
 	// narrowband line rejection, per axis: [0] = y (element 0), [1] = x
 	// (element 1); see struct aylp_pid_line above
 	struct aylp_pid_line line[2][AYLP_PID_MAX_LINES];

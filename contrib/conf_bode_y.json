@@ -27,10 +27,10 @@
 		{
 			"uri": "anyloop:center_of_mass",
 			"params": {
-				"_note": "tracked 25x25 window, initialized on the beam (frame centre) with no acquisition phase: bode_plot injects from the first frame, and the stray reflection at ROI (10,28) must stay out of the sum. Output is image-normalized, same as the loop sees.",
-				"region_height": 25,
-				"region_width": 25,
-				"threshold": 20,
+				"_note": "tracked 15x15 window, threshold 30 -- matches attenuation_test.json exactly so the sweep measures the same sensor the loop sees. Initialized on the beam (frame centre) with no acquisition phase: bode_plot injects from the first frame, and the stray reflection at ROI (10,28) must stay out of the sum. Output is image-normalized.",
+				"region_height": 15,
+				"region_width": 15,
+				"threshold": 30,
 				"track": true,
 				"init_y": 32,
 				"init_x": 32
@@ -46,15 +46,16 @@
 				"output": "raw",
 				"freq_start": 5.0,
 				"freq_end": 300.0,
-				"n_freqs": 40,
-				"n_settle": 200,
-				"n_cycles": 12.0,
+				"_tuning": "n_freqs 100 / n_settle 400 / n_cycles 40 (2026-07-14): see conf_bode_x.json -- the 240-pt/12-cycle sweep was jagged (worse on y: |P|y*A is only ~0.028, so the ambient lines dominate short correlations, and the 5 Hz point was swamped by the 5.64 Hz line).",
+				"n_freqs": 100,
+				"n_settle": 400,
+				"n_cycles": 40.0,
 				"amplitude": 0.15,
-				"output_file": "fsm2310_bode_y.pdf"
+				"output_file": "fsm2310_bode_y_bias2.47,1.62_2026-07-14_fine.pdf"
 			}
 		},
 		{
-			"_note": "same mapping as steering_tuned.json: ch0=y(idx0, driven), ch1=x(idx1, parked), ch2/ch3 coarse parked.",
+			"_note": "same mapping as steering_tuned.json: ch0=y(idx0, driven), ch1=x(idx1, parked), ch2/ch3 coarse parked. Coarse offsets 2.52/1.62 = current operating point (2026-07-14; was 2.7/1.65 on 07-13, 0.8/2.394 for the 2026-07-10 sweep).",
 			"uri": "anyloop:piplate_bridge",
 			"params": {
 				"port": "/dev/ttyACM0",
@@ -78,10 +79,7 @@
 					0
 				],
 				"offset": [
-					2,
-					2,
-					0.8,
-					2.394
+2,  2, 2.47, 1.62
 				],
 				"baud": 460800,
 				"wait_response": false,

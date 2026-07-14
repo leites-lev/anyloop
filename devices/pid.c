@@ -7,9 +7,6 @@
 #include "xalloc.h"
 #include "pid.h"
 
-// seconds between coarse-mode status reports (fine voltages + gate state)
-#define PID_DIAG_PERIOD 5.0
-
 
 /** One step of the series lead section, as a pure function of its input and the
 * stored filter state. Keeping it pure lets the anti-windup logic below evaluate
@@ -74,22 +71,6 @@ int pid_init(struct aylp_device *self)
 	data->lead_g = 1.0;
 	data->lead_fz_y = data->lead_fp_y = 0.0;
 	data->lead_g_y = 1.0;
-	// coarse channels off by default; gains 0 so an enabled-but-untuned
-	// coarse channel commands nothing
-	data->coarse = false;
-	data->coarse_p = data->coarse_i = data->coarse_d = 0.0;
-	data->coarse_g = 1.0;
-	data->coarse_p_y = data->coarse_i_y = data->coarse_d_y = -1.0;
-	data->coarse_g_y = -1.0;
-	// fine-channel volts mapping has no sane default; required in coarse mode
-	data->fine_scale = data->fine_scale_y = 0.0;
-	data->fine_offset = data->fine_offset_y = 0.0;
-	// gate thresholds (V): on when the fine channel leaves [0.5, 3.5],
-	// off when it returns within [1, 3]
-	data->coarse_on_low = 0.5;
-	data->coarse_on_high = 3.5;
-	data->coarse_off_low = 1.0;
-	data->coarse_off_high = 3.0;
 
 	// line-rejection staging; assembled into data->line after the parse.
 	// index [1] = x (base params), [0] = y, matching the p/p_y convention
@@ -196,49 +177,6 @@ int pid_init(struct aylp_device *self)
 		} else if (!strcmp(key, "line_phasey")) {
 			n_lphase[0] = parse_double_list(val, lphase[0],
 				AYLP_PID_MAX_LINES);
-		} else if (!strcmp(key, "coarse")) {
-			data->coarse = json_object_get_boolean(val);
-			log_trace("coarse = %d", data->coarse);
-		} else if (!strcmp(key, "coarse_p")) {
-			data->coarse_p = json_object_get_double(val);
-			log_trace("coarse_p = %G", data->coarse_p);
-		} else if (!strcmp(key, "coarse_i")) {
-			data->coarse_i = json_object_get_double(val);
-			log_trace("coarse_i = %G", data->coarse_i);
-		} else if (!strcmp(key, "coarse_d")) {
-			data->coarse_d = json_object_get_double(val);
-			log_trace("coarse_d = %G", data->coarse_d);
-		} else if (!strcmp(key, "coarse_g")) {
-			data->coarse_g = json_object_get_double(val);
-			log_trace("coarse_g = %G", data->coarse_g);
-		} else if (!strcmp(key, "coarse_py")) { data->coarse_p_y = json_object_get_double(val);
-		} else if (!strcmp(key, "coarse_iy")) { data->coarse_i_y = json_object_get_double(val);
-		} else if (!strcmp(key, "coarse_dy")) { data->coarse_d_y = json_object_get_double(val);
-		} else if (!strcmp(key, "coarse_gy")) { data->coarse_g_y = json_object_get_double(val);
-		} else if (!strcmp(key, "fine_scale")) {
-			data->fine_scale = json_object_get_double(val);
-			log_trace("fine_scale = %G", data->fine_scale);
-		} else if (!strcmp(key, "fine_offset")) {
-			data->fine_offset = json_object_get_double(val);
-			log_trace("fine_offset = %G", data->fine_offset);
-		} else if (!strcmp(key, "fine_scaley")) {
-			data->fine_scale_y = json_object_get_double(val);
-			log_trace("fine_scaley = %G", data->fine_scale_y);
-		} else if (!strcmp(key, "fine_offsety")) {
-			data->fine_offset_y = json_object_get_double(val);
-			log_trace("fine_offsety = %G", data->fine_offset_y);
-		} else if (!strcmp(key, "coarse_on_low_v")) {
-			data->coarse_on_low = json_object_get_double(val);
-			log_trace("coarse_on_low_v = %G", data->coarse_on_low);
-		} else if (!strcmp(key, "coarse_on_high_v")) {
-			data->coarse_on_high = json_object_get_double(val);
-			log_trace("coarse_on_high_v = %G", data->coarse_on_high);
-		} else if (!strcmp(key, "coarse_off_low_v")) {
-			data->coarse_off_low = json_object_get_double(val);
-			log_trace("coarse_off_low_v = %G", data->coarse_off_low);
-		} else if (!strcmp(key, "coarse_off_high_v")) {
-			data->coarse_off_high = json_object_get_double(val);
-			log_trace("coarse_off_high_v = %G", data->coarse_off_high);
 		} else {
 			log_warn("Unknown parameter \"%s\"", key);
 		}
@@ -275,43 +213,6 @@ int pid_init(struct aylp_device *self)
 	}
 	if (data->dfilt_y < 0) data->dfilt_y = data->dfilt;
 	if (data->deadband_y < 0) data->deadband_y = data->deadband;
-	// coarse-channel inheritance and hysteresis sanity
-	if (data->coarse_p_y < 0) data->coarse_p_y = data->coarse_p;
-	if (data->coarse_i_y < 0) data->coarse_i_y = data->coarse_i;
-	if (data->coarse_d_y < 0) data->coarse_d_y = data->coarse_d;
-	if (data->coarse_g_y < 0) data->coarse_g_y = data->coarse_g;
-	if (data->coarse && data->type != AYLP_T_VECTOR) {
-		log_error("coarse channels need type=vector.");
-		return -1;
-	}
-	if (data->coarse
-			&& (data->fine_scale == 0.0 || data->fine_scale_y == 0.0)) {
-		// without the volts mapping the gate would compare garbage
-		log_error("coarse mode needs fine_scale/fine_offset (and the y "
-			"variants) matching the DAC stage's scale/offset for "
-			"the fine channels.");
-		return -1;
-	}
-	// the off window must sit inside the on window: a fine voltage that is
-	// past an on threshold but already inside the off window would toggle
-	// the gate every iteration
-	if (data->coarse_off_low < data->coarse_on_low) {
-		log_warn("coarse_off_low_v (%G) < coarse_on_low_v (%G); "
-			"raising it", data->coarse_off_low, data->coarse_on_low);
-		data->coarse_off_low = data->coarse_on_low;
-	}
-	if (data->coarse_off_high > data->coarse_on_high) {
-		log_warn("coarse_off_high_v (%G) > coarse_on_high_v (%G); "
-			"lowering it",
-			data->coarse_off_high, data->coarse_on_high);
-		data->coarse_off_high = data->coarse_on_high;
-	}
-	if (data->coarse && data->coarse_off_low > data->coarse_off_high) {
-		log_error("coarse_off_low_v (%G) > coarse_off_high_v (%G); the "
-			"gate could never deactivate.",
-			data->coarse_off_low, data->coarse_off_high);
-		return -1;
-	}
 	// make sure we didn't miss any params
 	if (!data->type) {
 		log_error("You must provide valid type param.");
@@ -378,14 +279,6 @@ int pid_proc(struct aylp_device *self, struct aylp_state *state)
 	switch (data->type) {
 	case AYLP_T_VECTOR: {
 		gsl_vector *s = state->vector;
-		if (UNLIKELY(data->coarse && s->size != 2)) {
-			log_error("coarse mode needs a 2-element [y, x] error "
-				"vector; got %zu elements", s->size);
-			return -1;
-		}
-		// coarse mode fans the 2-element error out to 4 output channels:
-		// [x_fine, y_fine, x_coarse, y_coarse]
-		size_t out_size = data->coarse ? 4 : s->size;
 		// check if we need to (re)initialize
 		if (data->acc_v->size != s->size) {
 			xfree_type(gsl_vector, data->acc_v);
@@ -395,9 +288,9 @@ int pid_proc(struct aylp_device *self, struct aylp_state *state)
 			xfree_type(gsl_vector, data->pre_v);
 			data->pre_v = xcalloc_type(gsl_vector, s->size);
 		}
-		if (data->res_v->size != out_size) {
+		if (data->res_v->size != s->size) {
 			xfree_type(gsl_vector, data->res_v);
-			data->res_v = xmalloc_type(gsl_vector, out_size);
+			data->res_v = xcalloc_type(gsl_vector, s->size);
 		}
 		// derivative-filter state, zeroed so it starts at rest
 		if (data->dfd_v->size != s->size) {
@@ -443,24 +336,12 @@ int pid_proc(struct aylp_device *self, struct aylp_state *state)
 						j*data->lead_out_v->stride] = 0.0;
 				}
 				gsl_vector_set_zero(r);
-				// keep the coarse channels parked and untriggered too
-				for (int c = 0; c < 2; c++) {
-					data->coarse_active[c] = false;
-					data->coarse_acc[c] = 0.0;
-					data->coarse_res[c] = 0.0;
-					data->coarse_pre[c] = s->data[
-						(c ? 0 : 1) * s->stride];
-				}
 				// and the line-rejection weights empty
 				for (int ax = 0; ax < 2; ax++)
 				for (size_t k = 0; k < data->n_lines[ax]; k++)
 					data->line[ax][k].a =
 						data->line[ax][k].b = 0.0;
 				state->vector = data->res_v;
-				if (data->coarse) {
-					state->header.log_dim.y = r->size;
-					state->header.log_dim.x = 1;
-				}
 				break;
 			}
 			data->started = true;
@@ -471,9 +352,6 @@ int pid_proc(struct aylp_device *self, struct aylp_state *state)
 
 		// loop over elements and apply PID control
 		for (size_t j = 0; j < s->size; j++) {
-			// coarse mode reorders the outputs: input is [y, x] but the
-			// output channels are [x_fine, y_fine, x_coarse, y_coarse]
-			size_t jr = data->coarse ? (j ? 0 : 1) : j;
 			double pj = j ? data->p : data->p_y;
 			double ij = j ? data->i : data->i_y;
 			double dj = j ? data->d : data->d_y;
@@ -536,7 +414,15 @@ int pid_proc(struct aylp_device *self, struct aylp_state *state)
 			double a_prev = a->data[j*a->stride];
 			double a_leak = gj * a_prev;	// leak, before this sample's error
 			double a_try = a_leak + dt * e;
-			double a_max = acc_limit(ij, data->clamp);
+			// the integral term reaches the output THROUGH the lead,
+			// whose DC gain is g*fz/fp -- bound the accumulator by what
+			// the output can express after that attenuation, or a lead
+			// with fz<fp throttles the integrator's authority to
+			// clamp*fz/fp and the loop parks off-setpoint (seen
+			// 2026-07-14 with lead 8/32: x stuck ~2 px off, integral
+			// path pinned at clamp/4)
+			double dcj = (lead_on && fzj > 0.0) ? glj*fzj/fpj : 1.0;
+			double a_max = acc_limit(ij*dcj, data->clamp);
 			if (a_try > a_max) a_try = a_max;
 			else if (a_try < -a_max) a_try = -a_max;
 
@@ -593,103 +479,16 @@ int pid_proc(struct aylp_device *self, struct aylp_state *state)
 				}
 				out += u;
 			}
-			r->data[jr*r->stride] = out;
+			r->data[j*r->stride] = out;
 			// clamp result if needed
-			if (r->data[jr*r->stride] > data->clamp)
-				r->data[jr*r->stride] = data->clamp;
-			else if (r->data[jr*r->stride] < -data->clamp)
-				r->data[jr*r->stride] = -data->clamp;
+			if (r->data[j*r->stride] > data->clamp)
+				r->data[j*r->stride] = data->clamp;
+			else if (r->data[j*r->stride] < -data->clamp)
+				r->data[j*r->stride] = -data->clamp;
 			// update previous
 			p->data[j*p->stride] = e;
 		}
-		// coarse channels: an independent PID per axis, gated with
-		// hysteresis on the VOLTAGE the fine channel is commanding.
-		// Activates when the fine channel leaves [on_low, on_high] --
-		// i.e. is running out of travel -- and deactivates when the fine
-		// channel returns within [off_low, off_high], at which point the
-		// output FREEZES where it is: the coarse stage has walked in and
-		// taken over the offset, and must hold that position, not snap
-		// back to bias (which would just rail the fine channel again).
-		if (data->coarse) for (int c = 0; c < 2; c++) {
-			// c: 0 = x (input element 1, output 2), 1 = y (input 0, output 3)
-			double e = s->data[(c ? 0 : 1) * s->stride];
-			double cp = c ? data->coarse_p_y : data->coarse_p;
-			double ci = c ? data->coarse_i_y : data->coarse_i;
-			double cd = c ? data->coarse_d_y : data->coarse_d;
-			double cg = c ? data->coarse_g_y : data->coarse_g;
-			// the voltage the DAC stage will produce for this axis's
-			// fine command (result element c, already clamped above)
-			double fs = c ? data->fine_scale_y : data->fine_scale;
-			double fo = c ? data->fine_offset_y : data->fine_offset;
-			double v = fo + r->data[c*r->stride] * fs;
-			if (!data->coarse_active[c]
-					&& (v <= data->coarse_on_low
-						|| v >= data->coarse_on_high)) {
-				data->coarse_active[c] = true;
-				// track the error so the derivative doesn't spike
-				// on the first active sample
-				data->coarse_pre[c] = e;
-				log_info("pid: coarse %c on (fine channel at "
-					"%.2f V)", c ? 'y' : 'x', v);
-			} else if (data->coarse_active[c]
-					&& v >= data->coarse_off_low
-					&& v <= data->coarse_off_high) {
-				data->coarse_active[c] = false;
-				log_info("pid: coarse %c off (fine channel back "
-					"to %.2f V); holding output at %.4f",
-					c ? 'y' : 'x', v, data->coarse_res[c]);
-			}
-			if (data->coarse_active[c]) {
-				double de = (e - data->coarse_pre[c]) / dt;
-				// integrator with leak and anti-windup, as above
-				double a_leak = cg * data->coarse_acc[c];
-				double a_try = a_leak + dt * e;
-				double a_max = acc_limit(ci, data->clamp);
-				if (a_try > a_max) a_try = a_max;
-				else if (a_try < -a_max) a_try = -a_max;
-				double out = - cp*e - ci*a_try - cd*de;
-				double push = -ci * (a_try - a_leak);
-				if (UNLIKELY((out > data->clamp && push > 0.0)
-						|| (out < -data->clamp && push < 0.0))) {
-					a_try = a_leak;
-					out = - cp*e - ci*a_try - cd*de;
-				}
-				data->coarse_acc[c] = a_try;
-				if (out > data->clamp) out = data->clamp;
-				else if (out < -data->clamp) out = -data->clamp;
-				data->coarse_res[c] = out;
-				data->coarse_pre[c] = e;
-			}
-			r->data[(2 + c)*r->stride] = data->coarse_res[c];
-		}
 		state->vector = data->res_v;
-		if (data->coarse) {
-			// the output no longer has the input's shape; keep the
-			// header honest for downstream sinks
-			state->header.log_dim.y = r->size;
-			state->header.log_dim.x = 1;
-			// periodic status: the voltages the fine channels are
-			// commanding, and each coarse gate's state. The on/off
-			// transitions log immediately; this is the heartbeat in
-			// between, for watching how close the fine stage is to
-			// handing off.
-			double now = tp1.tv_sec + 1E-9 * tp1.tv_nsec;
-			if (UNLIKELY(!data->diag_t0)) data->diag_t0 = now;
-			if (UNLIKELY(now - data->diag_t0 >= PID_DIAG_PERIOD)) {
-				data->diag_t0 = now;
-				double vx = data->fine_offset
-					+ r->data[0] * data->fine_scale;
-				double vy = data->fine_offset_y
-					+ r->data[1*r->stride] * data->fine_scale_y;
-				log_info("pid: fine x %.3f V, y %.3f V | coarse "
-					"x %s (out %+.4f), y %s (out %+.4f)",
-					vx, vy,
-					data->coarse_active[0] ? "ON" : "off",
-					data->coarse_res[0],
-					data->coarse_active[1] ? "ON" : "off",
-					data->coarse_res[1]);
-			}
-		}
 		break;
 	}
 

@@ -109,7 +109,7 @@ const OUTFILE, TIMESTAMP, SECONDS, COM, PIXEL, FMIN, FMAX, XTICK = parse_args(AR
 # in track mode, the region otherwise; convert to pixels with value*(PIXEL-1)/2
 const PIX_PER_UNIT = (PIXEL - 1) / 2
 const N = max(round(Int, SECONDS * FS), 2)
-const SAVE_EVERY = 400.0  # seconds between saves
+const SAVE_EVERY = 40000.0  # seconds between saves
 
 # build the name to save under, inserting a timestamp if requested
 function save_path()

@@ -22,7 +22,7 @@
 				"camera_name": "ASI290MM",
 				"width": 64,
 				"height": 64,
-				"exposure": 330,
+				"exposure": 360,
 				"gain": 100,
 				"bandwidth": 100,
 				"high_speed": 1,
@@ -33,10 +33,10 @@
 		{
 			"uri": "anyloop:center_of_mass",
 			"params": {
-				"_note": "tracked 25x25 window, initialized on the beam (frame centre) with no acquisition phase: bode_plot injects from the first frame, and the stray reflection at ROI (10,28) must stay out of the sum. Output is image-normalized, same as the loop sees.",
-				"region_height": 25,
-				"region_width": 25,
-				"threshold": 20,
+				"_note": "tracked 15x15 window, threshold 30 -- matches steering_tuned.json exactly so the sweep measures the same sensor the loop sees. Initialized on the beam (frame centre) with no acquisition phase: bode_plot injects from the first frame, and the stray reflection at ROI (10,28) must stay out of the sum. Output is image-normalized.",
+				"region_height": 15,
+				"region_width": 15,
+				"threshold": 30,
 				"track": true,
 				"init_y": 32,
 				"init_x": 32
@@ -52,15 +52,16 @@
 				"output": "raw",
 				"freq_start": 5.0,
 				"freq_end": 300.0,
-				"n_freqs": 40,
-				"n_settle": 200,
-				"n_cycles": 12.0,
+				"_tuning": "n_freqs 100 / n_settle 400 / n_cycles 40 (2026-07-14): the 240-pt/12-cycle sweep was jagged -- 12 cycles is only ~0.12 s of correlation at 100 Hz, so ambient lines and CoM drift don't average out (estimator error falls as 1/n_cycles for line/DC leakage). 40 cycles also makes the 5 Hz window 8 s long, resolving it from the 5.64 Hz line. Total ~3.5 min.",
+				"n_freqs": 100,
+				"n_settle": 400,
+				"n_cycles": 40.0,
 				"amplitude": 0.2,
-				"output_file": "fsm2310_bode_x.pdf"
+				"output_file": "fsm2310_bode_x_bias2.47,1.62_2026-07-14_fine.pdf"
 			}
 		},
 		{
-			"_note": "same mapping as steering_tuned.json: ch0=y(idx0, parked), ch1=x(idx1, driven), ch2/ch3 coarse parked. skip_unchanged: only the driven channel costs wire time.",
+			"_note": "same mapping as steering_tuned.json: ch0=y(idx0, parked), ch1=x(idx1, driven), ch2/ch3 coarse parked. skip_unchanged: only the driven channel costs wire time. Coarse offsets 2.52/1.62 = current operating point (2026-07-14) so the sweep measures the plant the tuned loop actually sees; earlier sweeps used 2.7/1.65, 2.6/1.4 (steering_tuned 2026-07-13), 1.05/2.35 (attenuation runs) and 0.8/2.394 (2026-07-10, |P|x=0.43).",
 			"uri": "anyloop:piplate_bridge",
 			"params": {
 				"port": "/dev/ttyACM0",
@@ -83,12 +84,7 @@
 					0,
 					0
 				],
-				"offset": [
-					2,
-					2,
-					0.8,
-					2.394
-				],
+				"offset": [2,  2, 2.47, 1.62],
 				"baud": 460800,
 				"wait_response": false,
 				"skip_unchanged": true

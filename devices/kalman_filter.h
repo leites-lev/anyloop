@@ -85,6 +85,18 @@ struct aylp_kalman_filter_data {
 	double *xbuf;
 	// place to put the result
 	gsl_vector *res_v;
+	// transient bypass: while |input| > bypass, and for hist_len samples
+	// after it last was (until the regression window has flushed the
+	// transient), pass the RAW input through and freeze training. A large
+	// disturbance (bumped mount, acquisition) is out-of-distribution for
+	// the AR model: the prediction collapses toward zero while the beam is
+	// still displaced -- which fools any downstream large-error logic (the
+	// pid's fast mode) into disengaging early -- and training on it
+	// scrambles the weights, parking the loop off-null until they
+	// re-converge. <= 0 disables (default). Units = input error units.
+	double bypass;
+	// per-element countdown of remaining bypassed samples
+	size_t *bypass_cnt;
 };
 
 // initialize kalman_filter device

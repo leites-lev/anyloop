@@ -50,7 +50,7 @@
 				"start_x":     920,
 				"start_y":     488,
 				"_note": "start_x/start_y centre the ROI on the beam's parked position, sensor ~(y 520, x 952) with the DAC biases below (coarse ch2=0.8 V, ch3=2.394 V). If the coarse biases change, re-derive these with a probe frame (0.7 V on ch2 moved the beam to y 507/x 947). 32x32 was tried 2026-07-10 and reverted: frame rate only rises 2400->~3060 Hz, delay drops just ~0.25 ms (camera fixed latency + DAC ZOH dominate), performance is identical, and the stray reflection ends up only 11 px from the beam. Remember CoM normalization: at 32x32 loop gain doubles, so i/iy and line gains must be halved (i=300/iy=700 was stable there).",
-				"exposure":    430,
+				"exposure":    200,
 				"gain":        100,
 				"bandwidth":   100,
 				"high_speed":  1
@@ -73,7 +73,7 @@
 			"params": {
 				"region_height":   15,
 				"region_width":    15,
-				"threshold":       20,
+				"threshold":       22,
 				"track":           true,
 				"init_y":          32,
 				"init_x":          32
@@ -99,41 +99,45 @@
 			}
 		},
 		{
-			"_note": "adaptive predictor (see doc/devices/kalman_filter.md): replaces the error with its own prediction ~2.1 ms (5 samples) ahead, so the pid acts on where the beam will be when the command lands. A/B-validated 2026-07-10: x steady-state RMS 0.91 -> 0.61 px alone, 0.59 with the pid line oscillators (they coexist fine); the 20-25 Hz lines drop ~5x. gainy is 0 because prediction on y PUMPED its 30.8 Hz line 3x -- y's ~62 Hz crossover loop reacts badly to the extra phase dynamics. Trains continuously; hands over along a 10 s ramp after start_delay.",
+			"_note": "adaptive predictor (see doc/devices/kalman_filter.md): replaces the error with its own prediction ~2.1 ms (5 samples) ahead, so the pid acts on where the beam will be when the command lands. A/B-validated 2026-07-10 (x 0.91 -> 0.59 px with the pid line oscillators); re-A/B'd 2026-07-13 over 500 s (x closed 0.384 px vs 0.502 px without). KNOWN COSTS at gain=1.0: 0-5 Hz attenuation -8 dB instead of the -24 dB the loop achieves without the kalman, and a ~-0.11 px x DC pointing bias. DO NOT try to fix that with gain<1: run 4 (gain 0.7 + horizon 6, 2026-07-13) collapsed the x loop (sensitivity crossover 28->15 Hz, closed/open 0.94 vs 0.60) while a bode at the same bias showed |P|x unchanged -- the NLMS trains on the blended closed-loop signal and lands in a bad equilibrium. gainy history: prediction on y PUMPED its 30.8 Hz line 3x back when y crossed at ~62 Hz (iy=1300); re-enabled at 1.0 on 2026-07-14 now that fc_y is 24 Hz and y's dominant residual is the predictable 10-30 Hz cluster -- if a y line pumps >2x, set gainy back to 0 (never a fraction). Trains continuously; hands over along a 10 s ramp after start_delay.",
 			"uri": "anyloop:kalman_filter",
 			"params": {
+				"_note2": "order 60->80 (2026-07-14, fine bode retune): ceil(2*fs/58.08) so the regression window spans two periods of the dominant high line. horizon 5 = ceil(loop delay 3.93 fr + exposure smear 0.5 fr + DAC ZOH 0.65 fr). See attenuation_test.json.",
 				"type": "vector",
-				"order": 60,
+				"order": 80,
 				"horizon": 5,
 				"mu": 0.03,
 				"gain": 1.0,
-				"gainy": 0,
+				"gainy": 1.0,
 				"ramp": 10.0,
 				"clamp": 1.0,
-				"start_delay": 2.0
+				"start_delay": 10
 			}
 		},
 		{
-			"_note": "start_delay must be >= the piplate start_delay below. Holding the fine DAC channels without also holding the pid is useless: the integrator keeps winding on the large startup error behind the parked output, and the fine channel is at its rail the instant the hold expires. Base params are the x axis (element 1), *y the y axis (element 0). i sets the crossover: f_c = i*|P|/2pi with |P|x=0.43, |P|y=0.30.",
+			"_note": "start_delay must be >= the piplate start_delay below. Holding the fine DAC channels without also holding the pid is useless: the integrator keeps winding on the large startup error behind the parked output, and the fine channel is at its rail the instant the hold expires. Base params are the x axis (element 1), *y the y axis (element 0). i sets the crossover: f_c = i*|P|/2pi. Lead-compensated design 2026-07-14 evening (plant from the fine bodes @ bias 2.52/1.62: Kx=0.427, Ky=0.300, tau_loop=1.81 ms; grid search over the attenuation9 open PSD with PM>=45, Ms<=2.0): C(s) = i/s * (s+2pi*8)/(s+2pi*32) on both axes -- the lead's +37 deg buys fc 46->64 Hz (x) / 24->65 Hz (y) at PM 67, paid with 4x less gain below 8 Hz (affordable: 0-10 Hz closed was 0.05 px). Oscillator phases are plant+sensitivity WITH the lead in L: phi = -360*f*tau + angle(1/(1+L)); RECOMPUTE if i/iy/lead/bias change (attenuation8 lesson, validated by attenuation9: x 0.400->0.282 px). Line centers on multi-run measured positions (wander ~0.5 Hz/run); y 11.3 oscillator added (0.095 px line, steady across runs). Rollback = attenuation9 tune: i=680/iy=500, no lead, see attenuation_test.json _note4. Full rationale there.",
 			"uri": "anyloop:pid",
 			"params": {
 				"type": "vector",
 				"p": 0,
 				"py":0,
-				"i": 600,
-				"iy": 1300,
+				"i": 1050,
+				"iy": 1500,
 				"d": 0,
+				"lead_fz": 8,
+				"lead_fp": 32,
+				"lead_fzy": 8,
+				"lead_fpy": 32,
 				"clamp": 1.0,
 				"units": "minmax",
-				"start_delay": 2.0,
-				"_lines": "narrowband below said 59.63 before internal-model rejection: one adaptive quadrature oscillator per measured disturbance line. Frequencies from 60 s high-res PSDs 2026-07-10; phases = measured bode plant phase + sensitivity phase at i=600/iy=1300 (empirically trimmed for 59.63). If i/iy change, the phases move -- re-derive or re-trim. Gain sets notch width ~g*|P*S|/pi Hz: 60 is fine below crossover, but 20 max near/above it (59.63) or the notch's own waterbed pumps 62-70 Hz.",
-				"lines": [22.08, 57.3],
-				"line_gain": [60, 20],
-				"line_phase": [56, 3],
-				"linesy": [30.80],
-				"line_gainy": [60],
-				"line_phasey": [60],
-				"line_delay": 0.002
+				"start_delay": 20,
+				"lines": [9.8, 12.0, 21.7, 24.9, 57.5, 83.3],
+				"line_gain": [40, 60, 60, 40, 20, 15],
+				"line_phase": [40.8, 37.7, 32.6, 31.9, 19.1, -2.7],
+				"linesy": [5.64, 11.3, 21.1, 29.6, 57.5],
+				"line_gainy": [50, 50, 40, 30, 15],
+				"line_phasey": [52.3, 38.6, 32.8, 31.0, 19.3],
+				"line_delay": 0.0018
 			}
 		},
 		{
@@ -152,8 +156,8 @@
 				"board":   0,
 				"channel": [0,  1,  2, 3],
 				"index":   [0,  1,  0,    0],
-				"scale":   [2, -2,   0,   0],
-				"offset":  [2,  2, 0.9, 2.364],
+				"scale":   [2, -2, 0, 0],
+				"offset":  [2,  2, 2.52, 1.65],
 				"baud":    460800,
 				"_note1": "pid is NOT in coarse mode, so its output is plain [y, x]: ch0 (y fine, +2 V/unit) takes index 0, ch1 (x fine, -2 V/unit) index 1 -- verified by step test 2026-07-10 (ch0 -> CoM y, ch1 -> CoM x, positive i = negative feedback on both). Coarse scales are 0 (parked at bias) per the push-test rule: they had been left live at +-2 with unverified sign, which risks positive feedback; with the beam-centred ROI the fine stages have full authority and the coarse stages are not needed. The coarse biases (0.8, 2.394 V) are the ones the ROI position was derived under.",
 				"_note2": "baud 460800 is about pacing, not the wire: the port is USB CDC (baud is cosmetic) but the bridge throttles itself to ~440 cmds/s at the default 115200 -- at a 2310 Hz loop that is a ~2.3 ms command ZOH stacked on the 1.4 ms path delay. Measured 2026-07-10: the bridge drains ~1800 cmds/s; pacing at 460800 (~1770/s) keeps latency flat, while 921600 overruns the drain rate and bufferbloats ~10 ms into a full FIFO. Do not raise past 460800.",
