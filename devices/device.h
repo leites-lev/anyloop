@@ -12,6 +12,7 @@
 #include "devices/logger.h"
 #include "devices/matmul.h"
 #include "devices/pid.h"
+#include "devices/fsp.h"
 #include "devices/poke.h"
 #include "devices/remove_piston.h"
 #include "devices/stop_after_count.h"
@@ -39,6 +40,7 @@ static const struct {
 	{ "anyloop:logger", logger_init },
 	{ "anyloop:matmul", matmul_init },
 	{ "anyloop:pid", pid_init },
+	{ "anyloop:fsp", fsp_init },
 	{ "anyloop:poke", poke_init },
 	{ "anyloop:remove_piston", remove_piston_init },
 	{ "anyloop:stop_after_count", stop_after_count_init },

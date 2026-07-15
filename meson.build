@@ -36,6 +36,7 @@ project_source_files = [
 	'devices/logger.c',
 	'devices/matmul.c',
 	'devices/pid.c',
+	'devices/fsp.c',
 	'devices/poke.c',
 	'devices/remove_piston.c',
 	'devices/stop_after_count.c',

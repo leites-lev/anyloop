@@ -1,0 +1,127 @@
+{
+	"_comment": {
+		"1": "ADAPTIVE FILTERED SMITH PREDICTOR tip/tilt loop -- the",
+		"2": "delay-compensating alternative to steering_tuned.json. The",
+		"3": "single anyloop:fsp device REPLACES both kalman_filter and pid:",
+		"4": "it reconstructs the disturbance from the measured error minus",
+		"5": "its own delayed plant model (the Smith core), runs a Kalman",
+		"6": "filter over a sum-of-AR(2) vibration model (Meimon 2010),",
+		"7": "predicts the modal state `delay` samples ahead across the loop",
+		"8": "latency, and issues the minimum-variance command u=-phi_hat/K.",
+		"9": "Because the delay is taken out of the loop's characteristic",
+		"10": "equation, the PREDICTABLE (modal) part of the disturbance can",
+		"11": "be rejected past the ~64 Hz delay wall that caps the classical",
+		"12": "pid+lead loop. The broadband floor and above-bandwidth content",
+		"13": "are NOT helped -- that is a hardware limit (see the loop notes).",
+		"14": "SAFETY: the sign of K is the sign of the command->error path.",
+		"15": "A wrong sign is POSITIVE feedback = runaway. Verify with a push",
+		"16": "test (as steering_tuned did for the pid) and bring the loop up",
+		"17": "with a long ramp and small clamp the first time. Modes below are",
+		"18": "seeded from the measured lines in steering_tuned.json; validate",
+		"19": "closed-vs-open with attenuation_fsp.json against attenuation10.",
+		"20": "Refs: Kulcsar 2006, Petit 2008, Meimon 2010, Correia 2010."
+	},
+	"pipeline": [
+		{
+			"uri": "file:/home/fsl/anyloop_levfork/anyloop/build/asi_source.so",
+			"params": {
+				"camera_name": "ASI290MM",
+				"width":       64,
+				"height":      64,
+				"start_x":     920,
+				"start_y":     488,
+				"exposure":    200,
+				"gain":        100,
+				"bandwidth":   100,
+				"high_speed":  1
+			}
+		},
+		{
+			"_comment": "raw frame to watch_steering.jl",
+			"uri": "anyloop:udp_sink",
+			"params": { "ip": "127.0.0.1", "port": "64730", "decimation": 64 }
+		},
+		{
+			"_comment": "15x15 tracking window on the beam; see steering_tuned.json",
+			"uri": "anyloop:center_of_mass",
+			"params": {
+				"region_height": 15,
+				"region_width":  15,
+				"threshold":     22,
+				"track":         true,
+				"init_y":        32,
+				"init_x":        32
+			}
+		},
+		{
+			"_comment": "[y,x] CoM vector to watch_steering.jl",
+			"uri": "anyloop:udp_sink",
+			"params": { "ip": "127.0.0.1", "port": "64731", "decimation": 64 }
+		},
+		{
+			"_comment": "[y,x] CoM vector (full rate) to watch_error_ts.jl",
+			"uri": "anyloop:udp_sink",
+			"params": { "ip": "127.0.0.1", "port": "64732" }
+		},
+		{
+			"_note1": "THE CONTROLLER. The latest Bode fit gives 1.81 ms = 4.18 frames at 2310 Hz, so delay=4 is the nearest causal discrete plant. broad_order=512 enables the identified full-band Wiener/Kalman disturbance observer; it captures the continuum omitted by the AR(2)-only model. The measured-PSD bound is y 0.0617 / x 0.1026 px at 4.0 frames and y 0.0644 / x 0.1071 px at 4.18 frames.",
+			"_note2": "K is the SIGNED command->error gain (error units per command unit). |Kx|=0.427, |Ky|=0.300 from the fine bodes @ bias 2.52/1.62. Sign is +: the classical loop rejects with positive i and plain [y,x] output, i.e. the command->error path is negative-feedback-stable, so u=-phi/K needs K>0. VERIFY with a push test before trusting it.",
+			"_note3": "With broad_order>0 the identified full-band observer supplies the command and the AR2 modal estimate is not added, avoiding double cancellation. The modal q/r values remain available for diagnostics and for rollback with broad_order=0. broad_mu is the NLMS identification step: lower it if weights are noisy, raise it only if the disturbance spectrum changes faster than the current observer converges.",
+			"_note4": "zeta ~0.002 = sharp line; ~0.3 = broadband hump. adapt_period>0 turns on Petit/Meimon re-identification: every 8 s it refreshes each mode's q from its recent energy, r from the innovation floor, nudges center frequencies toward the measured lines (capped at adapt_df_max Hz/update, matching the ~0.5 Hz/run wander), and recomputes the Kalman gain. Set adapt_period 0 for a fixed FSP while first validating.",
+			"uri": "anyloop:fsp",
+			"params": {
+				"type":         "vector",
+				"units":        "minmax",
+				"delay":        4,
+				"delay_frac":   0.18,
+				"fs":           2310,
+				"broad_order":  512,
+				"broad_mu":     0.03,
+				"clamp":        1.0,
+				"start_delay":  20,
+				"ramp":         15.0,
+				"adapt_period": 8.0,
+				"adapt_df_max": 0.5,
+				"adapt_tau":    5.0,
+				"y": {
+					"K":     0.300,
+					"r":     1.0,
+					"freqs": [5.64, 11.3, 21.1, 29.6, 57.5, 20.0],
+					"zeta":  [0.002, 0.002, 0.002, 0.002, 0.003, 0.30],
+					"q":     [1.0e-5, 1.5e-5, 1.5e-5, 1.0e-5, 0.5e-5, 1.0e-5]
+				},
+				"x": {
+					"K":     0.427,
+					"r":     1.0,
+					"freqs": [9.8, 12.0, 21.7, 24.9, 57.5, 83.3, 20.0],
+					"zeta":  [0.002, 0.002, 0.002, 0.002, 0.003, 0.003, 0.30],
+					"q":     [1.0e-5, 1.0e-5, 2.0e-5, 1.5e-5, 0.5e-5, 0.3e-5, 1.0e-5]
+				}
+			}
+		},
+		{
+			"uri": "anyloop:clamp",
+			"params": { "type": "vector", "min": -1.0, "max": 1.0 }
+		},
+		{
+			"_note": "same DAC bridge as steering_tuned.json: fine ch0(+2 V/unit, y)=index0, ch1(-2 V/unit, x)=index1, coarse parked at bias. The fsp output is plain [y,x] in command units, exactly like the pid was.",
+			"uri": "anyloop:piplate_bridge",
+			"params": {
+				"port":    "/dev/ttyACM0",
+				"board":   0,
+				"channel": [0, 1, 2, 3],
+				"index":   [0, 1, 0, 0],
+				"scale":   [2, -2, 0, 0],
+				"offset":  [2, 2, 2.52, 1.65],
+				"baud":    460800,
+				"start_delay": [2.0, 2.0, 0, 0],
+				"wait_response": false,
+				"skip_unchanged": true
+			}
+		},
+		{
+			"uri": "anyloop:file_sink",
+			"params": { "filename": "error_after_fsp.aylp" }
+		}
+	]
+}

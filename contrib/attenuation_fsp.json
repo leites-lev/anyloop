@@ -1,0 +1,129 @@
+{
+	"_comment": {
+		"1": "A/B HARNESS for the adaptive Filtered Smith Predictor. This",
+		"2": "is steering_fsp.json (same camera/CoM/fsp/clamp/piplate) with",
+		"3": "anyloop:attenuation_test inserted between the CoM sinks and the",
+		"4": "fsp -- exactly where it sits in attenuation_test.json, so the",
+		"5": "measurement is apples-to-apples. It holds the loop OPEN for",
+		"6": "open_time s (zeroes the error into the fsp, so its command",
+		"7": "parks at 0 and the DAC sits at bias) while recording the raw",
+		"8": "CoM error, then CLOSES, waits settle_time for the Kalman/adapt",
+		"9": "to converge, records closed_time s, and writes attenuation_fsp",
+		"10": ".dat/.pdf: per-axis open/closed PSD overlays, closed/open dB,",
+		"11": "and the per-band RMS + mean/jitter table. TO COMPARE: run this,",
+		"12": "then read the closed RMS-about-mean per axis and put it next to",
+		"13": "attenuation10_lead_fc64 (pid+lead+kalman: x 0.244, y 0.151 px).",
+		"14": "The fsp WINS only if it beats those on the predictable 10-64 Hz",
+		"15": "band without pumping the >64 Hz waterbed or any line. Keep runs",
+		"16": ">=120 s per phase -- the vibration environment is nonstationary.",
+		"17": "Same open/closed times as the 2026-07-14 attenuation10 run so",
+		"18": "the two PSDs share a frequency grid and averaging."
+	},
+	"pipeline": [
+		{
+			"uri": "file:/home/fsl/anyloop_levfork/anyloop/build/asi_source.so",
+			"params": {
+				"camera_name": "ASI290MM",
+				"width":       64,
+				"height":      64,
+				"start_x":     920,
+				"start_y":     488,
+				"exposure":    430,
+				"gain":        100,
+				"bandwidth":   100,
+				"high_speed":  1
+			}
+		},
+		{
+			"uri": "anyloop:udp_sink",
+			"params": { "ip": "127.0.0.1", "port": "64730", "decimation": 64 }
+		},
+		{
+			"uri": "anyloop:center_of_mass",
+			"params": {
+				"region_height": 15,
+				"region_width":  15,
+				"threshold":     30,
+				"track":         true,
+				"init_y":        32,
+				"init_x":        32
+			}
+		},
+		{
+			"uri": "anyloop:udp_sink",
+			"params": { "ip": "127.0.0.1", "port": "64731", "decimation": 64 }
+		},
+		{
+			"uri": "anyloop:udp_sink",
+			"params": { "ip": "127.0.0.1", "port": "64732" }
+		},
+		{
+			"_note1": "THE TEST. Sits after the CoM sinks (watchers see the true error) and before the fsp (open-phase recording is the raw error, not a command). During the open phase the fsp is fed zeros, so -- like the kalman in attenuation_test.json -- it parks at 0; settle_time covers its cold-start Kalman convergence + first adaptation tick after the loop closes. pixel_scale 31.5 = (64-1)/2. config is printed verbatim on page 2 of the PDF.",
+			"_note2": "compare the closed RMS-about-mean here against attenuation10_lead_fc64 (x 0.244, y 0.151 px). Same nfft/open/closed as that run for a shared grid.",
+			"uri": "anyloop:attenuation_test",
+			"params": {
+				"start_delay": 100.0,
+				"open_time":   500.0,
+				"settle_time": 120.0,
+				"closed_time": 500.0,
+				"nfft":        4096,
+				"labels":      "y,x",
+				"pixel_scale": 31.5,
+				"config":      "FULL-BAND FSP (Smith reconstruction + identified Wiener/Kalman predictor), replaces pid+kalman\nlatest Bode delay=1.81 ms=4.18 frames; discrete delay=4, fs=2310, broad_order=512, broad_mu=.03\nThe broad observer supplies the command; AR2 modes remain available for diagnostics/adaptation and are not summed.\nattenuation10 open-PSD prediction bound: delay 4.0 y=0.0617 x=0.1026 px; delay 4.18 y=0.0644 x=0.1071 px\naccept only after a >=500 s closed hardware run with no command clipping or HF instability\nrefs: Kulcsar 2006 / Petit 2008 / Meimon 2010 / Correia 2010",
+				"output_file": "attenuation_fsp.pdf"
+			}
+		},
+		{
+			"_note": "controller under test; params identical to steering_fsp.json except start_delay/ramp are short here because attenuation_test owns the open/closed sequencing. VERIFY the sign of K with a push test before running this closed.",
+			"uri": "anyloop:fsp",
+			"params": {
+				"type":         "vector",
+				"units":        "minmax",
+				"delay":        4,
+				"delay_frac":   0.18,
+				"fs":           2310,
+				"broad_order":  512,
+				"broad_mu":     0.03,
+				"clamp":        1.0,
+				"start_delay":  2.0,
+				"ramp":         10.0,
+				"adapt_period": 8.0,
+				"adapt_df_max": 0.5,
+				"adapt_tau":    5.0,
+				"y": {
+					"K":     0.300,
+					"r":     1.0,
+					"freqs": [5.64, 11.3, 21.1, 29.6, 57.5, 20.0],
+					"zeta":  [0.002, 0.002, 0.002, 0.002, 0.003, 0.30],
+					"q":     [1.0e-5, 1.5e-5, 1.5e-5, 1.0e-5, 0.5e-5, 1.0e-5]
+				},
+				"x": {
+					"K":     0.427,
+					"r":     1.0,
+					"freqs": [9.8, 12.0, 21.7, 24.9, 57.5, 83.3, 20.0],
+					"zeta":  [0.002, 0.002, 0.002, 0.002, 0.003, 0.003, 0.30],
+					"q":     [1.0e-5, 1.0e-5, 2.0e-5, 1.5e-5, 0.5e-5, 0.3e-5, 1.0e-5]
+				}
+			}
+		},
+		{
+			"uri": "anyloop:clamp",
+			"params": { "type": "vector", "min": -1.0, "max": 1.0 }
+		},
+		{
+			"uri": "anyloop:piplate_bridge",
+			"params": {
+				"port":    "/dev/ttyACM0",
+				"board":   0,
+				"channel": [0, 1, 2, 3],
+				"index":   [0, 1, 0, 0],
+				"scale":   [2, -2, 0, 0],
+				"offset":  [2, 2, 2.52, 1.65],
+				"baud":    460800,
+				"start_delay": [2.0, 2.0, 0, 0],
+				"wait_response": false,
+				"skip_unchanged": true
+			}
+		}
+	]
+}
