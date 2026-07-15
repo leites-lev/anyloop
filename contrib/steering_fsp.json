@@ -64,7 +64,7 @@
 			"params": { "ip": "127.0.0.1", "port": "64732" }
 		},
 		{
-			"_note1": "THE CONTROLLER. The latest Bode fit gives 1.81 ms = 4.18 frames at 2310 Hz, so delay=4 is the nearest causal discrete plant. broad_order=512 enables the identified full-band Wiener/Kalman disturbance observer; it captures the continuum omitted by the AR(2)-only model. The measured-PSD bound is y 0.0617 / x 0.1026 px at 4.0 frames and y 0.0644 / x 0.1071 px at 4.18 frames.",
+			"_note1": "THE CONTROLLER. The latest Bode fit gives 1.81 ms = 4.18 frames at 2310 Hz: delay=4 plus delay_frac=.18, modeled by a unity-magnitude first-order Thiran all-pass. broad_order=128 captures the continuum omitted by the AR(2)-only model with much less high-frequency overfit than attenuation11's 512 taps; broad_mu=.005 reduces coefficient misadjustment.",
 			"_note2": "K is the SIGNED command->error gain (error units per command unit). |Kx|=0.427, |Ky|=0.300 from the fine bodes @ bias 2.52/1.62. Sign is +: the classical loop rejects with positive i and plain [y,x] output, i.e. the command->error path is negative-feedback-stable, so u=-phi/K needs K>0. VERIFY with a push test before trusting it.",
 			"_note3": "With broad_order>0 the identified full-band observer supplies the command and the AR2 modal estimate is not added, avoiding double cancellation. The modal q/r values remain available for diagnostics and for rollback with broad_order=0. broad_mu is the NLMS identification step: lower it if weights are noisy, raise it only if the disturbance spectrum changes faster than the current observer converges.",
 			"_note4": "zeta ~0.002 = sharp line; ~0.3 = broadband hump. adapt_period>0 turns on Petit/Meimon re-identification: every 8 s it refreshes each mode's q from its recent energy, r from the innovation floor, nudges center frequencies toward the measured lines (capped at adapt_df_max Hz/update, matching the ~0.5 Hz/run wander), and recomputes the Kalman gain. Set adapt_period 0 for a fixed FSP while first validating.",
@@ -75,8 +75,8 @@
 				"delay":        4,
 				"delay_frac":   0.18,
 				"fs":           2310,
-				"broad_order":  512,
-				"broad_mu":     0.03,
+				"broad_order":  128,
+				"broad_mu":     0.005,
 				"clamp":        1.0,
 				"start_delay":  20,
 				"ramp":         15.0,

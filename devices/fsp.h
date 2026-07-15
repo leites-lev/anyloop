@@ -141,6 +141,9 @@ struct aylp_fsp_axis {
 	double *broad_w;
 	double *broad_w_next;
 	double *broad_xbuf;
+	// First-order Thiran all-pass state for the fractional command delay:
+	// y(k) = a*u(k) + u(k-1) - a*y(k-1).
+	double frac_x1, frac_y1;
 };
 
 struct aylp_fsp_data {
@@ -150,9 +153,9 @@ struct aylp_fsp_data {
 	aylp_units units;
 	// loop transport delay in samples (camera + compute + DAC ZOH)
 	size_t delay;
-	// Fractional remainder of the measured transport delay. The plant model
-	// is (1-delay_frac)u(k-delay)+delay_frac*u(k-delay-1), and the
-	// full-band observer blends delay- and delay+1-step predictions likewise.
+	// Fractional remainder of the measured transport delay. The plant uses a
+	// first-order Thiran all-pass (unit magnitude, correct low-frequency group
+	// delay); the full-band observer blends adjacent horizon predictions.
 	double delay_frac;
 	// sample rate (Hz) used to turn f/zeta into AR coefficients; should
 	// match the loop rate

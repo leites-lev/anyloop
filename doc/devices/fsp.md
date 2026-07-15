@@ -48,9 +48,10 @@ Parameters
 - `delay`: loop transport delay in samples. The latest Bode fit is 1.81 ms,
   or 4.18 frames at 2310 Hz; use 4 for the discrete controller.
 - `delay_frac`: fractional remainder of the transport delay. The Smith plant
-  interpolates the two adjacent delayed commands, and the full-band observer
-  interpolates its adjacent horizon predictions. Use 0.18 with `delay=4` for
-  the 1.81 ms Bode fit at 2310 Hz.
+  uses a first-order Thiran all-pass, preserving command magnitude while
+  matching the fractional group delay; the full-band observer blends its
+  adjacent horizon predictions. Use 0.18 with `delay=4` for the 1.81 ms Bode
+  fit at 2310 Hz.
 - `fs`: loop rate (Hz); must match, so AR coefficients land on the right digital
   frequencies.
 - `clamp`: command magnitude limit.
@@ -70,7 +71,9 @@ Parameters
   realization of the scalar Wiener/Kalman predictor, updated by NLMS with
   step `broad_mu`. This supplies the command instead of the modal estimate
   (the two must not be summed). Set `broad_order` to 0 for the original
-  modal-only controller. The attenuation10 replay uses order 512.
+  modal-only controller. Attenuation12 uses order 128 and `broad_mu=0.005`;
+  attenuation11 showed that 512 taps at 0.03 preserved more high-frequency
+  coefficient noise than the additional prediction accuracy justified.
 - `y`, `x`: per-axis objects (element 0 = y, element 1 = x), each with:
   - `K`: **signed** command→error gain. Wrong sign = positive feedback =
     runaway; verify with a push test.

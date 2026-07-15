@@ -540,8 +540,11 @@ int fsp_proc(struct aylp_device *self, struct aylp_state *state)
 
 		// --- Smith-predictor core: reconstruct the disturbance by
 		// removing our own delayed plant contribution ---
-		double u_old = (1.0 - data->delay_frac) * ax->ucmd[slot]
-			+ data->delay_frac * ax->ucmd[slot_older];
+		// Integer delay after a first-order Thiran all-pass fractional
+		// delay. Unlike linear interpolation, the Thiran model has unity
+		// magnitude through Nyquist and therefore does not leave a false
+		// high-frequency command residue in the Smith reconstruction.
+		double u_old = ax->ucmd[slot];
 		double phi_meas = e - ax->K * u_old;
 
 		// Full compound-disturbance observer (Kulcsar/Petit/Meimon):
@@ -686,8 +689,14 @@ int fsp_proc(struct aylp_device *self, struct aylp_state *state)
 		if (u > data->clamp) u = data->clamp;
 		if (u < -data->clamp) u = -data->clamp;
 
-		// record command into the delay line and output it
-		ax->ucmd[slot_older] = u;
+		// Apply the fractional part of the plant delay before the integer
+		// command ring. H(z)=(a+z^-1)/(1+a*z^-1), with DC group delay f.
+		double a_frac = (1.0 - data->delay_frac)
+			/ (1.0 + data->delay_frac);
+		double u_frac = a_frac*u + ax->frac_x1 - a_frac*ax->frac_y1;
+		ax->frac_x1 = u;
+		ax->frac_y1 = u_frac;
+		ax->ucmd[slot_older] = u_frac;
 		r->data[j * r->stride] = u;
 	}
 
