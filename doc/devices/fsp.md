@@ -79,10 +79,14 @@ Parameters
   while command is known to be zero, then apply a fixed observer. Continuous
   closed-loop NLMS can identify leaked command as disturbance when `K` or the
   delay model is imperfect and thereby create positive feedback.
-- `trip_error`, `trip_command`, `trip_frames`: latched safety limits. If either
-  absolute measured error or requested (pre-clamp) command exceeds its limit
-  for `trip_frames` consecutive samples, FSP commands zero until restart.
-  The steering configs use 0.05 error units, 0.35 command units, and 8 frames.
+- `trip_error`, `trip_command`, `trip_frames`: latched safety limits. During
+  the startup hold FSP learns each axis's ordinary open-loop operating point.
+  After closing, it trips if error magnitude exceeds the learned open-loop
+  magnitude by `trip_error`, or if requested (pre-clamp) command exceeds
+  `trip_command`, for `trip_frames` consecutive samples. FSP then commands
+  zero until restart. This magnitude-envelope test permits successful motion
+  from a static offset toward zero without mistaking the offset for runaway.
+  The current configs use 0.05 error units, 0.65 command units, and 8 frames.
 - `y`, `x`: per-axis objects (element 0 = y, element 1 = x), each with:
   - `K`: **signed** command→error gain. Wrong sign = positive feedback =
     runaway; verify with a push test.

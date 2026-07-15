@@ -70,8 +70,8 @@
 				"pass_open":   true,
 				"labels":      "y,x",
 				"pixel_scale": 31.5,
-				"config":      "FROZEN FULL-BAND FSP SAFETY RUN\nattenuation12 became unstable twice: continuous closed-loop NLMS can learn its own leaked command when the plant model mismatches\npass_open=true + FSP start_delay=600 trains only under a known zero command; weights freeze before the 30 s authority ramp\ndelay=4+0.18 Thiran, fs=2310, broad_order=128, broad_mu=.005\nlatched trip: |error|>.05 or |requested command|>.35 for 8 frames => command held at zero until restart\nrefs: Kulcsar 2006 / Petit 2008 / Meimon 2010 / Correia 2010",
-				"output_file": "Bode_and_testruns/attenuation13_fsp.pdf"
+				"config":      "FROZEN FULL-BAND FSP SAFETY RUN\nattenuation13 false-tripped at closure because its legitimate static x offset exceeded an absolute error threshold\npass_open=true + FSP start_delay=600 trains only under a known zero command; weights freeze before the 30 s authority ramp\ndelay=4+0.18 Thiran, fs=2310, broad_order=128, broad_mu=.005\nlatched trip: |error| > learned open-loop magnitude + .05, or |requested command|>.65, for 8 frames => command held at zero until restart\nrefs: Kulcsar 2006 / Petit 2008 / Meimon 2010 / Correia 2010",
+				"output_file": "Bode_and_testruns/attenuation14_fsp.pdf"
 			}
 		},
 		{
@@ -87,7 +87,7 @@
 				"broad_mu":     0.005,
 				"broad_freeze_closed": true,
 				"trip_error":   0.05,
-				"trip_command": 0.35,
+				"trip_command": 0.65,
 				"trip_frames":  8,
 				"clamp":        1.0,
 				"start_delay":  600.0,

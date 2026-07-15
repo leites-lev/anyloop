@@ -558,6 +558,16 @@ int fsp_proc(struct aylp_device *self, struct aylp_state *state)
 		struct aylp_fsp_axis *ax = &data->axis[j];
 		double e = s->data[j * s->stride];
 
+		// Learn the ordinary open-loop operating point.  Use the same slow
+		// timescale as the other statistics; attenuation_test provides 500 s
+		// of genuine open-loop data, so the preceding zeroed START phase has
+		// completely washed out before closing.
+		if (in_hold) {
+			double tau = data->adapt_tau > 0.0 ? data->adapt_tau : 5.0;
+			double b = 1.0 - exp(-1.0 / (tau * data->fs));
+			ax->trip_center += b * (e - ax->trip_center);
+		}
+
 		// --- Smith-predictor core: reconstruct the disturbance by
 		// removing our own delayed plant contribution ---
 		// Integer delay after a first-order Thiran all-pass fractional
@@ -696,8 +706,12 @@ int fsp_proc(struct aylp_device *self, struct aylp_state *state)
 		// disturbance. Select, do not sum, to avoid double cancellation.
 		double cancel_hat = data->broad_order ? broad_hat : phi_hat;
 		double u = -frac * cancel_hat / ax->K;
+		// A static centroid offset is normal and may require substantial DC
+		// command to remove.  Trip only when the magnitude grows beyond its
+		// learned open-loop level; motion toward zero is successful control,
+		// not a fault.
 		bool over_error = data->trip_error > 0.0
-			&& fabs(e) > data->trip_error;
+			&& fabs(e) > fabs(ax->trip_center) + data->trip_error;
 		bool over_command = data->trip_command > 0.0
 			&& fabs(u) > data->trip_command;
 		if (frac > 0.0 && (over_error || over_command)) {
@@ -707,9 +721,10 @@ int fsp_proc(struct aylp_device *self, struct aylp_state *state)
 		}
 		if (!data->tripped && ax->trip_count >= data->trip_frames) {
 			data->tripped = true;
-			log_error("fsp: SAFETY TRIP latched on %s axis: e=%G, "
-				"requested u=%G; output held at zero until restart",
-				j == 0 ? "y" : "x", e, u);
+			log_error("fsp: SAFETY TRIP latched on %s axis: e=%G "
+				"(open baseline=%G), requested u=%G; output held at "
+				"zero until restart", j == 0 ? "y" : "x", e,
+				ax->trip_center, u);
 		}
 		if (data->tripped) u = 0.0;
 		// command robustness low-pass (DF2T biquad); see fsp.h
