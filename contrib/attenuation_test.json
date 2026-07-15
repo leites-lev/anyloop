@@ -93,17 +93,17 @@
 				"nfft":        4096,
 				"labels":      "y,x",
 				"pixel_scale": 31.5,
-				"config":      "100, 500, 100, 500, 4096: camera ASI290MM 64x64, ROI start (920,488), ~2310 Hz loop\npid: i=1050 iy=1500 + LEAD (s+2pi*8)/(s+2pi*32) both axes -> fc 64/65 Hz, PM 67, model Ms 2.0\n(design: grid search over attenuation9 open PSD; lead trades <8 Hz gain for +37 deg at 16-64 Hz)\nlines x=[9.8,12.0,21.7,24.9,57.5,83.3] gain=[40,60,60,40,20,15] phase=[40.8,37.7,32.6,31.9,19.1,-2.7]\nlinesy=[5.64,11.3,21.1,29.6,57.5] gainy=[50,50,40,30,15] phasey=[52.3,38.6,32.8,31.0,19.3]\nphases = plant+sensitivity WITH lead: phi=-360*f*tau + angle(1/(1+L))\nkalman: order=80 horizon=5 mu=0.03 gain=1.0 gainy=1.0 ramp=10\npiplate: fine ch0(+2)/ch1(-2), coarse bias 2.55/1.65 (bode @ 2.52/1.62), baud 460800",
-				"output_file": "attenuation10_lead_fc64.pdf"
+				"config":      "100, 500, 100, 500, 4096: camera ASI290MM 64x64, ROI start (920,488), ~2310 Hz loop\npid: i=1050 iy=1500 + LEAD (s+2pi*8)/(s+2pi*32) both axes -> fc 64/65 Hz, PM 67, model Ms 2.0\n(design: grid search over attenuation9 open PSD; lead trades <8 Hz gain for +37 deg at 16-64 Hz)\nlines x=[9.6,12.1,21.3,25.8,57.5,83.7] gain=[40,60,60,40,20,15] phase=[41.2,37.6,32.7,31.7,19.1,-3.1] (recentered on the 2026-07-15 line survey)\nlinesy=[5.6,10.9,21.3,29.8,57.5] gainy=[50,50,40,30,15] phasey=[52.5,39.1,32.8,31.0,19.3]\nphases = plant+sensitivity WITH lead: phi=-360*f*tau + angle(1/(1+L))\nkalman: order=1024 (was 80; ONLY change vs attn10 -- resolve the 2.26 Hz comb) horizon=5 mu=0.03 gain=1.0 gainy=1.0 ramp=10\npiplate: fine ch0(+2)/ch1(-2), coarse bias 2.55/1.65 (bode @ 2.52/1.62), baud 460800",
+				"output_file": "attenuation11_kalman1024.pdf"
 			}
 		},
 		{
 			"_note": "adaptive predictor (see steering_tuned.json). During the open phase it trains on zeros and outputs ~0; settle_time above covers its re-convergence after the loop closes. DO NOT set gain<1: run 4 (attenuation4_kalman07_h6, gain 0.7 + horizon 6) collapsed the x loop -- sensitivity crossover 28->15 Hz, closed/open ratio 0.94 vs 0.60 -- and the bode at the same bias (fsm2310_bode_x_bias105) shows |P|x unchanged, so the blend itself is what broke it (NLMS trains on the blended closed-loop signal and finds a bad equilibrium). gain 1.0 / horizon 5 is the verified best (run 2: x 0.384 px).",
 			"uri": "anyloop:kalman_filter",
 			"params": {
-				"_note2": "retuned 2026-07-14 from the fine (240-pt) bode sweeps: order 60->80 = ceil(2*fs/58.08), two full periods of the dominant high line in the regression window (the old 60 spanned only 38.5 Hz and up). horizon 5 confirmed by the delay budget: tau_loop/Ts = 3.93 frames + ~0.5 fr exposure smear + ~0.65 fr DAC command ZOH (bridge paces ~1770 cmds/s) -> ceil = 5. mu 0.03 kept: tracking time order/(mu*fs) = 1.15 s < the ~1.7 s line-wander timescale, misadjustment mu/2 = 1.5%.",
+				"_note2": "order 80->1024 (2026-07-15, ONLY change vs attenuation10): the attenuation10 budget shows the 10-30 Hz x residual is a ~2.256 Hz-spaced comb (19.17/21.43/23.68/25.94) and order 80 (35 ms window, ~29 Hz resolution) cannot represent it -- 1024 = fs/2.256, one full beat period of the comb spacing, so the predictor can separate and lock every member. horizon 5 unchanged (delay budget: tau_loop/Ts = 3.93 fr + ~0.5 fr exposure smear + ~0.65 fr DAC ZOH -> ceil = 5). mu 0.03 unchanged; tracking time order/(mu*fs) rises 1.15 s -> 14.8 s (slower than the ~1.7 s wander timescale -- accepted for this A/B; if lines pump or dance, mu is the next knob, NOT gain). ~19 MFLOP/s at 2310 Hz, still negligible. ROLLBACK: order 80.",
 				"type": "vector",
-				"order": 80,
+				"order": 1024,
 				"horizon": 5,
 				"mu": 0.03,
 				"gain": 1.0,
@@ -132,12 +132,12 @@
 				"clamp": 1.0,
 				"units": "minmax",
 				"start_delay": 2.0,
-				"lines": [9.8, 12.0, 21.7, 24.9, 57.5, 83.3],
+				"lines": [9.6, 12.1, 21.3, 25.8, 57.5, 83.7],
 				"line_gain": [40, 60, 60, 40, 20, 15],
-				"line_phase": [40.8, 37.7, 32.6, 31.9, 19.1, -2.7],
-				"linesy": [5.64, 11.3, 21.1, 29.6, 57.5],
+				"line_phase": [41.2, 37.6, 32.7, 31.7, 19.1, -3.1],
+				"linesy": [5.6, 10.9, 21.3, 29.8, 57.5],
 				"line_gainy": [50, 50, 40, 30, 15],
-				"line_phasey": [52.3, 38.6, 32.8, 31.0, 19.3],
+				"line_phasey": [52.5, 39.1, 32.8, 31.0, 19.3],
 				"line_delay": 0.0018
 			}
 		},

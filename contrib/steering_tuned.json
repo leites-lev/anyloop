@@ -102,7 +102,7 @@
 			"_note": "adaptive predictor (see doc/devices/kalman_filter.md): replaces the error with its own prediction ~2.1 ms (5 samples) ahead, so the pid acts on where the beam will be when the command lands. A/B-validated 2026-07-10 (x 0.91 -> 0.59 px with the pid line oscillators); re-A/B'd 2026-07-13 over 500 s (x closed 0.384 px vs 0.502 px without). KNOWN COSTS at gain=1.0: 0-5 Hz attenuation -8 dB instead of the -24 dB the loop achieves without the kalman, and a ~-0.11 px x DC pointing bias. DO NOT try to fix that with gain<1: run 4 (gain 0.7 + horizon 6, 2026-07-13) collapsed the x loop (sensitivity crossover 28->15 Hz, closed/open 0.94 vs 0.60) while a bode at the same bias showed |P|x unchanged -- the NLMS trains on the blended closed-loop signal and lands in a bad equilibrium. gainy history: prediction on y PUMPED its 30.8 Hz line 3x back when y crossed at ~62 Hz (iy=1300); re-enabled at 1.0 on 2026-07-14 now that fc_y is 24 Hz and y's dominant residual is the predictable 10-30 Hz cluster -- if a y line pumps >2x, set gainy back to 0 (never a fraction). Trains continuously; hands over along a 10 s ramp after start_delay.",
 			"uri": "anyloop:kalman_filter",
 			"params": {
-				"_note2": "order 60->80 (2026-07-14, fine bode retune): ceil(2*fs/58.08) so the regression window spans two periods of the dominant high line. horizon 5 = ceil(loop delay 3.93 fr + exposure smear 0.5 fr + DAC ZOH 0.65 fr). See attenuation_test.json.",
+				"_note2": "order 80->1024 (2026-07-15, only change vs attenuation10): 1024 = fs/2.256 spans one beat period of the 2.256 Hz-spaced 19-26 Hz comb that dominates the x residual; order 80 (~29 Hz resolution) could not represent it. horizon 5 = ceil(loop delay 3.93 fr + exposure smear 0.5 fr + DAC ZOH 0.65 fr). Tracking time now 14.8 s (order/(mu*fs)); rollback = order 80. See attenuation_test.json.",
 				"type": "vector",
 				"order": 80,
 				"horizon": 5,
@@ -131,12 +131,12 @@
 				"clamp": 1.0,
 				"units": "minmax",
 				"start_delay": 20,
-				"lines": [9.8, 12.0, 21.7, 24.9, 57.5, 83.3],
+				"lines": [9.6, 12.1, 21.3, 25.8, 57.5, 83.7],
 				"line_gain": [40, 60, 60, 40, 20, 15],
-				"line_phase": [40.8, 37.7, 32.6, 31.9, 19.1, -2.7],
-				"linesy": [5.64, 11.3, 21.1, 29.6, 57.5],
+				"line_phase": [41.2, 37.6, 32.7, 31.7, 19.1, -3.1],
+				"linesy": [5.6, 10.9, 21.3, 29.8, 57.5],
 				"line_gainy": [50, 50, 40, 30, 15],
-				"line_phasey": [52.3, 38.6, 32.8, 31.0, 19.3],
+				"line_phasey": [52.5, 39.1, 32.8, 31.0, 19.3],
 				"line_delay": 0.0018
 			}
 		},
