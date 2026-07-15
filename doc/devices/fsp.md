@@ -74,6 +74,15 @@ Parameters
   modal-only controller. Attenuation12 uses order 128 and `broad_mu=0.005`;
   attenuation11 showed that 512 taps at 0.03 preserved more high-frequency
   coefficient noise than the additional prediction accuracy justified.
+- `broad_freeze_closed`: freeze full-band identification when the startup hold
+  ends (default true). This is required for safe feedback operation: identify
+  while command is known to be zero, then apply a fixed observer. Continuous
+  closed-loop NLMS can identify leaked command as disturbance when `K` or the
+  delay model is imperfect and thereby create positive feedback.
+- `trip_error`, `trip_command`, `trip_frames`: latched safety limits. If either
+  absolute measured error or requested (pre-clamp) command exceeds its limit
+  for `trip_frames` consecutive samples, FSP commands zero until restart.
+  The steering configs use 0.05 error units, 0.35 command units, and 8 frames.
 - `y`, `x`: per-axis objects (element 0 = y, element 1 = x), each with:
   - `K`: **signed** command→error gain. Wrong sign = positive feedback =
     runaway; verify with a push test.

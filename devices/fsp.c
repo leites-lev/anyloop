@@ -286,6 +286,8 @@ int fsp_init(struct aylp_device *self)
 	data->cmd_fc = 0.0;		// raw minimum-variance command unless asked
 	data->broad_order = 0;		// modal-only unless explicitly identified
 	data->broad_mu = 0.03;
+	data->broad_freeze_closed = true;
+	data->trip_frames = 8;
 
 	if (!self->params) {
 		log_error("fsp: no params object found.");
@@ -327,6 +329,14 @@ int fsp_init(struct aylp_device *self)
 			data->broad_order = json_object_get_uint64(val);
 		} else if (!strcmp(key, "broad_mu")) {
 			data->broad_mu = json_object_get_double(val);
+		} else if (!strcmp(key, "broad_freeze_closed")) {
+			data->broad_freeze_closed = json_object_get_boolean(val);
+		} else if (!strcmp(key, "trip_error")) {
+			data->trip_error = fabs(json_object_get_double(val));
+		} else if (!strcmp(key, "trip_command")) {
+			data->trip_command = fabs(json_object_get_double(val));
+		} else if (!strcmp(key, "trip_frames")) {
+			data->trip_frames = json_object_get_uint64(val);
 		} else if (!strcmp(key, "y") || !strcmp(key, "axis_y")) {
 			axy = val;
 		} else if (!strcmp(key, "x") || !strcmp(key, "axis_x")) {
@@ -359,6 +369,11 @@ int fsp_init(struct aylp_device *self)
 	if (data->broad_order && (data->broad_mu <= 0.0
 			|| data->broad_mu >= 2.0)) {
 		log_error("fsp: broad_mu must satisfy 0 < broad_mu < 2.");
+		return -1;
+	}
+	if ((data->trip_error > 0.0 || data->trip_command > 0.0)
+			&& !data->trip_frames) {
+		log_error("fsp: trip_frames must be >= 1 when a trip is enabled.");
 		return -1;
 	}
 	if (!axy || !axx) {
@@ -415,6 +430,10 @@ int fsp_init(struct aylp_device *self)
 		log_info("fsp: full-band %zu-state disturbance predictor, horizon "
 			"%zu+%.3G frames, NLMS mu %G", data->broad_order,
 			data->delay, data->delay_frac, data->broad_mu);
+	if (data->trip_error > 0.0 || data->trip_command > 0.0)
+		log_info("fsp: latched safety trip: error=%G command=%G for %zu "
+			"frames", data->trip_error, data->trip_command,
+			data->trip_frames);
 
 	self->type_in = AYLP_T_VECTOR;
 	self->units_in = AYLP_U_ANY;
@@ -518,6 +537,7 @@ int fsp_proc(struct aylp_device *self, struct aylp_state *state)
 				"over %G s", data->ramp);
 		}
 	}
+	if (data->tripped) frac = 0.0;
 
 	double beta = 0.0;	// EWMA weight for adaptation stats
 	if (data->adapt_period > 0.0 && data->adapt_tau > 0.0)
@@ -567,11 +587,12 @@ int fsp_proc(struct aylp_device *self, struct aylp_state *state)
 					idx = idx ? idx - 1 : H - 1;
 				}
 				double pe = phi_meas - pred;
-				if (isfinite(pe)) {
+				bool train = !data->broad_freeze_closed || in_hold;
+				if (train && isfinite(pe)) {
 					double step = data->broad_mu * pe / energy;
 					for (size_t i = 0; i < P; i++)
 						ax->broad_w[i] += step * ax->broad_xbuf[i];
-				} else {
+				} else if (!isfinite(pe)) {
 					memset(ax->broad_w, 0, P * sizeof(double));
 				}
 				// Identify the adjacent delay+1 predictor. Their weighted
@@ -587,12 +608,12 @@ int fsp_proc(struct aylp_device *self, struct aylp_state *state)
 					idx = idx ? idx - 1 : H - 1;
 				}
 				pe = phi_meas - pred;
-				if (isfinite(pe)) {
+				if (train && isfinite(pe)) {
 					double step = data->broad_mu * pe / energy;
 					for (size_t i = 0; i < P; i++)
 						ax->broad_w_next[i] += step
 							* ax->broad_xbuf[i];
-				} else {
+				} else if (!isfinite(pe)) {
 					memset(ax->broad_w_next, 0, P * sizeof(double));
 				}
 				idx = data->broad_head;
@@ -675,12 +696,32 @@ int fsp_proc(struct aylp_device *self, struct aylp_state *state)
 		// disturbance. Select, do not sum, to avoid double cancellation.
 		double cancel_hat = data->broad_order ? broad_hat : phi_hat;
 		double u = -frac * cancel_hat / ax->K;
+		bool over_error = data->trip_error > 0.0
+			&& fabs(e) > data->trip_error;
+		bool over_command = data->trip_command > 0.0
+			&& fabs(u) > data->trip_command;
+		if (frac > 0.0 && (over_error || over_command)) {
+			ax->trip_count++;
+		} else {
+			ax->trip_count = 0;
+		}
+		if (!data->tripped && ax->trip_count >= data->trip_frames) {
+			data->tripped = true;
+			log_error("fsp: SAFETY TRIP latched on %s axis: e=%G, "
+				"requested u=%G; output held at zero until restart",
+				j == 0 ? "y" : "x", e, u);
+		}
+		if (data->tripped) u = 0.0;
 		// command robustness low-pass (DF2T biquad); see fsp.h
 		if (data->cmd_fc > 0.0) {
 			double uf = data->lp_b0*u + ax->lp_z1;
 			ax->lp_z1 = data->lp_b1*u - data->lp_a1*uf + ax->lp_z2;
 			ax->lp_z2 = data->lp_b2*u - data->lp_a2*uf;
 			u = uf;
+		}
+		if (data->tripped) {
+			u = 0.0;
+			ax->lp_z1 = ax->lp_z2 = 0.0;
 		}
 		if (!isfinite(u)) {
 			u = 0.0;

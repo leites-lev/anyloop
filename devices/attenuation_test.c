@@ -491,6 +491,9 @@ int attenuation_test_init(struct aylp_device *self)
 			xfree(data->config);
 			data->config = xstrdup(json_object_get_string(val));
 			log_trace("config = %s", data->config);
+		} else if (!strcmp(key, "pass_open")) {
+			data->pass_open = json_object_get_boolean(val);
+			log_trace("pass_open = %d", data->pass_open);
 		} else {
 			log_warn("Unknown parameter \"%s\"", key);
 		}
@@ -579,11 +582,10 @@ int attenuation_test_proc(struct aylp_device *self, struct aylp_state *state)
 			&data->open_buf, &data->open_n, &data->open_cap);
 		if (data->open_n == 1) data->open_t_first = now;
 		data->open_t_last = now;
-		// hold the downstream error at zero: the pid integrator and
-		// line oscillators stay parked, the kalman trains on silence,
-		// and the DAC sits at its bias -- the loop is open, but every
-		// device still sees a normal frame cadence
-		gsl_vector_set_zero(state->vector);
+		// Normally hold the downstream error at zero. A predictive
+		// controller may instead request the raw measurement so it can
+		// identify while its own matched startup hold keeps command at zero.
+		if (!data->pass_open) gsl_vector_set_zero(state->vector);
 		return 0;
 	case ATTEN_PHASE_SETTLE:
 		return 0;

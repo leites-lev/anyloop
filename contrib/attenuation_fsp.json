@@ -58,7 +58,7 @@
 			"params": { "ip": "127.0.0.1", "port": "64732" }
 		},
 		{
-			"_note1": "THE TEST. Sits after the CoM sinks (watchers see the true error) and before the fsp (open-phase recording is the raw error, not a command). During the open phase the fsp is fed zeros, so -- like the kalman in attenuation_test.json -- it parks at 0; settle_time covers its cold-start Kalman convergence + first adaptation tick after the loop closes. pixel_scale 31.5 = (64-1)/2. config is printed verbatim on page 2 of the PDF.",
+			"_note1": "THE TEST. pass_open sends the recorded raw open-loop error to the FSP while its matching 600 s startup hold forces command=0. This identifies the broadband predictor on genuinely open-loop data; weights freeze permanently when the hold ends. pixel_scale 31.5 = (64-1)/2. config is printed verbatim on page 2 of the PDF.",
 			"_note2": "compare the closed RMS-about-mean here against attenuation10_lead_fc64 (x 0.244, y 0.151 px). Same nfft/open/closed as that run for a shared grid.",
 			"uri": "anyloop:attenuation_test",
 			"params": {
@@ -67,10 +67,11 @@
 				"settle_time": 180.0,
 				"closed_time": 500.0,
 				"nfft":        4096,
+				"pass_open":   true,
 				"labels":      "y,x",
 				"pixel_scale": 31.5,
-				"config":      "ROBUST FULL-BAND FSP (Smith reconstruction + identified Wiener/Kalman predictor), replaces pid+kalman\nlatest Bode delay=1.81 ms=4.18 frames; delay=4+0.18 Thiran all-pass, fs=2310, broad_order=128, broad_mu=.005\nattenuation11 lesson: excellent 0-64 Hz rejection, but linear fractional delay + 512 taps pumped HF; y=.1273 x=.2179 px\n128 taps retains nearly all theoretical prediction while reducing HF overfit; lower mu reduces steady-state coefficient noise\naccept only after a >=500 s closed hardware run with no command clipping or HF instability\nrefs: Kulcsar 2006 / Petit 2008 / Meimon 2010 / Correia 2010",
-				"output_file": "Bode_and_testruns/attenuation12_fsp.pdf"
+				"config":      "FROZEN FULL-BAND FSP SAFETY RUN\nattenuation12 became unstable twice: continuous closed-loop NLMS can learn its own leaked command when the plant model mismatches\npass_open=true + FSP start_delay=600 trains only under a known zero command; weights freeze before the 30 s authority ramp\ndelay=4+0.18 Thiran, fs=2310, broad_order=128, broad_mu=.005\nlatched trip: |error|>.05 or |requested command|>.35 for 8 frames => command held at zero until restart\nrefs: Kulcsar 2006 / Petit 2008 / Meimon 2010 / Correia 2010",
+				"output_file": "Bode_and_testruns/attenuation13_fsp.pdf"
 			}
 		},
 		{
@@ -84,9 +85,13 @@
 				"fs":           2310,
 				"broad_order":  128,
 				"broad_mu":     0.005,
+				"broad_freeze_closed": true,
+				"trip_error":   0.05,
+				"trip_command": 0.35,
+				"trip_frames":  8,
 				"clamp":        1.0,
-				"start_delay":  2.0,
-				"ramp":         10.0,
+				"start_delay":  600.0,
+				"ramp":         30.0,
 				"adapt_period": 8.0,
 				"adapt_df_max": 0.5,
 				"adapt_tau":    5.0,

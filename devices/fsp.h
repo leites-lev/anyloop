@@ -144,6 +144,7 @@ struct aylp_fsp_axis {
 	// First-order Thiran all-pass state for the fractional command delay:
 	// y(k) = a*u(k) + u(k-1) - a*y(k-1).
 	double frac_x1, frac_y1;
+	size_t trip_count;
 };
 
 struct aylp_fsp_data {
@@ -184,6 +185,16 @@ struct aylp_fsp_data {
 	// is not added again (which would double-count the same disturbance).
 	size_t broad_order;
 	double broad_mu;
+	// Identification is safest under a known zero command. When true, NLMS
+	// weights freeze as soon as the startup hold ends.
+	bool broad_freeze_closed;
+	// Latched safety trip. While authority is nonzero, either excessive
+	// measured error or requested command for trip_frames consecutive samples
+	// opens the loop (zero command) until process restart.
+	double trip_error;
+	double trip_command;
+	size_t trip_frames;
+	bool tripped;
 	size_t broad_hist_len;
 	size_t broad_head;
 	size_t broad_seen;

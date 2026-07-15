@@ -25,6 +25,10 @@ struct aylp_attenuation_test_data {
 	char *labels;		// comma-separated element labels (optional)
 	double pixel_scale;	// px per output unit for the report (default 1)
 	char *config;		// config summary printed on the PDF (optional)
+	// Pass the measured open-loop error downstream instead of replacing it
+	// with zero. Safe only when the controller has a matching startup hold;
+	// used to identify predictive controllers while their command stays zero.
+	bool pass_open;
 
 	// state
 	unsigned phase;
