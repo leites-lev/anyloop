@@ -1,0 +1,49 @@
+# ===== latency_test run 2026-07-16T19:27:42 label single =====
+# index_cmd 1 index_err 1 low -0.5 high 0.5 period 0.25 warmup 35 cal_cycles 3 n_steps 40 settle_frac 0.4
+# columns: edge direction departure_ms half_ms (-1 = not detected)
+# calibrated: settled_low -0.300427 settled_high 0.18933 step 0.491332 sigma 0.0141272 step/sigma 34.8
+1 low->high 1.291 1.580
+2 high->low 1.045 1.301
+3 low->high 1.047 1.311
+4 high->low 1.045 1.310
+5 low->high 1.033 1.547
+6 high->low 1.152 1.398
+7 low->high 1.065 1.346
+8 high->low 1.067 1.304
+9 low->high 1.109 1.360
+10 high->low 1.061 1.296
+11 low->high 1.027 1.293
+12 high->low 1.037 1.315
+13 low->high 1.061 1.365
+14 high->low 1.063 1.318
+15 low->high 1.024 1.313
+16 high->low 1.052 1.301
+17 low->high 1.040 1.301
+18 high->low 1.031 1.303
+19 low->high 1.038 1.303
+20 high->low 1.041 1.308
+21 low->high 1.073 1.333
+22 high->low 1.055 1.317
+23 low->high 1.062 1.327
+24 high->low 1.071 1.330
+25 low->high 1.058 1.322
+26 high->low 1.051 1.317
+27 low->high 1.061 1.322
+28 high->low 1.061 1.326
+29 low->high 1.066 1.339
+30 high->low 1.066 1.588
+31 low->high 1.068 1.330
+32 high->low 1.032 1.294
+33 low->high 1.045 1.329
+34 high->low 1.059 1.322
+35 low->high 1.027 1.320
+36 high->low 1.059 1.322
+37 low->high 1.250 1.557
+38 high->low 1.076 1.608
+39 low->high 1.219 1.482
+40 high->low 1.118 1.378
+# edges_measured 40 edges_missed 0
+# departure_ms median 1.061 mean 1.073 min 1.024 max 1.291 n 40
+# half_ms median 1.322 mean 1.358 min 1.293 max 1.608 n 40
+# sample_interval_ms 0.264 loop_hz 3788
+# median_departure_frames 4.0

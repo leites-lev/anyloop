@@ -75,3 +75,16 @@ Parameters
 - `settle_frac` (float) (optional)
   - Fraction at the end of each half-cycle treated as settled, used for the
     calibration windows and the per-edge baselines. Default 0.4.
+- `results_file` (string) (optional)
+  - Append the full results to this file: a run header with a wall-clock
+    timestamp and the test parameters, the calibration line (step, sigma),
+    one line per edge (`edge direction departure_ms half_ms`, −1 for a
+    response that was never detected), and the summary statistics as `#`
+    comment lines (median/mean/min/max of both latencies, sample interval,
+    loop rate, median departure in frames). The file is opened in append
+    mode and flushed after every line, so one file accumulates a history of
+    runs and a wedged or aborted test still leaves everything measured so
+    far on disk. By default nothing is written.
+- `label` (string) (optional)
+  - Free-text label written into the run header in `results_file`, to tell
+    runs apart (e.g. `"run3"`).

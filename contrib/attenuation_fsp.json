@@ -24,11 +24,9 @@
 			"uri": "file:/home/fsl/anyloop_levfork/anyloop/build/asi_source.so",
 			"params": {
 				"camera_name": "ASI290MM",
-				"width":       64,
-				"height":      64,
-				"start_x":     920,
-				"start_y":     488,
-				"exposure":    430,
+				"width":       56,
+				"height":      32,
+				"exposure":    50,
 				"gain":        100,
 				"bandwidth":   100,
 				"high_speed":  1
@@ -45,8 +43,8 @@
 				"region_width":  15,
 				"threshold":     30,
 				"track":         true,
-				"init_y":        32,
-				"init_x":        32
+				"init_y":        16,
+				"init_x":        28
 			}
 		},
 		{
@@ -58,7 +56,7 @@
 			"params": { "ip": "127.0.0.1", "port": "64732" }
 		},
 		{
-			"_note1": "THE TEST. pass_open sends the recorded raw open-loop error to the FSP while its matching 600 s startup hold forces command=0. This identifies the broadband predictor on genuinely open-loop data; weights freeze permanently when the hold ends. pixel_scale 31.5 = (64-1)/2. config is printed verbatim on page 2 of the PDF.",
+			"_note1": "THE TEST. pass_open sends the recorded raw open-loop error to the FSP while its matching 600 s startup hold forces command=0. This identifies the broadband predictor on genuinely open-loop data; weights freeze permanently when the hold ends. pixel_scale 27.5 = (56-1)/2 (x only; y at 32 rows is really 15.5). config is printed verbatim on page 2 of the PDF.",
 			"_note2": "compare the closed RMS-about-mean here against attenuation10_lead_fc64 (x 0.244, y 0.151 px). Same nfft/open/closed as that run for a shared grid.",
 			"uri": "anyloop:attenuation_test",
 			"params": {
@@ -69,7 +67,7 @@
 				"nfft":        4096,
 				"pass_open":   true,
 				"labels":      "y,x",
-				"pixel_scale": 31.5,
+				"pixel_scale": 27.5,
 				"config":      "FROZEN FULL-BAND FSP SAFETY RUN\nattenuation13 false-tripped at closure because its legitimate static x offset exceeded an absolute error threshold\npass_open=true + FSP start_delay=600 trains only under a known zero command; weights freeze before the 30 s authority ramp\ndelay=4+0.18 Thiran, fs=2310, broad_order=128, broad_mu=.005\nlatched trip: |error| > learned open-loop magnitude + .05, or |requested command|>.65, for 8 frames => command held at zero until restart\nrefs: Kulcsar 2006 / Petit 2008 / Meimon 2010 / Correia 2010",
 				"output_file": "Bode_and_testruns/attenuation14_fsp.pdf"
 			}
@@ -123,7 +121,7 @@
 				"channel": [0, 1, 2, 3],
 				"index":   [0, 1, 0, 0],
 				"scale":   [2, -2, 0, 0],
-				"offset":  [2, 2, 2.52, 1.65],
+				"offset":  [2, 2, 1.95, 2.02],
 				"baud":    460800,
 				"start_delay": [2.0, 2.0, 0, 0],
 				"wait_response": false,

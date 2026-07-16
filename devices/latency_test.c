@@ -46,9 +46,17 @@
 //   cal_cycles (int)   -- calibration cycles (default 3)
 //   n_steps (int)      -- edges to measure (default 40)
 //   settle_frac (float)-- settled fraction of each half-cycle (default 0.4)
+//   results_file (str) -- append the full results (run header, calibration,
+//                         every edge, summary stats) to this file. Appended,
+//                         not truncated, so one file accumulates a history of
+//                         runs; each run starts with a wall-clock timestamp.
+//   label (str)        -- free-text label written into the run header in
+//                         results_file, to tell runs apart.
 
 #include <math.h>
+#include <stdarg.h>
 #include <stdbool.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
 
@@ -71,11 +79,25 @@ static int lt_cmp_dbl(const void *a, const void *b)
 	return (d > 0) - (d < 0);
 }
 
+/** Append a line to the results file, if one is open. Flushed immediately so
+ * a wedged or killed test still leaves everything measured so far on disk. */
+static void lt_fout(struct aylp_latency_test_data *data, const char *fmt, ...)
+{
+	if (!data->rf) return;
+	va_list ap;
+	va_start(ap, fmt);
+	vfprintf(data->rf, fmt, ap);
+	va_end(ap);
+	fflush(data->rf);
+}
+
 /** Log median/mean/min/max of n latencies (s). Sorts arr in place. */
-static void lt_report_one(const char *name, double *arr, size_t n)
+static void lt_report_one(struct aylp_latency_test_data *data,
+	const char *name, const char *key, double *arr, size_t n)
 {
 	if (!n) {
 		log_warn("latency_test: %s: no edges detected!", name);
+		lt_fout(data, "# %s: no edges detected\n", key);
 		return;
 	}
 	qsort(arr, n, sizeof *arr, lt_cmp_dbl);
@@ -84,6 +106,9 @@ static void lt_report_one(const char *name, double *arr, size_t n)
 	log_info("latency_test: %s: median %.2f ms | mean %.2f ms | "
 		"min %.2f ms | max %.2f ms | n=%zu", name,
 		1e3 * arr[n/2], 1e3 * sum / n,
+		1e3 * arr[0], 1e3 * arr[n-1], n);
+	lt_fout(data, "# %s median %.3f mean %.3f min %.3f max %.3f n %zu\n",
+		key, 1e3 * arr[n/2], 1e3 * sum / n,
 		1e3 * arr[0], 1e3 * arr[n-1], n);
 }
 
@@ -129,6 +154,10 @@ int latency_test_init(struct aylp_device *self)
 			data->n_steps = (size_t)json_object_get_uint64(val);
 		} else if (!strcmp(key, "settle_frac")) {
 			data->settle_frac = json_object_get_double(val);
+		} else if (!strcmp(key, "results_file")) {
+			data->results_file = strdup(json_object_get_string(val));
+		} else if (!strcmp(key, "label")) {
+			data->label = strdup(json_object_get_string(val));
 		} else {
 			log_warn("latency_test: unknown param \"%s\"", key);
 		}
@@ -156,6 +185,29 @@ int latency_test_init(struct aylp_device *self)
 	data->half = xcalloc(data->n_steps, sizeof *data->half);
 	data->stage = LT_WARMUP;
 	data->dep_pend = -1.0;
+
+	if (data->results_file) {
+		data->rf = fopen(data->results_file, "a");
+		if (!data->rf) {
+			log_error("latency_test: cannot open results_file "
+				"\"%s\"", data->results_file);
+			return -1;
+		}
+		time_t now = time(0);
+		char ts[32];
+		strftime(ts, sizeof ts, "%Y-%m-%dT%H:%M:%S", localtime(&now));
+		lt_fout(data, "# ===== latency_test run %s%s%s =====\n", ts,
+			data->label ? " label " : "",
+			data->label ? data->label : "");
+		lt_fout(data, "# index_cmd %d index_err %d low %G high %G "
+			"period %G warmup %G cal_cycles %zu n_steps %zu "
+			"settle_frac %G\n",
+			data->index_cmd, data->index_err, data->low,
+			data->high, data->period, data->warmup,
+			data->cal_cycles, data->n_steps, data->settle_frac);
+		lt_fout(data, "# columns: edge direction departure_ms half_ms "
+			"(-1 = not detected)\n");
+	}
 
 	log_info("latency_test: stepping output %d between %G and %G every "
 		"%G s; watching input %d; %zu cal cycles then %zu edges",
@@ -249,6 +301,12 @@ int latency_test_proc(struct aylp_device *self, struct aylp_state *state)
 			data->msum[1] / data->mcnt[1], data->step, data->sigma,
 			data->sigma > 0
 				? fabs(data->step) / data->sigma : INFINITY);
+		lt_fout(data, "# calibrated: settled_low %G settled_high %G "
+			"step %G sigma %G step/sigma %.1f\n",
+			data->msum[0] / data->mcnt[0],
+			data->msum[1] / data->mcnt[1], data->step, data->sigma,
+			data->sigma > 0
+				? fabs(data->step) / data->sigma : INFINITY);
 		if (fabs(data->step) <= 0.0
 				|| fabs(data->step) < 8.0 * data->sigma) {
 			log_error("latency_test: step is < 8 sigma of noise; "
@@ -329,6 +387,11 @@ int latency_test_proc(struct aylp_device *self, struct aylp_state *state)
 				data->dep_found ? "yes" : "NO",
 				data->half_found ? "yes" : "NO");
 		}
+		lt_fout(data, "%zu %s %.3f %.3f\n",
+			data->edges_done, to ? "low->high" : "high->low",
+			data->dep_found ? 1e3 * data->dep[data->n_dep-1] : -1.0,
+			data->half_found
+				? 1e3 * data->half[data->n_half-1] : -1.0);
 		if (data->edges_done >= data->n_steps) {
 			// report
 			double mean_dt = data->dt_cnt
@@ -337,18 +400,29 @@ int latency_test_proc(struct aylp_device *self, struct aylp_state *state)
 				"================");
 			log_info("latency_test: %zu edges measured, %zu "
 				"missed", data->edges_done, data->edges_missed);
-			lt_report_one("departure (first motion)",
-				data->dep, data->n_dep);
-			lt_report_one("50% crossing", data->half, data->n_half);
+			lt_fout(data, "# edges_measured %zu edges_missed %zu\n",
+				data->edges_done, data->edges_missed);
+			lt_report_one(data, "departure (first motion)",
+				"departure_ms", data->dep, data->n_dep);
+			lt_report_one(data, "50% crossing",
+				"half_ms", data->half, data->n_half);
 			if (mean_dt > 0.0) {
 				log_info("latency_test: sample interval %.3f "
 					"ms (%.0f Hz loop)",
 					1e3 * mean_dt, 1.0 / mean_dt);
-				if (data->n_dep)
+				lt_fout(data, "# sample_interval_ms %.3f "
+					"loop_hz %.0f\n",
+					1e3 * mean_dt, 1.0 / mean_dt);
+				if (data->n_dep) {
 					log_info("latency_test: median "
 						"departure = %.1f frames",
 						data->dep[data->n_dep/2]
 						/ mean_dt);
+					lt_fout(data, "# median_departure_"
+						"frames %.1f\n",
+						data->dep[data->n_dep/2]
+						/ mean_dt);
+				}
 			}
 			// park the command at bias and stop the loop
 			gsl_vector_set_zero(data->out);
@@ -383,6 +457,7 @@ fatal:
 	// test condition must end the loop itself -- and still publish a
 	// parked output vector, or the DAC stage would be handed the sensor's
 	// vector and be left holding the last stepped command
+	lt_fout(data, "# FATAL: test aborted before completion (see log)\n");
 	data->stage = LT_DONE;
 	gsl_vector_set_zero(data->out);
 	state->header.status |= AYLP_DONE;
@@ -404,6 +479,9 @@ publish:
 int latency_test_fini(struct aylp_device *self)
 {
 	struct aylp_latency_test_data *data = self->device_data;
+	if (data->rf) fclose(data->rf);
+	free(data->results_file);
+	free(data->label);
 	xfree_type(gsl_vector, data->out);
 	xfree(data->dep);
 	xfree(data->half);

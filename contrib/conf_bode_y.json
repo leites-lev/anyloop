@@ -14,14 +14,12 @@
 			"uri": "file:/home/fsl/anyloop_levfork/anyloop/build/asi_source.so",
 			"params": {
 				"camera_name": "ASI290MM",
-				"width": 64,
-				"height": 64,
-				"exposure": 330,
+				"width": 56,
+				"height": 32,
+				"exposure": 50,
 				"gain": 100,
 				"bandwidth": 100,
-				"high_speed": 1,
-				"start_x": 920,
-				"start_y": 488
+				"high_speed": 1
 			}
 		},
 		{
@@ -32,15 +30,15 @@
 				"region_width": 15,
 				"threshold": 30,
 				"track": true,
-				"init_y": 32,
-				"init_x": 32
+				"init_y": 16,
+				"init_x": 28
 			}
 		},
 		{
 			"_comment": "Replace the y/tip element (0) with the swept sine; read CoM y as response",
 			"uri": "anyloop:bode_plot",
 			"params": {
-				"sample_rate": 2310.0,
+				"sample_rate": 3788.0,
 				"element": 0,
 				"inject": "replace",
 				"output": "raw",
@@ -55,7 +53,7 @@
 			}
 		},
 		{
-			"_note": "same mapping as steering_tuned.json: ch0=y(idx0, driven), ch1=x(idx1, parked), ch2/ch3 coarse parked. Coarse offsets 2.52/1.62 = current operating point (2026-07-14; was 2.7/1.65 on 07-13, 0.8/2.394 for the 2026-07-10 sweep).",
+			"_note": "same mapping as steering_tuned.json: ch0=y(idx0, driven), ch1=x(idx1, parked), ch2/ch3 coarse parked. Coarse offsets 1.95/2.02 = current operating point (2026-07-16 evening, 56x32 setup: beam parks at the default-centred ROI; was 2.52/1.62 on 07-14, 2.7/1.65 on 07-13, 0.8/2.394 for the 2026-07-10 sweep).",
 			"uri": "anyloop:piplate_bridge",
 			"params": {
 				"port": "/dev/ttyACM0",
@@ -79,7 +77,7 @@
 					0
 				],
 				"offset": [
-2,  2, 2.47, 1.62
+2,  2, 1.95, 2.02
 				],
 				"baud": 460800,
 				"wait_response": false,

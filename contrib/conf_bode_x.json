@@ -4,7 +4,7 @@
 		"2": "SOFTWARE injection: bode_plot replaces the x element (1; CoM is [y, x])",
 		"3": "with a sine each iteration, and piplate_bridge writes offset + sine*scale",
 		"4": "to DAC ch1 every cycle. Camera/CoM settings match the current steering",
-		"5": "geometry (64x64, exp 330, gain 100 -> 2310 Hz loop). Whole-frame CoM, no",
+		"5": "geometry (56x32, exp 50, gain 100). Whole-frame CoM, no",
 		"6": "tracking/acquisition: bode_plot injects from the first frame, so there",
 		"7": "must be no acquisition phase contaminating the first sweep points.",
 		"8": "No PID is in the loop, so the command IS the sine = open loop. Phase is",
@@ -20,14 +20,12 @@
 			"uri": "file:/home/fsl/anyloop_levfork/anyloop/build/asi_source.so",
 			"params": {
 				"camera_name": "ASI290MM",
-				"width": 64,
-				"height": 64,
-				"exposure": 360,
+				"width": 56,
+				"height": 32,
+				"exposure": 50,
 				"gain": 100,
 				"bandwidth": 100,
-				"high_speed": 1,
-				"start_x": 920,
-				"start_y": 488
+				"high_speed": 1
 			}
 		},
 		{
@@ -38,15 +36,15 @@
 				"region_width": 15,
 				"threshold": 30,
 				"track": true,
-				"init_y": 32,
-				"init_x": 32
+				"init_y": 16,
+				"init_x": 28
 			}
 		},
 		{
 			"_comment": "Replace the x/tilt element (1) with the swept sine; read CoM x as response",
 			"uri": "anyloop:bode_plot",
 			"params": {
-				"sample_rate": 2310.0,
+				"sample_rate": 3788.0,
 				"element": 1,
 				"inject": "replace",
 				"output": "raw",
@@ -61,7 +59,7 @@
 			}
 		},
 		{
-			"_note": "same mapping as steering_tuned.json: ch0=y(idx0, parked), ch1=x(idx1, driven), ch2/ch3 coarse parked. skip_unchanged: only the driven channel costs wire time. Coarse offsets 2.52/1.62 = current operating point (2026-07-14) so the sweep measures the plant the tuned loop actually sees; earlier sweeps used 2.7/1.65, 2.6/1.4 (steering_tuned 2026-07-13), 1.05/2.35 (attenuation runs) and 0.8/2.394 (2026-07-10, |P|x=0.43).",
+			"_note": "same mapping as steering_tuned.json: ch0=y(idx0, parked), ch1=x(idx1, driven), ch2/ch3 coarse parked. skip_unchanged: only the driven channel costs wire time. Coarse offsets 1.95/2.02 = current operating point (2026-07-16 evening, 56x32 setup: beam parks at the default-centred ROI, no start_x/start_y needed) so the sweep measures the plant the tuned loop actually sees; earlier operating points: 2.52/1.62 (07-14), 2.7/1.65, 2.6/1.4 (07-13), 1.05/2.35 (attenuation runs), 0.8/2.394 (07-10, |P|x=0.43).",
 			"uri": "anyloop:piplate_bridge",
 			"params": {
 				"port": "/dev/ttyACM0",
@@ -84,7 +82,7 @@
 					0,
 					0
 				],
-				"offset": [2,  2, 2.47, 1.62],
+				"offset": [2,  2, 1.95, 2.02],
 				"baud": 460800,
 				"wait_response": false,
 				"skip_unchanged": true

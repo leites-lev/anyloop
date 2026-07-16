@@ -1,0 +1,34 @@
+{
+	"_comment": {
+		"1": "Full-sensor probe: grab 5 frames with the DACs untouched (run it",
+		"2": "with the FSM parked at bias) and locate the beam, to re-derive",
+		"3": "start_x/start_y for the 56x32 configs after any bias or alignment",
+		"4": "change. The coarse channels need ~30 s to stabilize after startup,",
+		"5": "so probe only once the beam has settled at its parked position.",
+		"6": "Read the beam position from probe_full.aylp:",
+		"7": "  (parse: 40-byte header per frame -- magic u32, 4x u8, log_dim y/x u64 at offset 8 -- then y*x uint8s)",
+		"8": "start_x = round(beam_x) - 28, start_y = round(beam_y) - 16."
+	},
+	"pipeline": [
+		{
+			"uri": "file:/home/fsl/anyloop_levfork/anyloop/build/asi_source.so",
+			"params": {
+				"camera_name": "ASI290MM",
+				"width": 1936,
+				"height": 1096,
+				"exposure": 50,
+				"gain": 100,
+				"bandwidth": 100,
+				"high_speed": 1
+			}
+		},
+		{
+			"uri": "anyloop:file_sink",
+			"params": { "filename": "probe_full.aylp" }
+		},
+		{
+			"uri": "anyloop:stop_after_count",
+			"params": { "count": 5 }
+		}
+	]
+}

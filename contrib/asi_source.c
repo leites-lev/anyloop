@@ -15,6 +15,19 @@
 //   "gain"        (int):    sensor gain, 0–570 for IMX290 (default: 100)
 //   "bandwidth"   (int):    USB bandwidth %, 40–100 (default: 80)
 //   "high_speed"  (int):    1 = 10-bit ADC fast readout, 0 = 12-bit (default: 0)
+//   "stall_timeout_ms" (int): how long a blocking frame wait may last before
+//                 the stream is declared stalled. The loop is frame-paced, so
+//                 a healthy wait is ~1 frame period; anything much longer
+//                 means the camera stopped streaming. Default 0 = auto:
+//                 3 frame periods, measured at runtime (1 ms at 3788 fps).
+//                 Until the first rate estimate (~0.5 s in), a conservative
+//                 100 ms is used.
+//   "die_on_stall" (int): what to do when a stall is declared. 1 (default) =
+//                 abort the run immediately: proc() returns an error, which
+//                 is fatal for this device, so the run dies cleanly instead
+//                 of continuing with a multi-hundred-ms hole in the data
+//                 (DAC frozen, error accumulating). 0 = try to recover in
+//                 place: stop/restart capture up to 3 times and keep going.
 
 #include <string.h>
 #include <time.h>
@@ -48,6 +61,15 @@ struct asi_source_data {
 	long diag_frames;          // frames the camera produced this window
 	int  diag_max_drained;     // worst single-call drain this window
 	long diag_blocked;         // calls that found an empty queue and blocked
+
+	// Stream-stall recovery bookkeeping. The camera firmware / SDK
+	// occasionally stops delivering frames mid-stream with no USB-level
+	// error (established 2026-07-16: dmesg is silent at stall moments); a
+	// capture restart brings it back. Count them and report at fini.
+	long stall_recoveries;
+	int  stall_timeout_ms;     // configured value; 0 = auto (3 frames)
+	int  cur_timeout_ms;       // effective wait right now
+	int  die_on_stall;         // 1 = abort run on stall; 0 = restart capture
 };
 
 
@@ -69,10 +91,64 @@ int asi_source_proc(struct aylp_device *self, struct aylp_state *state)
 		drained++;
 	}
 	if (!got) {
-		// 2000 ms timeout — well above any realistic exposure time
+		// Blocking wait for the next frame. The loop is frame-paced, so
+		// a healthy wait is ~1 frame period; cur_timeout_ms (~3 frame
+		// periods by default) expiring means the stream stopped.
+		struct timespec st0, st1;
+		clock_gettime(CLOCK_MONOTONIC, &st0);
 		ASI_ERROR_CODE err = ASIGetVideoData(
-			data->camera_id, data->matrix->data, data->buf_size, 2000
+			data->camera_id, data->matrix->data, data->buf_size,
+			data->cur_timeout_ms
 		);
+		if (UNLIKELY(err == ASI_ERROR_TIMEOUT)) {
+			// one grace re-read before declaring a stall, so a
+			// millisecond scheduler hiccup of the SDK's worker
+			// thread doesn't trigger a needless capture restart
+			err = ASIGetVideoData(data->camera_id,
+				data->matrix->data, data->buf_size,
+				data->cur_timeout_ms);
+		}
+		if (UNLIKELY(err == ASI_ERROR_TIMEOUT)) {
+			// Genuine stall (2026-07-16: camera firmware / SDK
+			// stops streaming with the USB link clean; it never
+			// comes back on its own).
+			if (data->die_on_stall) {
+				log_error("asi_source: stream stalled (no frame "
+					"for 2x %d ms); die_on_stall is set, "
+					"aborting run", data->cur_timeout_ms);
+				return -1;
+			}
+			// Otherwise stop/restart capture and retry, up to 3
+			// times, before declaring the run dead. The pipeline
+			// is blocked meanwhile: the DAC holds its last command
+			// for the whole gap and the loop resumes onto whatever
+			// error accumulated.
+			for (int try = 1; try <= 3; try++) {
+				log_warn("asi_source: stream stalled (no frame "
+					"for 2x %d ms); restarting capture "
+					"(attempt %d/3)", data->cur_timeout_ms,
+					try);
+				ASIStopVideoCapture(data->camera_id);
+				err = ASIStartVideoCapture(data->camera_id);
+				if (err != ASI_SUCCESS) continue;
+				// first frame after a restart takes a while;
+				// give it a generous window
+				err = ASIGetVideoData(data->camera_id,
+					data->matrix->data, data->buf_size,
+					500);
+				if (err == ASI_SUCCESS) break;
+			}
+			if (err == ASI_SUCCESS) {
+				data->stall_recoveries++;
+				clock_gettime(CLOCK_MONOTONIC, &st1);
+				double dead = (st1.tv_sec - st0.tv_sec)
+					+ (st1.tv_nsec - st0.tv_nsec) / 1e9;
+				log_warn("asi_source: stream recovered; "
+					"~%.3f s of frames lost (stall #%ld "
+					"this run)", dead,
+					data->stall_recoveries);
+			}
+		}
 		if (UNLIKELY(err != ASI_SUCCESS)) {
 			log_error("ASIGetVideoData error %d", err);
 			return -1;
@@ -110,6 +186,12 @@ int asi_source_proc(struct aylp_device *self, struct aylp_state *state)
 				data->diag_max_drained,
 				100.0 * data->diag_blocked / data->diag_calls,
 				cam_hz > 0 ? 1000.0 / cam_hz : 0.0);
+			// auto stall timeout: 3 frame periods at the measured
+			// camera rate, at least 1 ms (the SDK takes int ms)
+			if (data->stall_timeout_ms == 0 && cam_hz > 0.0) {
+				int t = (int)(3000.0 / cam_hz + 0.999);
+				data->cur_timeout_ms = t > 1 ? t : 1;
+			}
 		}
 		data->diag_t0 = now;
 		data->diag_calls = 0;
@@ -129,6 +211,8 @@ int asi_source_proc(struct aylp_device *self, struct aylp_state *state)
 int asi_source_fini(struct aylp_device *self)
 {
 	struct asi_source_data *data = self->device_data;
+	log_info("asi_source: %ld stream stall(s) recovered by capture "
+		"restart this run", data->stall_recoveries);
 	ASIStopVideoCapture(data->camera_id);
 	ASICloseCamera(data->camera_id);
 	xfree_type(gsl_matrix_uchar, data->matrix);
@@ -154,6 +238,7 @@ int asi_source_init(struct aylp_device *self)
 	long gain     = 100;
 	long bandwidth = 80;
 	long high_speed = 0;  // 1 = 10-bit ADC fast readout
+	data->die_on_stall = 1;
 
 	if (!self->params) {
 		log_error("No params object found");
@@ -180,10 +265,24 @@ int asi_source_init(struct aylp_device *self)
 			bandwidth = (long)json_object_get_int64(val);
 		} else if (!strcmp(key, "high_speed")) {
 			high_speed = (long)json_object_get_int64(val);
+		} else if (!strcmp(key, "die_on_stall")) {
+			data->die_on_stall = json_object_get_int(val) ? 1 : 0;
+		} else if (!strcmp(key, "stall_timeout_ms")) {
+			data->stall_timeout_ms = (int)json_object_get_int64(val);
+			if (data->stall_timeout_ms < 0) {
+				log_error("stall_timeout_ms must be >= 0 "
+					"(0 = auto)");
+				return -1;
+			}
 		} else {
 			log_warn("Unknown parameter \"%s\"", key);
 		}
 	}
+
+	// effective wait until the first frame-rate estimate refines it (auto
+	// mode tightens to 3 measured frame periods after ~0.5 s)
+	data->cur_timeout_ms = data->stall_timeout_ms > 0
+		? data->stall_timeout_ms : 100;
 
 	if (width % 8 != 0) {
 		log_error("width must be a multiple of 8 (got %d)", width);

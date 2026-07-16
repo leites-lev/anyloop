@@ -26,11 +26,9 @@
 			"uri": "file:/home/fsl/anyloop_levfork/anyloop/build/asi_source.so",
 			"params": {
 				"camera_name": "ASI290MM",
-				"width":       64,
-				"height":      64,
-				"start_x":     920,
-				"start_y":     488,
-				"exposure":    200,
+				"width":       56,
+				"height":      32,
+				"exposure":    50,
 				"gain":        100,
 				"bandwidth":   100,
 				"high_speed":  1
@@ -49,8 +47,8 @@
 				"region_width":  15,
 				"threshold":     22,
 				"track":         true,
-				"init_y":        32,
-				"init_x":        32
+				"init_y":        16,
+				"init_x":        28
 			}
 		},
 		{
@@ -116,7 +114,7 @@
 				"channel": [0, 1, 2, 3],
 				"index":   [0, 1, 0, 0],
 				"scale":   [2, -2, 0, 0],
-				"offset":  [2, 2, 2.52, 1.65],
+				"offset":  [2, 2, 1.95, 2.02],
 				"baud":    460800,
 				"start_delay": [2.0, 2.0, 0, 0],
 				"wait_response": false,

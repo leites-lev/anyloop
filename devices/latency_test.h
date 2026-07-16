@@ -21,6 +21,9 @@ struct aylp_latency_test_data {
 	double settle_frac;	// last fraction of a half-cycle treated as settled
 	size_t cal_cycles;	// full low/high cycles used for calibration
 	size_t n_steps;		// command edges to measure before reporting
+	char *results_file;	// append per-edge + summary results here (optional)
+	char *label;		// free-text run label for the results header
+	FILE *rf;		// open results file, or 0
 
 	// output vector; element index_cmd carries the square wave, rest are 0
 	gsl_vector *out;
