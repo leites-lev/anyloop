@@ -120,7 +120,7 @@
 				"channel": [0, 1, 2, 3],
 				"index":   [0, 1, 0, 0],
 				"scale":   [2, -2, 0, 0],
-				"offset":  [2, 2, 2, 1.93],
+				"offset":  [2, 2, 1.98, 1.97],
 				"baud":    460800,
 				"start_delay": [2.0, 2.0, 0, 0],
 				"wait_response": false,
