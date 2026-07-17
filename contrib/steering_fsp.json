@@ -66,6 +66,7 @@
 			"_note2": "K is the SIGNED command->error gain (error units per command unit). The current Bode plots (fsm_bodex_716.dat and fsm_bodey_716.dat) give low-frequency plateaus Kx=0.868 and Ky=0.630 at the new 32x32 alignment; that is DOUBLE the 64px-era 0.434/0.315 because CoM units are normalized to the frame half-width (32px frame => same physical motion = 2x normalized units). K too SMALL means commands too STRONG (u=-cancel/K). Sign remains +.",
 			"_note3": "With broad_order>0 the identified full-band observer supplies the command and the AR2 modal estimate is not added, avoiding double cancellation. The modal q/r values remain available for diagnostics and for rollback with broad_order=0. broad_mu is the NLMS identification step: lower it if weights are noisy, raise it only if the disturbance spectrum changes faster than the current observer converges.",
 			"_note4": "zeta ~0.002 = sharp line; ~0.3 = broadband hump. adapt_period>0 turns on Petit/Meimon re-identification: every 8 s it refreshes each mode's q from its recent energy, r from the innovation floor, nudges center frequencies toward the measured lines (capped at adapt_df_max Hz/update, matching the ~0.5 Hz/run wander), and recomputes the Kalman gain. Set adapt_period 0 for a fixed FSP while first validating.",
+			"_note5": "RUN16 plant-model change: per-axis stable/minimum-phase H(z) biquads fit the residual complex response of fsm_bodex/y_716 after K+transport delay. The Smith reconstruction uses H on the delayed applied command and the requested cancellation uses the matched stable H^-1. All predictor/adaptation/timing parameters remain run15 values.",
 			"uri": "anyloop:fsp",
 			"params": {
 				"type":         "vector",
@@ -84,6 +85,8 @@
 				"adapt_tau":    5.0,
 				"y": {
 					"K":     0.630,
+					"plant_b": [1.01775962947, -1.69717913168, 0.704539755008],
+					"plant_a": [1.0,           -1.69717913168, 0.722299384480],
 					"r":     1.0,
 					"freqs": [5.64, 11.3, 21.1, 29.6, 57.5, 20.0],
 					"zeta":  [0.002, 0.002, 0.002, 0.002, 0.003, 0.30],
@@ -94,6 +97,8 @@
 					"delay":      5,
 					"delay_frac": 0.62,
 					"K":     0.868,
+					"plant_b": [1.10229094038, -0.302433459403, -0.654475151295],
+					"plant_a": [1.0,           -0.302433459403, -0.552184210911],
 					"r":     1.0,
 					"freqs": [9.8, 12.0, 21.7, 24.9, 57.5, 83.3, 20.0],
 					"zeta":  [0.002, 0.002, 0.002, 0.002, 0.003, 0.003, 0.30],

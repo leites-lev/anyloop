@@ -56,7 +56,7 @@
 			"params": { "ip": "127.0.0.1", "port": "64732" }
 		},
 		{
-			"_note1": "THE TEST. Sits after the CoM sinks (watchers see the true error) and before the FSP. During the open phase the FSP is fed zeros and parks at 0; settle_time covers its cold-start convergence and adaptation after closure. pixel_scale 15.5 = (32-1)/2 for both axes. This is the attenuation11 test sequence with only the camera/alignment and measured timing updated.",
+			"_note1": "RUN 16 A/B TEST. Sits after the CoM sinks (watchers see the true error) and before the FSP. During the open phase the FSP is fed zeros and parks at 0; settle_time covers its cold-start convergence and adaptation after closure. pixel_scale 15.5 = (32-1)/2 for both axes. All run-15 timing, predictor, adaptation, camera, and alignment parameters are unchanged; the only control change is the Bode-fitted plant shape H(z) and its matched inverse.",
 			"_note2": "compare the closed RMS-about-mean here against attenuation10_lead_fc64 (x 0.244, y 0.151 px). Same nfft/open/closed as that run for a shared grid.",
 			"uri": "anyloop:attenuation_test",
 			"params": {
@@ -67,8 +67,8 @@
 				"nfft":        4096,
 				"labels":      "y,x",
 				"pixel_scale": 15.5,
-				"config":      "ATTENUATION11 FSP RETEST -- new laser alignment, camera rate, and current Bode plant gains\nSame continuously adapting full-band FSP as the successful attenuation11 run: broad_order=512, broad_mu=.03, start_delay=2 s, ramp=10 s; no frozen-weights test mode or safety-trip tuning\nCamera/CoM match steering_tuned.json: 32x32 ROI, exposure 50, gain 100, 20x20 tracked window, threshold 22; coarse offsets 1.95/2.02 V\nCurrent Bode plots fsm_bodex_716/fsm_bodey_716 give low-frequency normalized gains Kx=.868 and Ky=.630\nLoop delay from the bode phase fits (5-300 Hz slope + 1 hidden frame): x 1.484 ms = 5.62 fr, y 1.681 ms = 6.37 fr at 3788 Hz. PER-AXIS delays: y global 6+0.0 (validated), x override 5+0.62 (bode fit; 5x latency runs 21:22-21:26 give departure 1.06 ms / 50% 1.32 ms = 5.00 fr every run). Departure-latency 4.02 fr was 1.6-2.3 fr short and caused the 310 Hz spiral of 07-16 20:55\nAll remaining observer and modal parameters match attenuation11; output is reported at 15.5 px per normalized unit\nrefs: Kulcsar 2006 / Petit 2008 / Meimon 2010 / Correia 2010",
-				"output_file": "attenuation_fsp15.pdf"
+				"config":      "ATTENUATION16 FSP BODE-SHAPED PLANT -- true A/B against successful run 15\nOnly control change from run 15: replace scalar K+delay plant with per-axis stable minimum-phase H(z), fitted to the 2026-07-16 complex Bode data, and apply its matched stable inverse to the cancellation command. Predictor remains continuously adapting: broad_order=512, broad_mu=.03, broad_freeze_closed=false\nCamera/CoM unchanged: 32x32 ROI, exposure 50, gain 100, 20x20 tracked window, threshold 22; controller timing unchanged: start_delay=2 s, ramp=10 s\nLow-frequency gains remain Kx=.868 and Ky=.630. The fitted H has unity DC gain and at most 1.132 gain; scalar-model complex RMS error over 5-300 Hz falls from 8.80% to 4.39% on x and 8.31% to 3.46% on y\nLoop delays unchanged from run 15: y 6+0.0 frames, x 5+0.62 frames at fs=3788 Hz\nAll observer, modal, clamp, and PiPlate parameters match run 15; output is reported at 15.5 px per normalized unit\nrefs: Kulcsar 2006 / Petit 2008 / Meimon 2010 / Correia 2010",
+				"output_file": "Bode_and_testruns/Current fsp run/attenuation_fsp16.pdf"
 			}
 		},
 		{
@@ -91,6 +91,9 @@
 				"adapt_tau":    5.0,
 				"y": {
 					"K":     0.630,
+					"_plant_shape": "RUN16 ONLY CONTROL CHANGE. H(z)=B(z)/A(z) is the stable/minimum-phase complex fit to fsm_bodey_716 after removing K, the configured transport delay, and adding the Bode helper's one hidden frame. FSP uses H for Smith reconstruction and H^-1 for command shaping.",
+					"plant_b": [1.01775962947, -1.69717913168, 0.704539755008],
+					"plant_a": [1.0,           -1.69717913168, 0.722299384480],
 					"r":     1.0,
 					"freqs": [5.64, 11.3, 21.1, 29.6, 57.5, 20.0],
 					"zeta":  [0.002, 0.002, 0.002, 0.002, 0.003, 0.30],
@@ -101,6 +104,9 @@
 					"delay":      5,
 					"delay_frac": 0.62,
 					"K":     0.868,
+					"_plant_shape": "RUN16 ONLY CONTROL CHANGE. Stable/minimum-phase complex fit to fsm_bodex_716, used as a matched H/H^-1 pair.",
+					"plant_b": [1.10229094038, -0.302433459403, -0.654475151295],
+					"plant_a": [1.0,           -0.302433459403, -0.552184210911],
 					"r":     1.0,
 					"freqs": [9.8, 12.0, 21.7, 24.9, 57.5, 83.3, 20.0],
 					"zeta":  [0.002, 0.002, 0.002, 0.002, 0.003, 0.003, 0.30],

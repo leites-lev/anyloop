@@ -214,14 +214,37 @@ static size_t fsp_get_darray(struct json_object *val, double *dst, size_t max)
 	return n;
 }
 
+// Jury stability test for z^2 + c1*z + c2.  The same test is applied to
+// plant_a (forward filter poles) and plant_b/b0 (inverse-filter poles), making
+// the configured plant shape both stable and minimum phase.
+static bool fsp_biquad_stable(double c1, double c2)
+{
+	return isfinite(c1) && isfinite(c2) && fabs(c2) < 1.0
+		&& 1.0 + c1 + c2 > 0.0
+		&& 1.0 - c1 + c2 > 0.0;
+}
+
+// Direct-form II transposed biquad used for both the delayed-command plant
+// model H(z) and the matched command prefilter H^-1(z).
+static inline double fsp_biquad(double x, const double b[3],
+	const double a[3], double *z1, double *z2)
+{
+	double y = b[0]*x + *z1;
+	*z1 = b[1]*x - a[1]*y + *z2;
+	*z2 = b[2]*x - a[2]*y;
+	return y;
+}
+
 // parse the per-axis mode/plant params out of a nested JSON object
 static int fsp_parse_axis(struct aylp_fsp_axis *ax, struct json_object *obj)
 {
 	double q_scalar = -1.0;
-	size_t nf = 0, nz = 0, nq = 0;
+	size_t nf = 0, nz = 0, nq = 0, nb = 0, na = 0;
+	bool have_plant_b = false, have_plant_a = false;
 	// sentinels: inherit the global delay/delay_frac unless the axis sets them
 	ax->delay = 0;
 	ax->delay_frac = -1.0;
+	ax->plant_b[0] = ax->plant_a[0] = 1.0;
 	json_object_object_foreach(obj, key, val) {
 		if (key[0] == '_') {
 		} else if (!strcmp(key, "K") || !strcmp(key, "plant_gain")) {
@@ -230,6 +253,18 @@ static int fsp_parse_axis(struct aylp_fsp_axis *ax, struct json_object *obj)
 			ax->delay = json_object_get_uint64(val);
 		} else if (!strcmp(key, "delay_frac")) {
 			ax->delay_frac = json_object_get_double(val);
+		} else if (!strcmp(key, "plant_b")) {
+			have_plant_b = true;
+			if (json_object_is_type(val, json_type_array)) {
+				nb = json_object_array_length(val);
+				if (nb == 3) fsp_get_darray(val, ax->plant_b, 3);
+			}
+		} else if (!strcmp(key, "plant_a")) {
+			have_plant_a = true;
+			if (json_object_is_type(val, json_type_array)) {
+				na = json_object_array_length(val);
+				if (na == 3) fsp_get_darray(val, ax->plant_a, 3);
+			}
 		} else if (!strcmp(key, "r")) {
 			ax->r = json_object_get_double(val);
 		} else if (!strcmp(key, "freqs")) {
@@ -268,6 +303,56 @@ static int fsp_parse_axis(struct aylp_fsp_axis *ax, struct json_object *obj)
 	if (ax->K == 0.0) {
 		log_error("fsp: each axis needs a nonzero plant gain \"K\".");
 		return -1;
+	}
+	if (have_plant_b != have_plant_a
+			|| (have_plant_b && (nb != 3 || na != 3))) {
+		log_error("fsp: plant_b and plant_a must both contain exactly "
+			"three coefficients.");
+		return -1;
+	}
+	if (have_plant_b) {
+		for (size_t i = 0; i < 3; i++) {
+			if (!isfinite(ax->plant_b[i]) || !isfinite(ax->plant_a[i])) {
+				log_error("fsp: plant biquad coefficients must be finite.");
+				return -1;
+			}
+		}
+		if (fabs(ax->plant_a[0]) < 1e-12) {
+			log_error("fsp: plant_a[0] must be nonzero.");
+			return -1;
+		}
+		// Normalize the forward denominator to a0=1.
+		double a0 = ax->plant_a[0];
+		for (size_t i = 0; i < 3; i++) {
+			ax->plant_b[i] /= a0;
+			ax->plant_a[i] /= a0;
+		}
+		if (fabs(ax->plant_b[0]) < 1e-12
+				|| !fsp_biquad_stable(ax->plant_a[1],
+					ax->plant_a[2])
+				|| !fsp_biquad_stable(ax->plant_b[1]/ax->plant_b[0],
+					ax->plant_b[2]/ax->plant_b[0])) {
+			log_error("fsp: plant biquad and its inverse must both be "
+				"stable (all poles and zeros strictly inside the unit "
+				"circle).");
+			return -1;
+		}
+		double bdc = ax->plant_b[0] + ax->plant_b[1]
+			+ ax->plant_b[2];
+		double adc = 1.0 + ax->plant_a[1] + ax->plant_a[2];
+		if (fabs(bdc) < 1e-9 || fabs(adc) < 1e-9) {
+			log_error("fsp: plant biquad must have finite, nonzero DC "
+				"gain.");
+			return -1;
+		}
+		// H^-1(z) = A(z)/B(z), normalized by the leading b0.
+		ax->plant_ib[0] = 1.0 / ax->plant_b[0];
+		ax->plant_ib[1] = ax->plant_a[1] / ax->plant_b[0];
+		ax->plant_ib[2] = ax->plant_a[2] / ax->plant_b[0];
+		ax->plant_ia[0] = 1.0;
+		ax->plant_ia[1] = ax->plant_b[1] / ax->plant_b[0];
+		ax->plant_ia[2] = ax->plant_b[2] / ax->plant_b[0];
+		ax->plant_shaped = true;
 	}
 	return 0;
 }
@@ -444,6 +529,12 @@ int fsp_init(struct aylp_device *self)
 			"samples ahead%s", a == 0 ? "y" : "x", ax->n_modes, ax->K,
 			ax->delay, ax->delay_frac,
 			data->adapt_period > 0 ? ", adaptive" : " (fixed)");
+		if (ax->plant_shaped)
+			log_info("fsp: %s Bode-shaped plant H(z): "
+				"b=[%G,%G,%G], a=[1,%G,%G], matched stable inverse",
+				a == 0 ? "y" : "x",
+				ax->plant_b[0], ax->plant_b[1], ax->plant_b[2],
+				ax->plant_a[1], ax->plant_a[2]);
 	}
 	if (data->broad_order)
 		log_info("fsp: full-band %zu-state disturbance predictor, horizon "
@@ -600,7 +691,15 @@ int fsp_proc(struct aylp_device *self, struct aylp_state *state)
 		// magnitude through Nyquist and therefore does not leave a false
 		// high-frequency command residue in the Smith reconstruction.
 		double u_old = ax->ucmd[slot];
-		double phi_meas = e - ax->K * u_old;
+		// The Bode-shaped model is evaluated on the command that actually
+		// entered the delay line (after clamp and fractional-delay shaping).
+		// Since H and the transport delay are both LTI they commute, so this
+		// is K H(z) D(z) u with only two extra states per axis.
+		double plant_u = u_old;
+		if (ax->plant_shaped)
+			plant_u = fsp_biquad(u_old, ax->plant_b, ax->plant_a,
+				&ax->plant_z1, &ax->plant_z2);
+		double phi_meas = e - ax->K * plant_u;
 
 		// Full compound-disturbance observer (Kulcsar/Petit/Meimon):
 		// identify the delay-step conditional mean of the reconstructed
@@ -683,6 +782,7 @@ int fsp_proc(struct aylp_device *self, struct aylp_state *state)
 			// bad sample: reset the estimate, output 0; still advance
 			// this axis's command ring to keep the delay line in step
 			memset(ax->xhat, 0, ax->dim * sizeof(double));
+			ax->plant_iz1 = ax->plant_iz2 = 0.0;
 			ax->ucmd[slot_older] = 0.0;
 			ax->uhead = (ax->uhead + 1) % ring_len;
 			r->data[j * r->stride] = 0.0;
@@ -732,7 +832,14 @@ int fsp_proc(struct aylp_device *self, struct aylp_state *state)
 		// The full-band predictor and modal predictor estimate the same
 		// disturbance. Select, do not sum, to avoid double cancellation.
 		double cancel_hat = data->broad_order ? broad_hat : phi_hat;
-		double u = -frac * cancel_hat / ax->K;
+		// Ask for the actuator-space correction v=-phi_hat/K, then apply the
+		// matched stable inverse H^-1.  The physical Bode-shaped plant turns
+		// this back into K H H^-1 v = -phi_hat at the transport horizon.
+		double v = -frac * cancel_hat / ax->K;
+		double u = v;
+		if (ax->plant_shaped)
+			u = fsp_biquad(v, ax->plant_ib, ax->plant_ia,
+				&ax->plant_iz1, &ax->plant_iz2);
 		// A static centroid offset is normal and may require substantial DC
 		// command to remove.  Trip only when the magnitude grows beyond its
 		// learned open-loop level; motion toward zero is successful control,
@@ -764,10 +871,12 @@ int fsp_proc(struct aylp_device *self, struct aylp_state *state)
 		if (data->tripped) {
 			u = 0.0;
 			ax->lp_z1 = ax->lp_z2 = 0.0;
+			ax->plant_iz1 = ax->plant_iz2 = 0.0;
 		}
 		if (!isfinite(u)) {
 			u = 0.0;
 			ax->lp_z1 = ax->lp_z2 = 0.0;
+			ax->plant_iz1 = ax->plant_iz2 = 0.0;
 		}
 		if (u > data->clamp) u = data->clamp;
 		if (u < -data->clamp) u = -data->clamp;

@@ -11,15 +11,17 @@ either double-compensates the loop delay and pumps the vibration lines. Place
 it where `pid` used to sit: after `center_of_mass` and any logging sink, before
 `clamp`.
 
-The plant seen by the loop is a gain `K` plus a possibly fractional transport
-delay (camera latency + compute + DAC ZOH): `e(k) = phi(k) +
-K*((1-f)*u(k-delay) + f*u(k-delay-1))`, where `f=delay_frac` and `phi` is the
-open-loop disturbance. Three stages, after
+The plant seen by the loop is a gain `K`, an optional Bode-fitted
+frequency-shaping biquad `H(z)`, and a possibly fractional transport delay
+(camera latency + compute + DAC ZOH): `e = phi + K*H(z)*D(z)*u`, where `D`
+contains `delay`/`delay_frac` and `phi` is the open-loop disturbance. Three
+stages, after
 Kulcsár 2006, Petit 2008, Meimon 2010, Correia 2010:
 
 1. **Smith-predictor core.** Reconstruct the disturbance by removing our own
-   delayed plant contribution: `phi_meas(k) = e(k) - K*u(k-delay)`. This takes
-   the delay out of the loop's characteristic equation.
+   delayed plant contribution: `phi_meas = e - K*H(z)*D(z)*u`. This takes the
+   identified plant out of the disturbance estimate. When `plant_b`/`plant_a`
+   are omitted, `H(z)=1` and this is the original scalar-gain model.
 2. **Disturbance observer.** The modal path models `phi` as a sum of `n_modes`
    narrowband damped oscillators (`freqs`/`zeta`), each driven by white noise
    of variance `q`. A stationary Kalman gain (precomputed by iterating the
@@ -29,7 +31,10 @@ Kulcsár 2006, Petit 2008, Meimon 2010, Correia 2010:
    full-band Wiener/Kalman FIR realization, covering both the broadband
    continuum and vibration peaks.
 3. **delay-step prediction + minimum-variance control.** Roll the modal state
-   forward `delay` steps and cancel it: `u(k) = -phi_hat(k+delay|k)/K`.
+   forward `delay` steps and cancel it. With a shaped plant, the requested
+   actuator-space correction is passed through the matched stable inverse:
+   `u = H^-1(z)*(-phi_hat/K)`. Requiring both `H` and `H^-1` to be stable keeps
+   this causal and prevents the fit from hiding an unstable plant inversion.
 
 This is the one in-loop mechanism that beats the delay-limited crossover on the
 **predictable** (modal) part of the disturbance. It does nothing for the
@@ -93,6 +98,16 @@ Parameters
 - `y`, `x`: per-axis objects (element 0 = y, element 1 = x), each with:
   - `K`: **signed** command→error gain. Wrong sign = positive feedback =
     runaway; verify with a push test.
+  - `plant_b`, `plant_a`: optional three-coefficient numerator and denominator
+    of the per-axis Bode residual `H(z)=(b0+b1*z^-1+b2*z^-2)/
+    (a0+a1*z^-1+a2*z^-2)`. Both arrays must be supplied together. FSP
+    normalizes `a0`, verifies that all poles and zeros lie inside the unit
+    circle, uses `H` in the Smith reconstruction, and uses the matched `H^-1`
+    on the cancellation command. Omit both for the original `H=1` behavior.
+    Run 16 coefficients are fits to `fsm_bodex_716`/`fsm_bodey_716` after
+    removing the run-15 `K`, transport delay, and the Bode helper's hidden
+    frame; they cut 5–300 Hz complex plant-model RMS error from 8.80% to
+    4.39% on x and 8.31% to 3.46% on y.
   - `r`: measurement-noise variance.
   - `freqs`: mode center frequencies (Hz), up to `AYLP_FSP_MAX_MODES` (8).
   - `zeta`: per-mode damping (~0.002 for a sharp line, ~0.3 for a broadband

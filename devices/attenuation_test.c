@@ -421,7 +421,7 @@ static int analyze_and_plot(struct aylp_attenuation_test_data *data)
 	fclose(script);
 
 	char cmd[512];
-	snprintf(cmd, sizeof(cmd), "python3 %s %s %s '%s'", script_path,
+	snprintf(cmd, sizeof(cmd), "python3 '%s' '%s' '%s' '%s'", script_path,
 		dat_path, data->output_file,
 		data->labels ? data->labels : "");
 	int ret = system(cmd);
@@ -515,6 +515,12 @@ int attenuation_test_init(struct aylp_device *self)
 	if (data->labels && strchr(data->labels, '\'')) {
 		// the label string is single-quoted into a shell command
 		log_error("labels must not contain '");
+		return -1;
+	}
+	if (strchr(data->output_file, '\'')) {
+		// The output and adjacent .dat path are single-quoted when the plot
+		// helper is launched, allowing destination directories with spaces.
+		log_error("output_file must not contain '");
 		return -1;
 	}
 

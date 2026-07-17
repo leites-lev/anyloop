@@ -14,22 +14,22 @@
 // pid used to: after center_of_mass and any logging sink, before clamp.
 //
 // Structure (per axis, independent; index 0 = y, 1 = x, matching pid's
-// [y,x] convention). The plant seen by the loop is a gain K plus a transport
-// delay of `delay + delay_frac` samples (camera + compute + DAC ZOH):
+// [y,x] convention). The plant seen by the loop is a gain K, an optional
+// stable/minimum-phase frequency-shaping biquad H(z), and a transport delay
+// of `delay + delay_frac` samples (camera + compute + DAC ZOH):
 //
-//     e(k) = phi(k) + K * ((1-f)u(k-delay) + f*u(k-delay-1))
+//     e(k) = phi(k) + K H(z) D(z) u(k)
 //
 // where phi is the disturbance (bench vibration) the beam would see open-loop,
 // and u is our command. The three pieces, following Kulcsar 2006 / Petit 2008
 // / Meimon 2010 / Correia 2010 (optimal/adaptive control for AO):
 //
-//  1. SMITH-PREDICTOR CORE. We know K and delay, so we reconstruct the
-//     disturbance from the measured error by removing our own delayed
-//     contribution:  phi_meas(k) = e(k) - K * u(k - delay).  This is the
-//     internal plant model that takes the delay out of the loop's
-//     characteristic equation. During the open-loop startup hold (command
-//     forced to 0) phi_meas is exactly the raw open-loop disturbance, which
-//     is the cleanest data to identify the vibration modes on.
+//  1. SMITH-PREDICTOR CORE. We know K, H(z), and delay, so we reconstruct the
+//     disturbance from the measured error by removing our own modeled plant
+//     contribution: phi_meas = e - K H(z) D(z) u. This internal model takes
+//     the identified plant out of the disturbance estimate. During the
+//     open-loop startup hold (command forced to 0) phi_meas is exactly the raw
+//     open-loop disturbance, which is the cleanest identification data.
 //
 //  2. DISTURBANCE MODEL + KALMAN FILTER. phi is modeled as a sum of `n_modes`
 //     narrowband AR(2) vibration modes (Meimon 2010's tip-tilt model), each a
@@ -48,7 +48,7 @@
 //     running the AR recursion `delay` steps (the mean prediction, zero future
 //     noise) and cancel the predicted disturbance:
 //         phi_hat(k+delay|k) = C A^delay Xhat(k|k)
-//         u(k) = -phi_hat(k+delay|k) / K
+//         u(k) = H^-1(z) [-phi_hat(k+delay|k) / K]
 //     This is what "gets around" the delay on the PREDICTABLE (modal) part of
 //     phi; the unpredictable broadband floor and anything above the loop's
 //     achievable bandwidth are NOT helped (a fundamental limit, not an
@@ -91,6 +91,24 @@ struct aylp_fsp_axis {
 	double K;			// signed plant gain (error units per command
 					// unit); sign must make the loop negative
 					// feedback -- verify with a push test
+	// Optional Bode-fitted plant shape
+	//
+	//               b0 + b1 z^-1 + b2 z^-2
+	//     H(z) = --------------------------------
+	//               1  + a1 z^-1 + a2 z^-2
+	//
+	// plant_b/plant_a default to identity. Both H and H^-1 must be stable:
+	// the Smith reconstruction filters the delayed command through H, while
+	// the cancellation command is filtered through H^-1 so K H u equals the
+	// requested minimum-variance correction. This matched pair changes the
+	// plant model without changing the disturbance predictor.
+	bool plant_shaped;
+	double plant_b[3];
+	double plant_a[3];
+	double plant_ib[3];		// normalized numerator of H^-1
+	double plant_ia[3];		// normalized denominator of H^-1
+	double plant_z1, plant_z2;	// delayed-command H(z) state
+	double plant_iz1, plant_iz2;	// requested-command H^-1(z) state
 	// Per-axis transport delay in samples. The two axes' plants differ
 	// (bode 2026-07-16: x 5.62 vs y 6.37 frames at 3788 Hz), so each axis
 	// may set its own "delay"/"delay_frac" inside its object; unset values
