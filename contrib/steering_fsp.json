@@ -26,12 +26,14 @@
 			"uri": "file:/home/fsl/anyloop_levfork/anyloop/build/asi_source.so",
 			"params": {
 				"camera_name": "ASI290MM",
-				"width":       56,
+				"width":       32,
 				"height":      32,
+				"_roi_note": "no start_x/start_y: with the coarse biases below (1.95/2.02) the beam parks in the driver-default ROI; copied from steering_tuned.json after the 2026-07-16 realignment.",
 				"exposure":    50,
 				"gain":        100,
 				"bandwidth":   100,
-				"high_speed":  1
+				"high_speed":  1,
+				"die_on_stall": 0
 			}
 		},
 		{
@@ -40,15 +42,13 @@
 			"params": { "ip": "127.0.0.1", "port": "64730", "decimation": 64 }
 		},
 		{
-			"_comment": "15x15 tracking window on the beam; see steering_tuned.json",
+			"_comment": "tracking window copied from steering_tuned.json",
 			"uri": "anyloop:center_of_mass",
 			"params": {
-				"region_height": 15,
-				"region_width":  15,
+				"region_height": 20,
+				"region_width":  20,
 				"threshold":     22,
-				"track":         true,
-				"init_y":        16,
-				"init_x":        28
+				"track":         true
 			}
 		},
 		{
@@ -62,8 +62,8 @@
 			"params": { "ip": "127.0.0.1", "port": "64732" }
 		},
 		{
-			"_note1": "THE CONTROLLER. The latest Bode fit gives 1.81 ms = 4.18 frames at 2310 Hz: delay=4 plus delay_frac=.18, modeled by a unity-magnitude first-order Thiran all-pass. broad_order=128 captures the continuum omitted by the AR(2)-only model with much less high-frequency overfit than attenuation11's 512 taps; broad_mu=.005 reduces coefficient misadjustment.",
-			"_note2": "K is the SIGNED command->error gain (error units per command unit). |Kx|=0.427, |Ky|=0.300 from the fine bodes @ bias 2.52/1.62. Sign is +: the classical loop rejects with positive i and plain [y,x] output, i.e. the command->error path is negative-feedback-stable, so u=-phi/K needs K>0. VERIFY with a push test before trusting it.",
+			"_note1": "THE CONTROLLER. This retains the successful attenuation11 full-band FSP parameters, updated only for the 2026-07-16 camera timing: 3788 Hz and 1.061 ms median departure = 4.02 frames, modeled as delay=4 plus delay_frac=.02. broad_order=512 and broad_mu=.03 match attenuation11.",
+			"_note2": "K is the SIGNED command->error gain (error units per command unit). The current Bode plots (fsm_bodex_716.dat and fsm_bodey_716.dat) give low-frequency plateaus Kx=0.868 and Ky=0.630 at the new 32x32 alignment. Sign remains +.",
 			"_note3": "With broad_order>0 the identified full-band observer supplies the command and the AR2 modal estimate is not added, avoiding double cancellation. The modal q/r values remain available for diagnostics and for rollback with broad_order=0. broad_mu is the NLMS identification step: lower it if weights are noisy, raise it only if the disturbance spectrum changes faster than the current observer converges.",
 			"_note4": "zeta ~0.002 = sharp line; ~0.3 = broadband hump. adapt_period>0 turns on Petit/Meimon re-identification: every 8 s it refreshes each mode's q from its recent energy, r from the innovation floor, nudges center frequencies toward the measured lines (capped at adapt_df_max Hz/update, matching the ~0.5 Hz/run wander), and recomputes the Kalman gain. Set adapt_period 0 for a fixed FSP while first validating.",
 			"uri": "anyloop:fsp",
@@ -71,14 +71,11 @@
 				"type":         "vector",
 				"units":        "minmax",
 				"delay":        4,
-				"delay_frac":   0.18,
-				"fs":           2310,
-				"broad_order":  128,
-				"broad_mu":     0.005,
-				"broad_freeze_closed": true,
-				"trip_error":   0.05,
-				"trip_command": 0.65,
-				"trip_frames":  8,
+				"delay_frac":   0.02,
+				"fs":           3788,
+				"broad_order":  512,
+				"broad_mu":     0.03,
+				"broad_freeze_closed": false,
 				"clamp":        1.0,
 				"start_delay":  20,
 				"ramp":         15.0,
@@ -86,14 +83,14 @@
 				"adapt_df_max": 0.5,
 				"adapt_tau":    5.0,
 				"y": {
-					"K":     0.300,
+					"K":     0.630,
 					"r":     1.0,
 					"freqs": [5.64, 11.3, 21.1, 29.6, 57.5, 20.0],
 					"zeta":  [0.002, 0.002, 0.002, 0.002, 0.003, 0.30],
 					"q":     [1.0e-5, 1.5e-5, 1.5e-5, 1.0e-5, 0.5e-5, 1.0e-5]
 				},
 				"x": {
-					"K":     0.427,
+					"K":     0.868,
 					"r":     1.0,
 					"freqs": [9.8, 12.0, 21.7, 24.9, 57.5, 83.3, 20.0],
 					"zeta":  [0.002, 0.002, 0.002, 0.002, 0.003, 0.003, 0.30],
