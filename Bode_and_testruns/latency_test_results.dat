@@ -47,3 +47,248 @@
 # half_ms median 1.322 mean 1.358 min 1.293 max 1.608 n 40
 # sample_interval_ms 0.264 loop_hz 3788
 # median_departure_frames 4.0
+# ===== latency_test run 2026-07-16T21:22:35 label run1 =====
+# index_cmd 1 index_err 1 low -0.5 high 0.5 period 0.25 warmup 35 cal_cycles 3 n_steps 40 settle_frac 0.4
+# columns: edge direction departure_ms half_ms (-1 = not detected)
+# calibrated: settled_low -0.116409 settled_high 0.373596 step 0.492224 sigma 0.0168098 step/sigma 29.3
+1 low->high 1.056 1.320
+2 high->low 1.092 1.349
+3 low->high 1.084 1.348
+4 high->low 1.080 1.351
+5 low->high 1.058 1.293
+6 high->low 1.062 1.319
+7 low->high 1.028 1.293
+8 high->low 1.056 1.320
+9 low->high 1.066 1.332
+10 high->low 1.092 1.350
+11 low->high 1.274 1.557
+12 high->low 1.257 1.590
+13 low->high 1.054 1.318
+14 high->low 1.030 1.295
+15 low->high 1.069 1.365
+16 high->low 1.060 1.322
+17 low->high 1.346 1.684
+18 high->low 1.361 1.611
+19 low->high 1.058 1.320
+20 high->low 1.049 1.316
+21 low->high 1.053 1.320
+22 high->low 1.057 1.323
+23 low->high 1.055 1.326
+24 high->low 1.050 1.318
+25 low->high 1.048 1.311
+26 high->low 1.057 1.324
+27 low->high 1.066 1.309
+28 high->low 1.057 1.321
+29 low->high 1.058 1.321
+30 high->low 1.056 1.323
+31 low->high 1.059 1.327
+32 high->low 1.060 1.322
+33 low->high 1.063 1.384
+34 high->low 1.059 1.297
+35 low->high 1.067 1.354
+36 high->low 1.322 1.507
+37 low->high 1.110 1.368
+38 high->low 1.063 1.322
+39 low->high 1.050 1.319
+40 high->low 1.042 1.600
+# edges_measured 40 edges_missed 0
+# departure_ms median 1.059 mean 1.092 min 1.028 max 1.361 n 40
+# half_ms median 1.323 mean 1.366 min 1.293 max 1.684 n 40
+# sample_interval_ms 0.264 loop_hz 3788
+# median_departure_frames 4.0
+# ===== latency_test run 2026-07-16T21:23:22 label run2 =====
+# index_cmd 1 index_err 1 low -0.5 high 0.5 period 0.25 warmup 35 cal_cycles 3 n_steps 40 settle_frac 0.4
+# columns: edge direction departure_ms half_ms (-1 = not detected)
+# calibrated: settled_low -0.0924475 settled_high 0.399331 step 0.493143 sigma 0.0168278 step/sigma 29.3
+1 low->high 1.068 1.317
+2 high->low 1.361 1.633
+3 low->high 1.315 1.616
+4 high->low 1.346 1.652
+5 low->high 1.070 1.332
+6 high->low 1.081 1.370
+7 low->high 1.045 1.322
+8 high->low 1.289 1.538
+9 low->high 1.353 1.639
+10 high->low 1.054 1.312
+11 low->high 1.321 1.634
+12 high->low 1.226 1.525
+13 low->high 1.266 1.580
+14 high->low 1.218 1.584
+15 low->high 1.082 1.346
+16 high->low 1.058 1.324
+17 low->high 1.057 1.315
+18 high->low 1.003 1.328
+19 low->high 1.056 1.320
+20 high->low 1.056 1.308
+21 low->high 1.056 1.320
+22 high->low 1.056 1.323
+23 low->high 1.046 1.306
+24 high->low 1.063 1.320
+25 low->high 1.079 1.541
+26 high->low 1.361 1.631
+27 low->high 1.366 1.645
+28 high->low 1.048 1.315
+29 low->high 1.022 1.283
+30 high->low 1.053 1.326
+31 low->high 1.055 1.317
+32 high->low 1.051 1.319
+33 low->high 1.044 1.308
+34 high->low 1.082 1.329
+35 low->high 1.054 1.317
+36 high->low 1.053 1.318
+37 low->high 1.303 1.577
+38 high->low 1.056 1.320
+39 low->high 1.016 1.306
+40 high->low 1.055 1.316
+# edges_measured 40 edges_missed 0
+# departure_ms median 1.058 mean 1.131 min 1.003 max 1.366 n 40
+# half_ms median 1.324 mean 1.411 min 1.283 max 1.652 n 40
+# sample_interval_ms 0.264 loop_hz 3785
+# median_departure_frames 4.0
+# ===== latency_test run 2026-07-16T21:24:10 label run3 =====
+# index_cmd 1 index_err 1 low -0.5 high 0.5 period 0.25 warmup 35 cal_cycles 3 n_steps 40 settle_frac 0.4
+# columns: edge direction departure_ms half_ms (-1 = not detected)
+# calibrated: settled_low -0.101184 settled_high 0.391559 step 0.496164 sigma 0.0247648 step/sigma 20.0
+1 low->high 1.055 1.320
+2 high->low 1.059 1.320
+3 low->high 1.328 1.328
+4 high->low 1.029 1.294
+5 low->high 1.057 1.321
+6 high->low 1.055 1.319
+7 low->high 1.056 1.323
+8 high->low 1.075 1.337
+9 low->high 1.375 1.651
+10 high->low 1.056 1.325
+11 low->high 1.279 1.612
+12 high->low 1.056 1.319
+13 low->high 1.058 1.322
+14 high->low 1.058 1.322
+15 low->high 1.066 1.299
+16 high->low 1.049 1.317
+17 low->high 1.103 1.337
+18 high->low 1.078 1.343
+19 low->high 1.294 1.580
+20 high->low 1.409 1.631
+21 low->high 1.286 1.525
+22 high->low 1.080 1.343
+23 low->high 1.321 1.584
+24 high->low 1.312 1.591
+25 low->high 1.066 1.313
+26 high->low 1.058 1.320
+27 low->high 1.025 1.422
+28 high->low 1.024 1.282
+29 low->high 1.092 1.342
+30 high->low 1.056 1.321
+31 low->high 1.016 1.267
+32 high->low 1.060 1.323
+33 low->high 1.055 1.321
+34 high->low 1.056 1.319
+35 low->high 1.059 1.293
+36 high->low 1.054 1.316
+37 low->high 1.366 1.366
+38 high->low 1.168 1.396
+39 low->high 1.294 1.560
+40 high->low 1.056 1.323
+# edges_measured 40 edges_missed 0
+# departure_ms median 1.059 mean 1.128 min 1.016 max 1.409 n 40
+# half_ms median 1.323 mean 1.379 min 1.267 max 1.651 n 40
+# sample_interval_ms 0.264 loop_hz 3788
+# median_departure_frames 4.0
+# ===== latency_test run 2026-07-16T21:24:58 label run4 =====
+# index_cmd 1 index_err 1 low -0.5 high 0.5 period 0.25 warmup 35 cal_cycles 3 n_steps 40 settle_frac 0.4
+# columns: edge direction departure_ms half_ms (-1 = not detected)
+# calibrated: settled_low -0.0863392 settled_high 0.404902 step 0.493469 sigma 0.0151801 step/sigma 32.5
+1 low->high 1.029 1.296
+2 high->low 1.104 1.576
+3 low->high 1.057 1.322
+4 high->low 1.057 1.321
+5 low->high 1.057 1.300
+6 high->low 1.351 1.679
+7 low->high 1.034 1.307
+8 high->low 1.058 1.324
+9 low->high 1.057 1.321
+10 high->low 1.145 1.440
+11 low->high 1.049 1.288
+12 high->low 1.284 1.586
+13 low->high 1.316 1.578
+14 high->low 1.024 1.290
+15 low->high 1.054 1.320
+16 high->low 1.055 1.316
+17 low->high 1.052 1.319
+18 high->low 1.046 1.313
+19 low->high 1.167 1.588
+20 high->low 1.056 1.320
+21 low->high 1.085 1.345
+22 high->low 1.052 1.352
+23 low->high 1.026 1.293
+24 high->low 1.339 1.593
+25 low->high 1.294 1.613
+26 high->low 1.046 1.311
+27 low->high 1.236 1.628
+28 high->low 1.227 1.584
+29 low->high 1.055 1.324
+30 high->low 1.044 1.308
+31 low->high 1.279 1.615
+32 high->low 1.172 1.380
+33 low->high 1.056 1.326
+34 high->low 1.055 1.319
+35 low->high 1.059 1.295
+36 high->low 1.044 1.310
+37 low->high 1.079 1.340
+38 high->low 1.095 1.358
+39 low->high 1.026 1.321
+40 high->low 1.028 1.319
+# edges_measured 40 edges_missed 0
+# departure_ms median 1.057 mean 1.109 min 1.024 max 1.351 n 40
+# half_ms median 1.322 mean 1.393 min 1.288 max 1.679 n 40
+# sample_interval_ms 0.271 loop_hz 3686
+# median_departure_frames 3.9
+# ===== latency_test run 2026-07-16T21:25:45 label run5 =====
+# index_cmd 1 index_err 1 low -0.5 high 0.5 period 0.25 warmup 35 cal_cycles 3 n_steps 40 settle_frac 0.4
+# columns: edge direction departure_ms half_ms (-1 = not detected)
+# calibrated: settled_low -0.100564 settled_high 0.389839 step 0.492632 sigma 0.0210814 step/sigma 23.4
+1 low->high 1.055 1.319
+2 high->low 1.055 1.319
+3 low->high 1.058 1.320
+4 high->low 1.056 1.322
+5 low->high 1.058 1.318
+6 high->low 1.062 1.320
+7 low->high 1.030 1.295
+8 high->low 1.057 1.319
+9 low->high 1.082 1.345
+10 high->low 1.059 1.320
+11 low->high 1.029 1.302
+12 high->low 1.056 1.321
+13 low->high 1.197 1.590
+14 high->low 1.058 1.321
+15 low->high 1.329 1.607
+16 high->low 1.315 1.575
+17 low->high 1.195 1.547
+18 high->low 1.365 1.668
+19 low->high 1.256 1.576
+20 high->low 1.045 1.285
+21 low->high 1.054 1.316
+22 high->low 1.056 1.319
+23 low->high 1.056 1.318
+24 high->low 1.059 1.294
+25 low->high 1.311 1.579
+26 high->low 1.053 1.315
+27 low->high 1.057 1.320
+28 high->low 1.053 1.334
+29 low->high 1.061 1.328
+30 high->low 1.060 1.320
+31 low->high 1.066 1.336
+32 high->low 1.065 1.319
+33 low->high 1.057 1.324
+34 high->low 1.049 1.312
+35 low->high 1.052 1.315
+36 high->low 1.051 1.315
+37 low->high 1.080 1.345
+38 high->low 1.053 1.317
+39 low->high 1.083 1.347
+40 high->low 1.048 1.331
+# edges_measured 40 edges_missed 0
+# departure_ms median 1.058 mean 1.096 min 1.029 max 1.365 n 40
+# half_ms median 1.320 mean 1.367 min 1.285 max 1.668 n 40
+# sample_interval_ms 0.264 loop_hz 3788
+# median_departure_frames 4.0

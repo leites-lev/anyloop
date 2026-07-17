@@ -45,13 +45,16 @@ Parameters
 ----------
 - `type`: must be `"vector"`.
 - `units`: output units (e.g. `"minmax"`).
-- `delay`: loop transport delay in samples. The latest Bode fit is 1.81 ms,
-  or 4.18 frames at 2310 Hz; use 4 for the discrete controller.
+- `delay`: loop transport delay in samples. Fit it from the full-band Bode
+  phase slope plus the one hidden bode frame (2026-07-16 @ 3788 Hz: x 5.62,
+  y 6.37 frames), NOT from the step-departure latency, which understates the
+  effective delay. Beware the units when the frame rate changes: latency in ms
+  can fall while the delay in FRAMES rises. Each axis object may set its own
+  `delay`/`delay_frac`, overriding this global value (the two plants differ).
 - `delay_frac`: fractional remainder of the transport delay. The Smith plant
   uses a first-order Thiran all-pass, preserving command magnitude while
   matching the fractional group delay; the full-band observer blends its
-  adjacent horizon predictions. Use 0.18 with `delay=4` for the 1.81 ms Bode
-  fit at 2310 Hz.
+  adjacent horizon predictions. Per-axis override allowed as with `delay`.
 - `fs`: loop rate (Hz); must match, so AR coefficients land on the right digital
   frequencies.
 - `clamp`: command magnitude limit.

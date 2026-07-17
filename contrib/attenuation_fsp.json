@@ -67,8 +67,8 @@
 				"nfft":        4096,
 				"labels":      "y,x",
 				"pixel_scale": 15.5,
-				"config":      "ATTENUATION11 FSP RETEST -- new laser alignment, camera rate, and current Bode plant gains\nSame continuously adapting full-band FSP as the successful attenuation11 run: broad_order=512, broad_mu=.03, start_delay=2 s, ramp=10 s; no frozen-weights test mode or safety-trip tuning\nCamera/CoM match steering_tuned.json: 32x32 ROI, exposure 50, gain 100, 20x20 tracked window, threshold 22; coarse offsets 1.95/2.02 V\nCurrent Bode plots fsm_bodex_716/fsm_bodey_716 give low-frequency normalized gains Kx=.868 and Ky=.630\nMeasured 2026-07-16 latency: loop rate 3788 Hz, median departure 1.061 ms = 4.02 frames; FSP delay=4+0.02 Thiran\nAll remaining observer and modal parameters match attenuation11; output is reported at 15.5 px per normalized unit\nrefs: Kulcsar 2006 / Petit 2008 / Meimon 2010 / Correia 2010",
-				"output_file": "attenuation_fsp14.pdf"
+				"config":      "ATTENUATION11 FSP RETEST -- new laser alignment, camera rate, and current Bode plant gains\nSame continuously adapting full-band FSP as the successful attenuation11 run: broad_order=512, broad_mu=.03, start_delay=2 s, ramp=10 s; no frozen-weights test mode or safety-trip tuning\nCamera/CoM match steering_tuned.json: 32x32 ROI, exposure 50, gain 100, 20x20 tracked window, threshold 22; coarse offsets 1.95/2.02 V\nCurrent Bode plots fsm_bodex_716/fsm_bodey_716 give low-frequency normalized gains Kx=.868 and Ky=.630\nLoop delay from the bode phase fits (5-300 Hz slope + 1 hidden frame): x 1.484 ms = 5.62 fr, y 1.681 ms = 6.37 fr at 3788 Hz. PER-AXIS delays: y global 6+0.0 (validated), x override 5+0.62 (bode fit; 5x latency runs 21:22-21:26 give departure 1.06 ms / 50% 1.32 ms = 5.00 fr every run). Departure-latency 4.02 fr was 1.6-2.3 fr short and caused the 310 Hz spiral of 07-16 20:55\nAll remaining observer and modal parameters match attenuation11; output is reported at 15.5 px per normalized unit\nrefs: Kulcsar 2006 / Petit 2008 / Meimon 2010 / Correia 2010",
+				"output_file": "attenuation_fsp15.pdf"
 			}
 		},
 		{
@@ -77,8 +77,8 @@
 			"params": {
 				"type":         "vector",
 				"units":        "minmax",
-				"delay":        4,
-				"delay_frac":   0.02,
+				"delay":        6,
+				"delay_frac":   0.0,
 				"fs":           3788,
 				"broad_order":  512,
 				"broad_mu":     0.03,
@@ -97,6 +97,9 @@
 					"q":     [1.0e-5, 1.5e-5, 1.5e-5, 1.0e-5, 0.5e-5, 1.0e-5]
 				},
 				"x": {
+					"_delay": "per-axis override, same numbers as steering_fsp.json: x bode 5.62 fr, latency 5x runs 50% = 5.00 fr; y inherits global 6",
+					"delay":      5,
+					"delay_frac": 0.62,
 					"K":     0.868,
 					"r":     1.0,
 					"freqs": [9.8, 12.0, 21.7, 24.9, 57.5, 83.3, 20.0],
@@ -117,7 +120,7 @@
 				"channel": [0, 1, 2, 3],
 				"index":   [0, 1, 0, 0],
 				"scale":   [2, -2, 0, 0],
-				"offset":  [2, 2, 1.95, 2.02],
+				"offset":  [2, 2, 2, 1.93],
 				"baud":    460800,
 				"start_delay": [2.0, 2.0, 0, 0],
 				"wait_response": false,

@@ -91,6 +91,18 @@ struct aylp_fsp_axis {
 	double K;			// signed plant gain (error units per command
 					// unit); sign must make the loop negative
 					// feedback -- verify with a push test
+	// Per-axis transport delay in samples. The two axes' plants differ
+	// (bode 2026-07-16: x 5.62 vs y 6.37 frames at 3788 Hz), so each axis
+	// may set its own "delay"/"delay_frac" inside its object; unset values
+	// inherit the global ones. Resolved at init (0 / <0 = inherit).
+	size_t delay;
+	double delay_frac;
+	// per-axis command ring and full-band observer bookkeeping -- lengths
+	// depend on the axis delay so they cannot be shared
+	size_t uhead;			// ring write index into ucmd
+	size_t broad_hist_len;		// = broad_order + delay + 1
+	size_t broad_head;
+	size_t broad_seen;
 	// per-mode nominal parameters (also the adaptation targets)
 	double f[AYLP_FSP_MAX_MODES];		// center frequency (Hz)
 	double zeta[AYLP_FSP_MAX_MODES];	// damping ratio (0..1)
@@ -130,7 +142,7 @@ struct aylp_fsp_axis {
 	// (direct form II transposed)
 	size_t comp_n[AYLP_FSP_MAX_MODES];
 	double comp_g[AYLP_FSP_MAX_MODES];
-	size_t max_steps;	// = delay + max_i comp_n[i]
+	size_t max_steps;	// = ax->delay + max_i comp_n[i]
 	double lp_z1, lp_z2;
 	// Optional full-band disturbance observer. This is the scalar FIR
 	// realization of the delayed Wiener/Kalman predictor: it learns the
@@ -158,7 +170,9 @@ struct aylp_fsp_data {
 	aylp_type type;
 	// units to output (command units, e.g. minmax)
 	aylp_units units;
-	// loop transport delay in samples (camera + compute + DAC ZOH)
+	// loop transport delay in samples (camera + compute + DAC ZOH); the
+	// GLOBAL DEFAULT -- each axis object may override with its own
+	// "delay"/"delay_frac" (see aylp_fsp_axis)
 	size_t delay;
 	// Fractional remainder of the measured transport delay. The plant uses a
 	// first-order Thiran all-pass (unit magnitude, correct low-frequency group
@@ -202,16 +216,11 @@ struct aylp_fsp_data {
 	double trip_command;
 	size_t trip_frames;
 	bool tripped;
-	size_t broad_hist_len;
-	size_t broad_head;
-	size_t broad_seen;
 	// shared biquad coefficients for the command filter (normalized)
 	double lp_b0, lp_b1, lp_b2, lp_a1, lp_a2;
 
 	// per-axis controllers: [0] = y (element 0), [1] = x (element 1)
 	struct aylp_fsp_axis axis[2];
-	// shared ring write index for the per-axis command delay lines
-	size_t uhead;
 
 	// timing / handover bookkeeping
 	double t0;		// CLOCK_MONOTONIC of first proc (s)

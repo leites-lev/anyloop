@@ -167,7 +167,7 @@ static void fsp_build_cmdlp(struct aylp_fsp_data *data)
 static void fsp_build_comp(struct aylp_fsp_axis *ax,
 	const struct aylp_fsp_data *data)
 {
-	ax->max_steps = data->delay;
+	ax->max_steps = ax->delay;
 	for (size_t i = 0; i < ax->n_modes; i++) {
 		if (data->cmd_fc <= 0.0) {
 			ax->comp_n[i] = 0;
@@ -193,8 +193,8 @@ static void fsp_build_comp(struct aylp_fsp_axis *ax,
 		size_t n = (size_t)(th/w + 0.5);
 		ax->comp_n[i] = n;
 		ax->comp_g[i] = g;
-		if (data->delay + n > ax->max_steps)
-			ax->max_steps = data->delay + n;
+		if (ax->delay + n > ax->max_steps)
+			ax->max_steps = ax->delay + n;
 	}
 }
 
@@ -219,10 +219,17 @@ static int fsp_parse_axis(struct aylp_fsp_axis *ax, struct json_object *obj)
 {
 	double q_scalar = -1.0;
 	size_t nf = 0, nz = 0, nq = 0;
+	// sentinels: inherit the global delay/delay_frac unless the axis sets them
+	ax->delay = 0;
+	ax->delay_frac = -1.0;
 	json_object_object_foreach(obj, key, val) {
 		if (key[0] == '_') {
 		} else if (!strcmp(key, "K") || !strcmp(key, "plant_gain")) {
 			ax->K = json_object_get_double(val);
+		} else if (!strcmp(key, "delay")) {
+			ax->delay = json_object_get_uint64(val);
+		} else if (!strcmp(key, "delay_frac")) {
+			ax->delay_frac = json_object_get_double(val);
 		} else if (!strcmp(key, "r")) {
 			ax->r = json_object_get_double(val);
 		} else if (!strcmp(key, "freqs")) {
@@ -383,6 +390,18 @@ int fsp_init(struct aylp_device *self)
 	if (fsp_parse_axis(&data->axis[0], axy)) return -1;
 	if (fsp_parse_axis(&data->axis[1], axx)) return -1;
 
+	// resolve per-axis delays: unset values inherit the global ones
+	for (int a = 0; a < 2; a++) {
+		struct aylp_fsp_axis *ax = &data->axis[a];
+		if (!ax->delay) ax->delay = data->delay;
+		if (ax->delay_frac < 0.0) ax->delay_frac = data->delay_frac;
+		if (ax->delay_frac >= 1.0) {
+			log_error("fsp: %s axis delay_frac must satisfy "
+				"0 <= delay_frac < 1.", a == 0 ? "y" : "x");
+			return -1;
+		}
+	}
+
 	if (data->cmd_fc > 0.0) {
 		if (data->cmd_fc >= data->fs / 2.0) {
 			log_error("fsp: cmd_fc must be < fs/2.");
@@ -403,10 +422,10 @@ int fsp_init(struct aylp_device *self)
 			return -1;
 		}
 		// One extra command is retained for fractional-delay interpolation.
-		ax->ucmd = xcalloc(data->delay + 1, sizeof(double));
+		ax->ucmd = xcalloc(ax->delay + 1, sizeof(double));
 		if (data->broad_order) {
-			data->broad_hist_len = data->broad_order + data->delay + 1;
-			ax->broad_hist = xcalloc(data->broad_hist_len,
+			ax->broad_hist_len = data->broad_order + ax->delay + 1;
+			ax->broad_hist = xcalloc(ax->broad_hist_len,
 				sizeof(double));
 			ax->broad_w = xcalloc(data->broad_order, sizeof(double));
 			ax->broad_w_next = xcalloc(data->broad_order,
@@ -421,15 +440,18 @@ int fsp_init(struct aylp_device *self)
 			ax->demod_re[i] = ax->demod_im[i] = 0.0;
 			ax->demod_ph[i] = 0.0;
 		}
-		log_info("fsp: %s axis, %zu modes, K=%G, predicting %zu samples "
-			"ahead%s", a == 0 ? "y" : "x", ax->n_modes, ax->K,
-			data->delay,
+		log_info("fsp: %s axis, %zu modes, K=%G, predicting %zu+%.3G "
+			"samples ahead%s", a == 0 ? "y" : "x", ax->n_modes, ax->K,
+			ax->delay, ax->delay_frac,
 			data->adapt_period > 0 ? ", adaptive" : " (fixed)");
 	}
 	if (data->broad_order)
 		log_info("fsp: full-band %zu-state disturbance predictor, horizon "
-			"%zu+%.3G frames, NLMS mu %G", data->broad_order,
-			data->delay, data->delay_frac, data->broad_mu);
+			"y %zu+%.3G / x %zu+%.3G frames, NLMS mu %G",
+			data->broad_order,
+			data->axis[0].delay, data->axis[0].delay_frac,
+			data->axis[1].delay, data->axis[1].delay_frac,
+			data->broad_mu);
 	if (data->trip_error > 0.0 || data->trip_command > 0.0)
 		log_info("fsp: latched safety trip: error=%G command=%G for %zu "
 			"frames", data->trip_error, data->trip_command,
@@ -543,20 +565,23 @@ int fsp_proc(struct aylp_device *self, struct aylp_state *state)
 	if (data->adapt_period > 0.0 && data->adapt_tau > 0.0)
 		beta = 1.0 - exp(-1.0 / (data->adapt_tau * data->fs));
 
-	size_t delay = data->delay;
-	size_t ring_len = delay + 1;
-	size_t slot_older = data->uhead;	// u(k-delay-1)
-	size_t slot = (slot_older + 1) % ring_len;	// u(k-delay)
-	if (data->broad_order) {
-		data->broad_head = (data->broad_head + 1) % data->broad_hist_len;
-		data->broad_seen++;
-	}
-
 	for (size_t j = 0; j < s->size; j++) {
 		// only elements 0 (y) and 1 (x) are controlled; pass any extras
 		if (j > 1) { r->data[j * r->stride] = 0.0; continue; }
 		struct aylp_fsp_axis *ax = &data->axis[j];
 		double e = s->data[j * s->stride];
+
+		// per-axis delay bookkeeping (each axis is visited exactly once
+		// per frame, so advancing here keeps per-frame cadence)
+		size_t delay = ax->delay;
+		size_t ring_len = delay + 1;
+		size_t slot_older = ax->uhead;	// u(k-delay-1)
+		size_t slot = (slot_older + 1) % ring_len;	// u(k-delay)
+		if (data->broad_order) {
+			ax->broad_head = (ax->broad_head + 1)
+				% ax->broad_hist_len;
+			ax->broad_seen++;
+		}
 
 		// Learn the ordinary open-loop operating point.  Use the same slow
 		// timescale as the other statistics; attenuation_test provides 500 s
@@ -584,10 +609,10 @@ int fsp_proc(struct aylp_device *self, struct aylp_state *state)
 		// without a large online covariance matrix.
 		double broad_hat = 0.0;
 		if (data->broad_order) {
-			size_t P = data->broad_order, H = data->broad_hist_len;
-			ax->broad_hist[data->broad_head] = phi_meas;
-			if (data->broad_seen >= H) {
-				size_t idx = (data->broad_head + H - delay) % H;
+			size_t P = data->broad_order, H = ax->broad_hist_len;
+			ax->broad_hist[ax->broad_head] = phi_meas;
+			if (ax->broad_seen >= H) {
+				size_t idx = (ax->broad_head + H - delay) % H;
 				double pred = 0.0, energy = 1e-12;
 				for (size_t i = 0; i < P; i++) {
 					double v = ax->broad_hist[idx];
@@ -608,7 +633,7 @@ int fsp_proc(struct aylp_device *self, struct aylp_state *state)
 				// Identify the adjacent delay+1 predictor. Their weighted
 				// combination is the conditional mean at the fractional
 				// Bode-fit horizon.
-				idx = (data->broad_head + H - delay - 1) % H;
+				idx = (ax->broad_head + H - delay - 1) % H;
 				pred = 0.0; energy = 1e-12;
 				for (size_t i = 0; i < P; i++) {
 					double v = ax->broad_hist[idx];
@@ -626,7 +651,7 @@ int fsp_proc(struct aylp_device *self, struct aylp_state *state)
 				} else if (!isfinite(pe)) {
 					memset(ax->broad_w_next, 0, P * sizeof(double));
 				}
-				idx = data->broad_head;
+				idx = ax->broad_head;
 				double broad_next = 0.0;
 				for (size_t i = 0; i < P; i++) {
 					broad_hat += ax->broad_w[i]
@@ -635,8 +660,8 @@ int fsp_proc(struct aylp_device *self, struct aylp_state *state)
 						* ax->broad_hist[idx];
 					idx = idx ? idx - 1 : H - 1;
 				}
-				broad_hat = (1.0 - data->delay_frac) * broad_hat
-					+ data->delay_frac * broad_next;
+				broad_hat = (1.0 - ax->delay_frac) * broad_hat
+					+ ax->delay_frac * broad_next;
 				if (!isfinite(broad_hat)) broad_hat = 0.0;
 			}
 		}
@@ -655,9 +680,11 @@ int fsp_proc(struct aylp_device *self, struct aylp_state *state)
 		}
 		double innov = phi_meas - Cxpred;
 		if (!isfinite(innov)) {
-			// bad sample: reset the estimate, output 0
+			// bad sample: reset the estimate, output 0; still advance
+			// this axis's command ring to keep the delay line in step
 			memset(ax->xhat, 0, ax->dim * sizeof(double));
 			ax->ucmd[slot_older] = 0.0;
+			ax->uhead = (ax->uhead + 1) % ring_len;
 			r->data[j * r->stride] = 0.0;
 			continue;
 		}
@@ -747,17 +774,16 @@ int fsp_proc(struct aylp_device *self, struct aylp_state *state)
 
 		// Apply the fractional part of the plant delay before the integer
 		// command ring. H(z)=(a+z^-1)/(1+a*z^-1), with DC group delay f.
-		double a_frac = (1.0 - data->delay_frac)
-			/ (1.0 + data->delay_frac);
+		double a_frac = (1.0 - ax->delay_frac)
+			/ (1.0 + ax->delay_frac);
 		double u_frac = a_frac*u + ax->frac_x1 - a_frac*ax->frac_y1;
 		ax->frac_x1 = u;
 		ax->frac_y1 = u_frac;
 		ax->ucmd[slot_older] = u_frac;
+		ax->uhead = (ax->uhead + 1) % ring_len;
 		r->data[j * r->stride] = u;
 	}
 
-	// advance the shared command-delay ring once per frame
-	data->uhead = (data->uhead + 1) % ring_len;
 	data->n_seen += 1;
 
 	// slow re-identification
