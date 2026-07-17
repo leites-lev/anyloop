@@ -247,6 +247,9 @@ int bode_plot_init(struct aylp_device *self)
 		} else if (!strcmp(key, "amplitude")) {
 			data->amplitude = json_object_get_double(val);
 			log_trace("amplitude = %G", data->amplitude);
+		} else if (!strcmp(key, "start_delay")) {
+			data->start_delay = json_object_get_double(val);
+			log_trace("start_delay = %G s", data->start_delay);
 		} else if (!strcmp(key, "inject")) {
 			const char *s = json_object_get_string(val);
 			if (!strcmp(s, "add"))
@@ -384,6 +387,26 @@ int bode_plot_proc(struct aylp_device *self, struct aylp_state *state)
 	if (data->freq_idx >= data->n_freqs) {
 		state->header.status |= AYLP_DONE;
 		return 0;
+	}
+
+	// 0. Hold before the sweep: inject 0 for start_delay seconds so a
+	// downstream DAC bridge parks the driven channel at its offset (replace
+	// mode) while e.g. coarse channels stabilize. The sweep clock starts
+	// only after the hold expires.
+	if (UNLIKELY(data->start_delay > 0.0 && !data->delay_done)) {
+		double now = get_time_seconds();
+		if (data->delay_start == 0.0) {
+			data->delay_start = now;
+			log_info("Holding injection at 0 for %g s before sweep",
+				data->start_delay);
+		}
+		if (now - data->delay_start < data->start_delay) {
+			if (data->fg_fd < 0)
+				write_element(state, data->element, 0.0,
+					data->inject_mode);
+			return 0;
+		}
+		data->delay_done = true;
 	}
 
 	// 1. Initialize clock baseline cleanly on the very first sample of each frequency.

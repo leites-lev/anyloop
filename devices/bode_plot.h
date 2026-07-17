@@ -29,6 +29,7 @@ struct aylp_bode_plot_data {
 	// injection
 	double amplitude;       // injection amplitude in pipeline units (default: 0.1)
 	unsigned inject_mode;   // BODE_INJECT_ADD or BODE_INJECT_REPLACE
+	double start_delay;     // seconds to inject 0 before the sweep starts (default: 0)
 	// output channel
 	unsigned output_mode;   // BODE_OUTPUT_RAW or BODE_OUTPUT_DIFF
 	size_t element;         // linear index into vector/matrix (default: 0)
@@ -38,6 +39,8 @@ struct aylp_bode_plot_data {
 	char *output_file;      // PDF filename (default: "bode_plot.pdf")
 
 	// sweep state
+	double delay_start;     // timestamp of first frame (start_delay reference); 0 until seen
+	bool delay_done;        // start_delay has elapsed; sweep is running
 	size_t freq_idx;        // current frequency index
 	size_t step_count;      // samples elapsed at current frequency
 	size_t n_avg_cur;       // averaging samples for current frequency

@@ -14,24 +14,23 @@
 			"uri": "file:/home/fsl/anyloop_levfork/anyloop/build/asi_source.so",
 			"params": {
 				"camera_name": "ASI290MM",
-				"width": 56,
+				"width": 32,
 				"height": 32,
 				"exposure": 50,
 				"gain": 100,
 				"bandwidth": 100,
-				"high_speed": 1
+				"high_speed": 1,
+				"die_on_stall": 0
 			}
 		},
 		{
 			"uri": "anyloop:center_of_mass",
 			"params": {
 				"_note": "tracked 15x15 window, threshold 30 -- matches attenuation_test.json exactly so the sweep measures the same sensor the loop sees. Initialized on the beam (frame centre) with no acquisition phase: bode_plot injects from the first frame, and the stray reflection at ROI (10,28) must stay out of the sum. Output is image-normalized.",
-				"region_height": 15,
-				"region_width": 15,
-				"threshold": 30,
-				"track": true,
-				"init_y": 16,
-				"init_x": 28
+				"region_height": 20,
+				"region_width": 20,
+				"threshold": 22,
+				"track": true
 			}
 		},
 		{
@@ -42,14 +41,16 @@
 				"element": 0,
 				"inject": "replace",
 				"output": "raw",
-				"freq_start": 5.0,
+				"freq_start": 1.0,
 				"freq_end": 300.0,
-				"_tuning": "n_freqs 100 / n_settle 400 / n_cycles 40 (2026-07-14): see conf_bode_x.json -- the 240-pt/12-cycle sweep was jagged (worse on y: |P|y*A is only ~0.028, so the ambient lines dominate short correlations, and the 5 Hz point was swamped by the 5.64 Hz line).",
+				"_tuning": "n_freqs 100 / n_settle 400 / nnate short correlations, and the 5 Hz point was swamped by the 5.64 Hz line).",
 				"n_freqs": 100,
 				"n_settle": 400,
-				"n_cycles": 40.0,
+				"n_cycles": 70.0,
 				"amplitude": 0.15,
-				"output_file": "fsm2310_bode_y_bias2.47,1.62_2026-07-14_fine.pdf"
+				"_start_delay": "hold injection at 0 (= fine channel parked at its bias) for 30 s so the coarse channels have time to adjust before the sweep starts",
+				"start_delay": 30.0,
+				"output_file": "fsm_bodey_716.pdf"
 			}
 		},
 		{
