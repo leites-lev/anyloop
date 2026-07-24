@@ -77,6 +77,19 @@ Parameters
   modal-only controller. Attenuation12 uses order 128 and `broad_mu=0.005`;
   attenuation11 showed that 512 taps at 0.03 preserved more high-frequency
   coefficient noise than the additional prediction accuracy justified.
+- `broad_lp`: observer band-limit (odd boxcar taps on the NLMS input; 0 = off).
+  The full-band observer is otherwise sensitive out to Nyquist, and any K/delay
+  model error leaks command echo into its input as a *predictable* HF signal
+  that closed-loop NLMS learns and chases into a self-sustained ring at the
+  regeneration frequency (2026-07-22: a ~380 Hz x-axis limit cycle, 4.8 px rms,
+  ignited ~1 min after close with same-day bode-matched K/delay — the residual
+  mismatch is amplitude-dependent, so no static tune removes it). A `broad_lp`
+  boxcar has its first null at `fs/broad_lp` and attenuates the whole
+  regeneration band; being linear-phase with exactly integer group delay
+  `(broad_lp-1)/2`, that delay is folded into the broad prediction horizon so
+  in-band cancellation timing is unchanged (11 taps at 3788 Hz: null 344 Hz,
+  <1 % droop at 30 Hz). This removes at the root what the burst guard only
+  reacts to; verified 180 s with zero ring vs. a latched limit cycle without it.
 - `broad_freeze_closed`: freeze full-band identification when the startup hold
   ends (default true). This is required for safe feedback operation: identify
   while command is known to be zero, then apply a fixed observer. Continuous
@@ -90,6 +103,51 @@ Parameters
   zero until restart. This magnitude-envelope test permits successful motion
   from a static offset toward zero without mistaking the offset for runaway.
   The current configs use 0.05 error units, 0.65 command units, and 8 frames.
+- `guard_ratio`, `guard_floor`, `guard_hold`, `guard_ramp`, `guard_tick`:
+  non-latching **burst guard** (default ON: 4 / 0.008 / 0.25 s / 1 s / 10 s;
+  `guard_ratio <= 0` disables). Any mismatch between the configured plant
+  model (`K`, `delay`) and the true plant leaks command back into the Smith
+  reconstruction, closing a parasitic loop whose phase crosses −180° at
+  `fs / (2·(delay + delay_frac))` (~316 Hz y / ~337 Hz x at 3788 Hz). When
+  the margin there goes negative — `K` drifts with the coarse bias and
+  alignment — the loop emits intermittent ring bursts at that frequency
+  (the 2026-07-16 "310 Hz spiral"; the 2026-07-17 run-15 rerun, where the
+  bursts averaged into a broad 250–450 Hz PSD hump and tripled the closed
+  RMS while the code was identical to the good morning run). Per axis, the
+  guard band-passes the raw error at the regeneration frequency (Q 1.5),
+  tracks a ~10 ms envelope against a ~10 s quiet baseline, and triggers when
+  the envelope exceeds `guard_ratio` × max(baseline, `guard_floor`). On a
+  trigger the axis's authority is cut to 0, NLMS training and the adaptation
+  statistics freeze (so the ringing is never learned), the cut holds for
+  `guard_hold` s (extended while the ring persists), then authority ramps
+  back over `guard_ramp` s; a burst returning mid-ramp counts as a new
+  event. Every `guard_tick` s of closed-loop time a ticker line reports the
+  activation count and the percentage of frames spent at reduced authority,
+  and a final total is logged at shutdown. The guard keeps a marginal run
+  alive; **recurring activations mean `K`/`delay` no longer match the plant
+  at the current operating point — re-run the Bode fits before trusting the
+  attenuation numbers.**
+- `gap_trip`: **stall-gap guard** (seconds; default 0.05, `<= 0` disables).
+  If the wall-clock gap between consecutive frames exceeds this — e.g. the
+  ASI camera stream stalled and asi_source restarted capture, a ~0.3–0.6 s
+  hole during which the DAC held the last command while the error kept
+  moving — every predictor history now spans the hole and re-entering at
+  full authority onto stale state is exactly the transient that seeds a
+  regeneration burst. An authority *cut* is wrong too: the command carries
+  the loop's DC correction, and zeroing it snaps the FSM back to bias,
+  re-exposing the accumulated drift as a multi-px excursion that the ramp
+  then walks back slowly (observed 2026-07-17: ~6 px for ~1.3 s). Instead,
+  each axis **keeps commanding the value the DAC held through the gap**
+  (zero bump at resume) for `guard_hold` s while the predictor state is
+  rebuilt — modal state zeroed (mode phases rotated unpredictably), NLMS
+  input history reset so it never predicts or trains across the hole, Smith
+  command ring rewritten with the held command — then **blends from the
+  held command to the live controller command** over `guard_ramp` s.
+  Learning stays frozen until the blend completes; the safety-trip latch
+  overrides the blend. Works even with the burst detector disabled. Gap
+  events are counted and logged separately from burst events: **bursts mean
+  re-measure `K`; gaps mean the camera stalled** (check the asi_source
+  recovery lines).
 - `y`, `x`: per-axis objects (element 0 = y, element 1 = x), each with:
   - `K`: **signed** command→error gain. Wrong sign = positive feedback =
     runaway; verify with a push test.

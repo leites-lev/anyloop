@@ -295,18 +295,26 @@ int latency_test_proc(struct aylp_device *self, struct aylp_state *state)
 		// window scatter only keeps that same drift out of sigma.
 		data->sigma = sqrt(data->var_sum / data->var_cnt);
 		data->step = data->step_sum / data->step_pairs;
+		// plant DC gain: settled error response per unit minmax command.
+		// The step is the response to a (high - low) command change, so
+		// dividing by that gives error-units/command-unit -- the same
+		// quantity (and units) bode_plot reports as fit_K, from the same
+		// point on the plant, so a latency run doubles as a DC-gain check.
+		data->gain = data->step / (data->high - data->low);
 		log_info("latency_test: calibrated: settled error %G (low) / "
 			"%G (high), step %G, fast noise sigma %G, step/sigma "
-			"%.1f", data->msum[0] / data->mcnt[0],
+			"%.1f, gain (px/cmd) %G", data->msum[0] / data->mcnt[0],
 			data->msum[1] / data->mcnt[1], data->step, data->sigma,
 			data->sigma > 0
-				? fabs(data->step) / data->sigma : INFINITY);
+				? fabs(data->step) / data->sigma : INFINITY,
+			data->gain);
 		lt_fout(data, "# calibrated: settled_low %G settled_high %G "
-			"step %G sigma %G step/sigma %.1f\n",
+			"step %G sigma %G step/sigma %.1f gain %G\n",
 			data->msum[0] / data->mcnt[0],
 			data->msum[1] / data->mcnt[1], data->step, data->sigma,
 			data->sigma > 0
-				? fabs(data->step) / data->sigma : INFINITY);
+				? fabs(data->step) / data->sigma : INFINITY,
+			data->gain);
 		if (fabs(data->step) <= 0.0
 				|| fabs(data->step) < 8.0 * data->sigma) {
 			log_error("latency_test: step is < 8 sigma of noise; "
@@ -400,8 +408,15 @@ int latency_test_proc(struct aylp_device *self, struct aylp_state *state)
 				"================");
 			log_info("latency_test: %zu edges measured, %zu "
 				"missed", data->edges_done, data->edges_missed);
+			log_info("latency_test: plant DC gain = %G px per "
+				"unit minmax command (step %G / cmd %G); "
+				"compare to bode fit_K", data->gain,
+				data->step, data->high - data->low);
 			lt_fout(data, "# edges_measured %zu edges_missed %zu\n",
 				data->edges_done, data->edges_missed);
+			lt_fout(data, "# gain %G step %G cmd %G\n",
+				data->gain, data->step,
+				data->high - data->low);
 			lt_report_one(data, "departure (first motion)",
 				"departure_ms", data->dep, data->n_dep);
 			lt_report_one(data, "50% crossing",

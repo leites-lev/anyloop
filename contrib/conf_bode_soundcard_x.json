@@ -1,0 +1,137 @@
+{
+ "_comment": {
+  "1": "SOUNDCARD CHARACTERIZATION bode: command -> soundcard line-out ->",
+  "2": "(analog summing) -> FSM -> camera -> CoM, x/tilt axis. Same method as",
+  "3": "conf_bode_x.json but the ACTUATOR is anyloop:aylp_alsa instead of the",
+  "4": "piplate. bode_plot replaces the x element (1; CoM is [y,x]) with a sine;",
+  "5": "aylp_alsa writes it to the sound card (scale [0,-1] = drive x only, sign",
+  "6": "mirrors the piplate's ch1 -2). The piplate STAYS in the pipeline with",
+  "7": "scale [0,0,0,0] -- it drives nothing, it only holds the DC bias offset",
+  "8": "(2 V) so the FSM sits in its linear range while the AC-coupled soundcard",
+  "9": "does the sweep. So the measured |H| is the PURE soundcard->FSM path.",
+  "10": "WHAT TO READ OFF THE PDF:",
+  "11": "  * AC HIGH-PASS CORNER: |H| rolls off toward low frequency; the -3 dB",
+  "12": "    point is the soundcard's coupling corner. THIS sets the crossover",
+  "13": "    biquad f0 in steering_fsp_soundcard.json (match the piplate lowpass",
+  "14": "    corner to it so the two bands sum ~flat).",
+  "15": "  * MID-BAND AUTHORITY (K, flat region above the corner): compare to the",
+  "16": "    piplate x bode at the same amplitude to set aylp_alsa scale so the",
+  "17": "    AC and DC paths have matched deflection-per-command.",
+  "18": "  * LINEARITY: the amplitude2 half-amplitude re-sweep flags >10% |H|",
+  "19": "    change = the card is clipping (line-out overdriven) -> lower",
+  "20": "    amplitude or the analog gain.",
+  "21": "  * HF ceiling: where |H| falls off at the top tells the usable AC band.",
+  "22": "PREREQ: build/aylp_alsa.so must be built (needs libasound2-dev), and the",
+  "23": "  sound card line-out must be physically wired into the FSM drive.",
+  "24": "SAFETY: bring amplitude/analog-gain up from small; watch the beam on the",
+  "25": "  64730 viewer. For the y/tip axis: set bode_plot element 0 and aylp_alsa",
+  "26": "  scale [1,0] (y sign is +, piplate ch0 +2), output_file ...soundcard_y."
+ },
+ "pipeline": [
+  {
+   "uri": "file:/home/fsl/anyloop_levfork/anyloop/build/asi_source.so",
+   "params": {
+    "camera_name": "ASI290MM",
+    "width": 32,
+    "height": 32,
+    "start_x": 384,
+    "start_y": 310,
+    "_roi_note": "ROI centred on beam at coarse bias 2/2, matches conf_bode_x.json. Re-derive via contrib/probe_frame.json only on an alignment change.",
+    "exposure": 250,
+    "gain": 100,
+    "bandwidth": 100,
+    "high_speed": 1,
+    "die_on_stall": 0
+   }
+  },
+  {
+   "_comment": "frame -> UDP viewer so you can watch the beam during the sweep",
+   "uri": "anyloop:udp_sink",
+   "params": {
+    "ip": "127.0.0.1",
+    "port": "64730",
+    "decimation": 64
+   }
+  },
+  {
+   "uri": "anyloop:center_of_mass",
+   "params": {
+    "_note": "tracked 20x20 window, threshold 22 -- identical to conf_bode_x.json so this sweep measures the same sensor the loop sees.",
+    "region_height": 20,
+    "region_width": 20,
+    "threshold": 22,
+    "track": true
+   }
+  },
+  {
+   "_comment": "CoM -> UDP viewer",
+   "uri": "anyloop:udp_sink",
+   "params": {
+    "ip": "127.0.0.1",
+    "port": "64731",
+    "decimation": 64
+   }
+  },
+  {
+   "_comment": "Replace the x/tilt element (1) with the swept sine; read CoM x as response",
+   "uri": "anyloop:bode_plot",
+   "params": {
+    "sample_rate": 3788.0,
+    "element": 1,
+    "inject": "replace",
+    "output": "raw",
+    "_freq_range": "start LOW (2 Hz) to capture the AC-coupling high-pass corner, which the piplate (DC-coupled) sweep never showed. End 300 Hz for the usable AC band and phase slope.",
+    "freq_start": 2.0,
+    "freq_end": 300.0,
+    "_tuning": "characterization pass: fewer cycles/points than the loop-tuning bode (this is about the SHAPE + corner, not a precision K). Raise n_cycles/n_freqs later if a clean K is wanted.",
+    "n_freqs": 45,
+    "n_settle": 400,
+    "n_settle_cycles": 2.0,
+    "n_cycles": 24.0,
+    "n_segments": 6,
+    "amplitude": 0.2,
+    "_amplitude2": "half-amplitude re-sweep: if |H| moves >10% between the two, the line-out is clipping or the CoM left its linear region.",
+    "amplitude2": 0.1,
+    "_k_max_freq": "K fit window: keep it ABOVE the expected AC corner so the flat-plateau authority is measured, not the low-freq rolloff. 100 Hz stays below the x ~130 Hz resonance.",
+    "k_max_freq": 100.0,
+    "avoid_freqs": [
+     5.84, 9.07, 12.06, 13.17, 15, 17.49, 19.42, 21.26,
+     29.63, 35.53, 57.5, 58.08, 83.3, 84.02
+    ],
+    "avoid_df": 0.75,
+    "config": "SOUNDCARD x/tilt path: aylp_alsa (hw:0,0, S16_LE, 48 kHz) -> analog sum -> FSM, coarse bias 2.0/2.0, 32x32 exp250 gain100 bw100. Piplate parked (scale 0) holding DC bias only.",
+    "_start_delay": "hold injection at 0 (soundcard silent, piplate holding 2 V bias) for 30 s so the coarse channels settle before the sweep.",
+    "start_delay": 30.0,
+    "output_file": "fsm_bode_soundcard_x.pdf"
+   }
+  },
+  {
+   "_note": "SOUNDCARD under test = the AC actuator. scale [0,-1]: drive ONLY x (element 1), muted y; sign mirrors the piplate ch1 (-2). channels 2 = [y,x]. Small buffer/period for low latency; watch the log for underruns.",
+   "uri": "file:/home/fsl/anyloop_levfork/anyloop/build/aylp_alsa.so",
+   "params": {
+    "device": "hw:0,0",
+    "format": "S16_LE",
+    "channels": 2,
+    "rate": 48000,
+    "buffer_time": 2000,
+    "period_time": 500,
+    "scale": [0, -1]
+   }
+  },
+  {
+   "_note": "Piplate PARKED: scale [0,0,0,0] drives nothing; it stays only to hold the DC bias offset (2 V on the fine channels) so the FSM sits in its linear range while the AC-coupled soundcard sweeps. Same port/mapping as conf_bode_x.json.",
+   "uri": "anyloop:piplate_bridge",
+   "params": {
+    "port": "/dev/ttyACM0",
+    "board": 0,
+    "channel": [0, 1, 2, 3],
+    "index": [0, 1, 0, 0],
+    "scale": [0, 0, 0, 0],
+    "offset": [2, 2, 2, 2],
+    "baud": 460800,
+    "wait_response": false,
+    "skip_unchanged": true
+   }
+  }
+ ]
+}

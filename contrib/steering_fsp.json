@@ -26,10 +26,12 @@
 			"uri": "file:/home/fsl/anyloop_levfork/anyloop/build/asi_source.so",
 			"params": {
 				"camera_name": "ASI290MM",
-				"width":       32,
-				"height":      32,
-				"_roi_note": "no start_x/start_y: with the coarse biases below (1.95/2.02) the beam parks in the driver-default ROI; copied from steering_tuned.json after the 2026-07-16 realignment.",
-				"exposure":    50,
+				"width":    32,
+				"height":    32,
+				"start_x":     384,
+				"start_y":     310,
+				"_roi_note": "start_x/start_y centre the 32x32 ROI on the beam parked at coarse bias 2/2 (fine 1.5/2.15): probe-verified 2026-07-21, full-sensor CoM (x 919, y 507). Re-derive with contrib/probe_frame.json only if the alignment (not the bias) changes -- the ROI now follows the beam by cropping instead of re-biasing.",
+				"exposure":   75,
 				"gain":        100,
 				"bandwidth":   100,
 				"high_speed":  1,
@@ -62,38 +64,55 @@
 			"params": { "ip": "127.0.0.1", "port": "64732" }
 		},
 		{
+			"_comment": "spike hunt 2026-07-22: full-rate [y,x] ERROR record (this is BEFORE fsp, so it is the measured error, not the command)",
+			"uri": "anyloop:file_sink",
+			"params": { "filename": "spikehunt_err.aylp" }
+		},
+		{
 			"_note1": "THE CONTROLLER. Attenuation11 full-band FSP parameters with the 2026-07-16 timing taken from the BODE PHASE, not the departure latency: full-band (5-300 Hz) phase-slope fits of fsm_bodex/y_716 plus the one hidden bode frame give loop delays x 1.484 ms = 5.62 frames and y 1.681 ms = 6.37 frames at 3788 Hz. delay is a single global param, so it is set to the midpoint 6.0 (delay=6, delay_frac=0). NOTE the frame COUNT went UP versus the 2310-era 4.18 even though the latency in ms went down: frames shrank (433->264 us) faster than the physical pipeline latency did. delay=4+.02 (departure latency, 1.061 ms) under-modeled the delay by 1.6-2.3 frames and left a near-unity command-echo residual around 300 Hz; the 2026-07-16 20:55 run spiraled at ~310 Hz once the ramp passed ~50% authority. broad_order=512 and broad_mu=.03 match attenuation11.",
-			"_note2": "K is the SIGNED command->error gain (error units per command unit). The current Bode plots (fsm_bodex_716.dat and fsm_bodey_716.dat) give low-frequency plateaus Kx=0.868 and Ky=0.630 at the new 32x32 alignment; that is DOUBLE the 64px-era 0.434/0.315 because CoM units are normalized to the frame half-width (32px frame => same physical motion = 2x normalized units). K too SMALL means commands too STRONG (u=-cancel/K). Sign remains +.",
+			"_note2": "K is the SIGNED command->error gain (error units per command unit). CURRENT values are the 2026-07-20 latency step-gains at bias 1.2/2.45: Kx=0.641, Ky=0.562, both sign + (see each axis's _K). These are LOWER than the bode plateaus at the old 1.98/1.97 bias (Kx=0.902/Ky=0.621) because K is bias-dependent -- NOT because the units changed. Bode-era context: CoM units are normalized to the frame half-width, so the 32px-ROI plateaus are DOUBLE the 64px-era 0.434/0.315. K too SMALL means commands too STRONG (u=-cancel/K), so the drop to 0.641/0.562 makes commands stronger than before -- verify the push-test sign and watch the burst guard on the first closed run. A bode at 1.2/2.45 is still owed to confirm the step-gain.",
 			"_note3": "With broad_order>0 the identified full-band observer supplies the command and the AR2 modal estimate is not added, avoiding double cancellation. The modal q/r values remain available for diagnostics and for rollback with broad_order=0. broad_mu is the NLMS identification step: lower it if weights are noisy, raise it only if the disturbance spectrum changes faster than the current observer converges.",
 			"_note4": "zeta ~0.002 = sharp line; ~0.3 = broadband hump. adapt_period>0 turns on Petit/Meimon re-identification: every 8 s it refreshes each mode's q from its recent energy, r from the innovation floor, nudges center frequencies toward the measured lines (capped at adapt_df_max Hz/update, matching the ~0.5 Hz/run wander), and recomputes the Kalman gain. Set adapt_period 0 for a fixed FSP while first validating.",
 			"uri": "anyloop:fsp",
 			"params": {
 				"type":         "vector",
 				"units":        "minmax",
-				"delay":        6,
-				"delay_frac":   0.0,
+				"_delay": "2026-07-21 PM PERFECTLY-ACCURATE per-axis delay from the FULL-BAND (5-300 Hz) bode phase slope at the re-centred operating point (coarse 2/2, ROI 904/492, exp 150): x tau 1.325 ms => 5.995 fr (fsm_bodex_721_full, fs 3769); y tau 1.284 ms => 5.828 fr (fsm_bodey_721_full, fs 3761); +1 hidden frame already included. Cross-checked vs the latency 50%-crossing (x 5.9 / y 6.0) -- agree within 0.15 fr, trusted. Set PER-AXIS: global/x = 6+0.0, y override = 5+0.828 (see y block). The 30-Hz-capped bode could NOT resolve tau (too little phase over 5-30 Hz -> bogus 4.98); this full-band sweep is the long-owed measurement. departure floor x4.0/y5.0 fr, NEVER used (too short caused the 07-16 310 Hz spiral).",
+				"delay":        5,
+				"delay_frac":   0.8,
 				"fs":           3788,
 				"broad_order":  512,
 				"broad_mu":     0.03,
+				"_broad_lp": "2026-07-22 SPIKE FIX: observer band-limit. Instrumented run (spikehunt_err/cmd.aylp) caught the 'random spikes': ~380 Hz x-axis ring bursts (first at t=42 s mid-ramp, self-recovered) that at t=88 s LATCHED into a sustained 4.8 px rms clamp-railed limit cycle -- zero external trigger (no frame gaps, no stalls, log clean), K/delay set from the same-day bodes (x6/7: Kx .913-.915, 5.82 fr). Mechanism: any residual K/delay mismatch (x K is amplitude-dependent, .91 small-signal vs .62 large-step) leaks command echo into the Smith reconstruction; the NLMS is broadband to Nyquist, LEARNS the echo band and chases it -- once its 380 Hz prediction gain builds (~1 min of training), the ring self-sustains. broad_lp = odd boxcar taps prefiltering phi into the NLMS: 11 taps -> first null 344 Hz, |H| ~0.06-0.15 across the whole 300-420 Hz regeneration band, exactly +5 frames of linear-phase group delay FOLDED INTO the broad horizon (so in-band cancellation timing is unchanged; droop at 30 Hz ~1%). Root-cause fix for what the (still disabled) burst guard only reacted to.",
+				"broad_lp":     11,
 				"broad_freeze_closed": false,
 				"clamp":        1.0,
-				"start_delay":  30,
+				"start_delay":  30000,
 				"ramp":         15.0,
 				"adapt_period": 8.0,
 				"adapt_df_max": 0.5,
 				"adapt_tau":    5.0,
+				"_guard": "burst guard (2026-07-17, on by default): the run-15 rerun showed intermittent ~250-450 Hz ring bursts (regeneration at fs/(2*delay) when K/delay drift off the plant, e.g. after a coarse-bias move) that tripled the closed RMS. Per-axis band-pass detector on the raw error at the regeneration freq fs/(2*(delay+delay_frac)) ~344 Hz (both axes, delay 5.5); on a burst the axis's authority is cut to 0 for guard_hold s, NLMS training and adaptation stats freeze, then authority ramps back over guard_ramp s. Trigger = band envelope > guard_ratio x max(learned quiet baseline, guard_floor). A ticker prints the activation count every guard_tick s. Recurring activations = re-measure K/delay at the current bias.",
+				"guard_ratio":  0.0,
+				"_guard_disabled": "2026-07-21 PM guard_ratio set to 0 (band-pass burst detector OFF) TEMPORARILY for a clean validation run after the y re-centre. WHY: with the loop closed the x error is 99.6% below 30 Hz and ~0% above 100 Hz -- there is NO real high-frequency regeneration -- yet the 316/344 Hz detector kept tripping on low-frequency LEAKAGE through its band-pass, cutting x authority every ~1.25 s (its hold+ramp) and MANUFACTURING the 'random spikes' (x error spiked to 4.75 px at exactly the guard cadence). Re-enable (guard_ratio 4) when real burst protection is wanted; the proper fix is a higher-Q / sustained-energy detector, not the floor (my earlier floor 0.015 was a wrong noise-floor hypothesis and only let the leakage-driven envelope grow bigger). The stall-gap patch (gap_trip) stays ON regardless.",
+				"guard_floor":  0.008,
+				"guard_hold":   0.25,
+				"guard_ramp":   1.0,
+				"guard_tick":   10.0,
 				"y": {
-					"K":     0.630,
+					"_K": "2026-07-21 PM full-band bode plateau at the re-centred operating point (fsm_bodey_721_full, 5-300 Hz, K from <=30 Hz): Ky=0.645 +/-0.005 err-units/minmax cmd, sign +, LINEAR (robust median 2.5%). DOWN from the pre-recentre 0.679 (K is position/bias-dependent; re-centring y shifted it); matches the latency step median 0.656. K is bias-dependent.",
+					"_delay": "y OWN full-band delay: bode tau 1.284 ms => 5.828 fr (fs 3761), latency 50%-cross 6.0 -- set 5+0.828, slightly shorter than x's 6.00 (which x inherits from the global).",
+					"delay":       5,
+					"delay_frac":  0.6,
+					"K":     0.66,
 					"r":     1.0,
 					"freqs": [5.64, 11.3, 21.1, 29.6, 57.5, 20.0],
 					"zeta":  [0.002, 0.002, 0.002, 0.002, 0.003, 0.30],
 					"q":     [1.0e-5, 1.5e-5, 1.5e-5, 1.0e-5, 0.5e-5, 1.0e-5]
 				},
 				"x": {
-					"_delay": "per-axis override (2026-07-16): x plant is faster than y. Bode full-band phase fit 5.62 fr; 5x latency test 21:22-21:26 all runs departure 1.06 ms / 50% 1.32 ms = 5.00 fr @ 3788. y keeps the global 6 (validated same evening).",
-					"delay":      5,
-					"delay_frac": 0.62,
-					"K":     0.868,
+					"_K": "2026-07-21 PM full-band bode plateau at the re-centred operating point (fsm_bodex_721_full, 5-300 Hz, K from <=30 Hz): Kx=0.803 +/-0.006 err-units/minmax cmd, sign +, LINEAR -- confirms the earlier 30-Hz 0.805. Full-band |H| flatness 5.6% (the x resonance ~130 Hz is now in-band, above crossover). The FSP corrects small jitter (<<0.2) = small-signal regime; the latency large-step gain was only 0.622 (x COMPRESSES at large drive), but small-signal is the right one and the safe (gentler) direction. x delay = the global 6+0.0 (full-band tau 1.325 ms => 5.995 fr).",
+					"K":     0.915,
 					"r":     1.0,
 					"freqs": [9.8, 12.0, 21.7, 24.9, 57.5, 83.3, 20.0],
 					"zeta":  [0.002, 0.002, 0.002, 0.002, 0.003, 0.003, 0.30],
@@ -102,8 +121,18 @@
 			}
 		},
 		{
+			
 			"uri": "anyloop:clamp",
-			"params": { "type": "vector", "min": -1.0, "max": 1.0 }
+			"params": {
+				"type": "vector",
+				"min": -1.0,
+				"max": 1.0
+			}
+		},
+		{
+			"_comment": "spike hunt 2026-07-22: full-rate [y,x] COMMAND record (after fsp+clamp)",
+			"uri": "anyloop:file_sink",
+			"params": { "filename": "spikehunt_cmd.aylp" }
 		},
 		{
 			"_note": "same DAC bridge as steering_tuned.json: fine ch0(+2 V/unit, y)=index0, ch1(-2 V/unit, x)=index1, coarse parked at bias. The fsp output is plain [y,x] in command units, exactly like the pid was.",
@@ -114,16 +143,12 @@
 				"channel": [0, 1, 2, 3],
 				"index":   [0, 1, 0, 0],
 				"scale":   [2, -2, 0, 0],
-				"offset":  [2, 2, 2, 1.93],
+				"offset":  [2, 2, 2, 2],
 				"baud":    460800,
 				"start_delay": [2.0, 2.0, 0, 0],
 				"wait_response": false,
 				"skip_unchanged": true
 			}
-		},
-		{
-			"uri": "anyloop:file_sink",
-			"params": { "filename": "error_after_fsp.aylp" }
 		}
 	]
 }

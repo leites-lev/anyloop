@@ -1,0 +1,88 @@
+{
+ "_comment": {
+  "1": "DETERMINATION: which soundcard channel (L=vector[0], R=vector[1]) moves",
+  "2": "the beam's y axis. Short latency_test: I only need the CALIBRATION line",
+  "3": "(step / step-sigma / gain px-per-cmd), which is logged BEFORE any abort,",
+  "4": "so it reports for either channel whether or not the 8-sigma gate passes.",
+  "5": "Run once with index_cmd 0 (L) and once with index_cmd 1 (R), both watching",
+  "6": "index_err 0 (CoM y). Whichever gives the larger |gain| is the y channel.",
+  "7": "period 0.02 s (50 Hz square): fast enough that the AC-coupled step has NOT",
+  "8": "decayed by the settled window -- the 0.15 s runs earlier failed for that",
+  "9": "reason (step 10x below noise). Piplate PARKED holding the 2 V coarse +",
+  "10": "x-fine bias so the beam sits on-sensor while only the soundcard moves y."
+ },
+ "pipeline": [
+  {
+   "uri": "file:/home/fsl/anyloop_levfork/anyloop/build/asi_source.so",
+   "params": {
+    "camera_name": "ASI290MM",
+    "width": 32,
+    "height": 32,
+    "start_x": 384,
+    "start_y": 310,
+    "exposure": 200,
+    "gain": 100,
+    "bandwidth": 100,
+    "high_speed": 1,
+    "die_on_stall": 0
+   }
+  },
+  {
+   "uri": "anyloop:center_of_mass",
+   "params": {
+    "region_height": 20,
+    "region_width": 20,
+    "threshold": 22,
+    "track": true,
+    "acquire_seconds": 5.0
+   }
+  },
+  {
+   "uri": "anyloop:latency_test",
+   "params": {
+    "index_cmd": 1,
+    "index_err": 0,
+    "out_size": 2,
+    "low": -1.0,
+    "high": 1.0,
+    "period": 0.02,
+    "warmup": 10.0,
+    "cal_cycles": 8,
+    "n_steps": 8,
+    "label": "determine_R_watch_y",
+    "results_file": "/home/fsl/anyloop_levfork/anyloop/Bode_and_testruns/determine_ychan.dat"
+   }
+  },
+  {
+   "uri": "file:/home/fsl/anyloop_levfork/anyloop/build/aylp_alsa.so",
+   "params": {
+    "device": "hw:0,0",
+    "format": "S16_LE",
+    "channels": 2,
+    "rate": 48000,
+    "period_time": 350,
+    "buffer_time": 700,
+    "latency_frames": 4,
+    "threaded": true,
+    "poll_us": 30,
+    "rt_prio": 80,
+    "scale": [1, 1]
+   }
+  },
+  {
+   "uri": "anyloop:piplate_bridge",
+   "params": {
+    "port": "/dev/ttyACM0",
+    "board": 0,
+    "channel": [0, 1, 2, 3],
+    "index": [0, 1, 0, 0],
+    "scale": [0, 0, 0, 0],
+    "offset": [2, 2, 2, 2],
+    "baud": 460800,
+    "start_delay": [8.0, 8.0, 0, 0],
+    "wait_response": false,
+    "skip_unchanged": true
+   }
+  }
+ ]
+}

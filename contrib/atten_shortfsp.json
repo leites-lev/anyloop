@@ -1,0 +1,214 @@
+{
+	"_comment": {
+		"1": "SHORT closed-loop stability validation of the 2026-07-17 remeasure (Kx0.902/Ky0.621, delay 5+0.5, burst guard on).",
+		"2": "No open-loop measurement phase -- compare the closed error PSD against the last open-loop run (attenuation_fsp15) offline.",
+		"3": "Coarse 1.98/1.97 = where K/delay were measured. Captures error_shortfsp.aylp (CoM error) for offline RMS/PSD. Bounded ~165 s (~640k frames) for a clean exit + guard ticker."
+	},
+	"pipeline": [
+		{
+			"uri": "file:/home/fsl/anyloop_levfork/anyloop/build/asi_source.so",
+			"params": {
+				"camera_name": "ASI290MM",
+				"width": 32,
+				"height": 32,
+				"start_x": 384,
+				"start_y": 310,
+				"_roi_note": "ROI centred on beam at coarse bias 2/2 (fine 1.5/2.15): probe-verified 2026-07-21, full-sensor CoM (x 919, y 507). Re-derive via contrib/probe_frame.json only on an alignment change.",
+				"_roi_note": "coarse biases 1.98/1.97 (2026-07-17 operating point; beam parks in driver-default ROI, bode-verified).",
+				"exposure": 250,
+				"gain": 100,
+				"bandwidth": 100,
+				"high_speed": 1,
+				"die_on_stall": 0
+			}
+		},
+		{
+			"_comment": "raw frame to watch_steering.jl",
+			"uri": "anyloop:udp_sink",
+			"params": {
+				"ip": "127.0.0.1",
+				"port": "64730",
+				"decimation": 64
+			}
+		},
+		{
+			"_comment": "tracking window copied from steering_tuned.json",
+			"uri": "anyloop:center_of_mass",
+			"params": {
+				"region_height": 20,
+				"region_width": 20,
+				"threshold": 22,
+				"track": true
+			}
+		},
+		{
+			"uri": "anyloop:file_sink",
+			"params": {
+				"filename": "error_shortfsp.aylp"
+			}
+		},
+		{
+			"_comment": "[y,x] CoM vector to watch_steering.jl",
+			"uri": "anyloop:udp_sink",
+			"params": {
+				"ip": "127.0.0.1",
+				"port": "64731",
+				"decimation": 64
+			}
+		},
+		{
+			"_comment": "[y,x] CoM vector (full rate) to watch_error_ts.jl",
+			"uri": "anyloop:udp_sink",
+			"params": {
+				"ip": "127.0.0.1",
+				"port": "64732"
+			}
+		},
+		{
+			"_note1": "THE CONTROLLER. Attenuation11 full-band FSP parameters with the 2026-07-16 timing taken from the BODE PHASE, not the departure latency: full-band (5-300 Hz) phase-slope fits of fsm_bodex/y_716 plus the one hidden bode frame give loop delays x 1.484 ms = 5.62 frames and y 1.681 ms = 6.37 frames at 3788 Hz. delay is a single global param, so it is set to the midpoint 6.0 (delay=6, delay_frac=0). NOTE the frame COUNT went UP versus the 2310-era 4.18 even though the latency in ms went down: frames shrank (433->264 us) faster than the physical pipeline latency did. delay=4+.02 (departure latency, 1.061 ms) under-modeled the delay by 1.6-2.3 frames and left a near-unity command-echo residual around 300 Hz; the 2026-07-16 20:55 run spiraled at ~310 Hz once the ramp passed ~50% authority. broad_order=512 and broad_mu=.03 match attenuation11.",
+			"_note2": "K is the SIGNED command->error gain (error units per command unit). The current Bode plots (fsm_bodex_716.dat and fsm_bodey_716.dat) give low-frequency plateaus Kx=0.868 and Ky=0.630 at the new 32x32 alignment; that is DOUBLE the 64px-era 0.434/0.315 because CoM units are normalized to the frame half-width (32px frame => same physical motion = 2x normalized units). K too SMALL means commands too STRONG (u=-cancel/K). Sign remains +.",
+			"_note3": "With broad_order>0 the identified full-band observer supplies the command and the AR2 modal estimate is not added, avoiding double cancellation. The modal q/r values remain available for diagnostics and for rollback with broad_order=0. broad_mu is the NLMS identification step: lower it if weights are noisy, raise it only if the disturbance spectrum changes faster than the current observer converges.",
+			"_note4": "zeta ~0.002 = sharp line; ~0.3 = broadband hump. adapt_period>0 turns on Petit/Meimon re-identification: every 8 s it refreshes each mode's q from its recent energy, r from the innovation floor, nudges center frequencies toward the measured lines (capped at adapt_df_max Hz/update, matching the ~0.5 Hz/run wander), and recomputes the Kalman gain. Set adapt_period 0 for a fixed FSP while first validating.",
+			"uri": "anyloop:fsp",
+			"params": {
+				"type": "vector",
+				"units": "minmax",
+				"_delay": "2026-07-17 remeasure: BOTH axes measured identical, so one global delay (the old x-faster-than-y override is gone). Fresh time-domain latency (5 runs/axis, 200-400 edges) departure 1.057 ms = 4.00 fr / 50% crossing 1.322 ms = 5.00 fr, x and y the same. Upgraded bode full-band phase fit 5.35 fr (x) / 5.44 fr (y) at measured fs 3777/3757. First-motion 4 fr is a floor (too short caused the 07-16 310 Hz spiral); 5+0.5 is the 50%-crossing / bode-full-band consensus, erring slightly long. The burst guard backstops any residual regeneration; if it trips repeatedly, lengthen toward 6.",
+				"delay": 5,
+				"delay_frac": 0.5,
+				"fs": 3788,
+				"broad_order": 512,
+				"broad_mu": 0.03,
+				"broad_freeze_closed": false,
+				"clamp": 1.0,
+				"start_delay": 30,
+				"ramp": 15.0,
+				"adapt_period": 8.0,
+				"adapt_df_max": 0.5,
+				"adapt_tau": 5.0,
+				"_guard": "burst guard (2026-07-17, on by default): the run-15 rerun showed intermittent ~250-450 Hz ring bursts (regeneration at fs/(2*delay) when K/delay drift off the plant, e.g. after a coarse-bias move) that tripled the closed RMS. Per-axis band-pass detector on the raw error at the regeneration freq fs/(2*(delay+delay_frac)) ~344 Hz (both axes, delay 5.5); on a burst the axis's authority is cut to 0 for guard_hold s, NLMS training and adaptation stats freeze, then authority ramps back over guard_ramp s. Trigger = band envelope > guard_ratio x max(learned quiet baseline, guard_floor). A ticker prints the activation count every guard_tick s. Recurring activations = re-measure K/delay at the current bias.",
+				"guard_ratio": 4.0,
+				"guard_floor": 0.008,
+				"guard_hold": 0.25,
+				"guard_ramp": 1.0,
+				"guard_tick": 10.0,
+				"y": {
+					"_K": "2026-07-17 bode fsm_bodey_717: K(<=30Hz)=0.621 +/-0.004, linearity-verified (median |H| change 1.0% between amplitudes). Was 0.630.",
+					"K": 0.621,
+					"r": 1.0,
+					"freqs": [
+						5.64,
+						11.3,
+						21.1,
+						29.6,
+						57.5,
+						20.0
+					],
+					"zeta": [
+						0.002,
+						0.002,
+						0.002,
+						0.002,
+						0.003,
+						0.3
+					],
+					"q": [
+						1e-05,
+						1.5e-05,
+						1.5e-05,
+						1e-05,
+						5e-06,
+						1e-05
+					]
+				},
+				"x": {
+					"_K": "2026-07-17 bode fsm_bodex_717: K(<=30Hz)=0.902 +/-0.003, linearity-verified. Was 0.868. NOTE the x plant is NOT flat: ~13% |H| rise peaking near 130 Hz (mild FSM resonance above crossover) -- accounts for the higher full-band phase slope. delay now inherits the global 5+0.5 (x and y latency measured identical).",
+					"K": 0.902,
+					"r": 1.0,
+					"freqs": [
+						9.8,
+						12.0,
+						21.7,
+						24.9,
+						57.5,
+						83.3,
+						20.0
+					],
+					"zeta": [
+						0.002,
+						0.002,
+						0.002,
+						0.002,
+						0.003,
+						0.003,
+						0.3
+					],
+					"q": [
+						1e-05,
+						1e-05,
+						2e-05,
+						1.5e-05,
+						5e-06,
+						3e-06,
+						1e-05
+					]
+				}
+			}
+		},
+		{
+			"uri": "anyloop:clamp",
+			"params": {
+				"type": "vector",
+				"min": -1.0,
+				"max": 1.0
+			}
+		},
+		{
+			"_note": "same DAC bridge as steering_tuned.json: fine ch0(+2 V/unit, y)=index0, ch1(-2 V/unit, x)=index1, coarse parked at bias. The fsp output is plain [y,x] in command units, exactly like the pid was.",
+			"uri": "anyloop:piplate_bridge",
+			"params": {
+				"port": "/dev/ttyACM0",
+				"board": 0,
+				"channel": [
+					0,
+					1,
+					2,
+					3
+				],
+				"index": [
+					0,
+					1,
+					0,
+					0
+				],
+				"scale": [
+					2,
+					-2,
+					0,
+					0
+				],
+				"offset": [
+					2,
+					2,
+					1.98,
+					1.97
+				],
+				"baud": 460800,
+				"start_delay": [
+					2.0,
+					2.0,
+					0,
+					0
+				],
+				"wait_response": false,
+				"skip_unchanged": true
+			}
+		},
+		{
+			"uri": "anyloop:stop_after_count",
+			"params": {
+				"count": 640000
+			}
+		}
+	]
+}

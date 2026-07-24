@@ -1,131 +1,226 @@
 {
-	"_comment": {
-		"1": "A/B HARNESS for the adaptive Filtered Smith Predictor. This",
-		"2": "is steering_fsp.json (same camera/CoM/fsp/clamp/piplate) with",
-		"3": "anyloop:attenuation_test inserted between the CoM sinks and the",
-		"4": "fsp -- exactly where it sits in attenuation_test.json, so the",
-		"5": "measurement is apples-to-apples. It holds the loop OPEN for",
-		"6": "open_time s (zeroes the error into the fsp, so its command",
-		"7": "parks at 0 and the DAC sits at bias) while recording the raw",
-		"8": "CoM error, then CLOSES, waits settle_time for the Kalman/adapt",
-		"9": "to converge, records closed_time s, and writes attenuation_fsp",
-		"10": ".dat/.pdf: per-axis open/closed PSD overlays, closed/open dB,",
-		"11": "and the per-band RMS + mean/jitter table. TO COMPARE: run this,",
-		"12": "then read the closed RMS-about-mean per axis and put it next to",
-		"13": "attenuation10_lead_fc64 (pid+lead+kalman: x 0.244, y 0.151 px).",
-		"14": "The fsp WINS only if it beats those on the predictable 10-64 Hz",
-		"15": "band without pumping the >64 Hz waterbed or any line. Keep runs",
-		"16": ">=120 s per phase -- the vibration environment is nonstationary.",
-		"17": "Same open/closed times as the 2026-07-14 attenuation10 run so",
-		"18": "the two PSDs share a frequency grid and averaging."
-	},
-	"pipeline": [
-		{
-			"uri": "file:/home/fsl/anyloop_levfork/anyloop/build/asi_source.so",
-			"params": {
-				"camera_name": "ASI290MM",
-				"width":       32,
-				"height":      32,
-				"_roi_note": "no start_x/start_y: with the coarse biases below (1.95/2.02) the beam parks in the driver-default ROI; copied from steering_tuned.json after the 2026-07-16 realignment.",
-				"exposure":    50,
-				"gain":        100,
-				"bandwidth":   100,
-				"high_speed":  1,
-				"die_on_stall": 0
-			}
-		},
-		{
-			"uri": "anyloop:udp_sink",
-			"params": { "ip": "127.0.0.1", "port": "64730", "decimation": 64 }
-		},
-		{
-			"uri": "anyloop:center_of_mass",
-			"params": {
-				"region_height": 20,
-				"region_width":  20,
-				"threshold":     22,
-				"track":         true
-			}
-		},
-		{
-			"uri": "anyloop:udp_sink",
-			"params": { "ip": "127.0.0.1", "port": "64731", "decimation": 64 }
-		},
-		{
-			"uri": "anyloop:udp_sink",
-			"params": { "ip": "127.0.0.1", "port": "64732" }
-		},
-		{
-			"_note1": "THE TEST. Sits after the CoM sinks (watchers see the true error) and before the FSP. During the open phase the FSP is fed zeros and parks at 0; settle_time covers its cold-start convergence and adaptation after closure. pixel_scale 15.5 = (32-1)/2 for both axes. This is the attenuation11 test sequence with only the camera/alignment and measured timing updated.",
-			"_note2": "compare the closed RMS-about-mean here against attenuation10_lead_fc64 (x 0.244, y 0.151 px). Same nfft/open/closed as that run for a shared grid.",
-			"uri": "anyloop:attenuation_test",
-			"params": {
-				"start_delay": 100.0,
-				"open_time":   500.0,
-				"settle_time": 120.0,
-				"closed_time": 500.0,
-				"nfft":        4096,
-				"labels":      "y,x",
-				"pixel_scale": 15.5,
-				"config":      "ATTENUATION11 FSP RETEST -- new laser alignment, camera rate, and current Bode plant gains\nSame continuously adapting full-band FSP as the successful attenuation11 run: broad_order=512, broad_mu=.03, start_delay=2 s, ramp=10 s; no frozen-weights test mode or safety-trip tuning\nCamera/CoM match steering_tuned.json: 32x32 ROI, exposure 50, gain 100, 20x20 tracked window, threshold 22; coarse offsets 1.95/2.02 V\nCurrent Bode plots fsm_bodex_716/fsm_bodey_716 give low-frequency normalized gains Kx=.868 and Ky=.630\nLoop delay from the bode phase fits (5-300 Hz slope + 1 hidden frame): x 1.484 ms = 5.62 fr, y 1.681 ms = 6.37 fr at 3788 Hz. PER-AXIS delays: y global 6+0.0 (validated), x override 5+0.62 (bode fit; 5x latency runs 21:22-21:26 give departure 1.06 ms / 50% 1.32 ms = 5.00 fr every run). Departure-latency 4.02 fr was 1.6-2.3 fr short and caused the 310 Hz spiral of 07-16 20:55\nAll remaining observer and modal parameters match attenuation11; output is reported at 15.5 px per normalized unit\nrefs: Kulcsar 2006 / Petit 2008 / Meimon 2010 / Correia 2010",
-				"output_file": "attenuation_fsp15.pdf"
-			}
-		},
-		{
-			"_note": "controller under test; params identical to steering_fsp.json except start_delay/ramp are short here because attenuation_test owns the open/closed sequencing. VERIFY the sign of K with a push test before running this closed.",
-			"uri": "anyloop:fsp",
-			"params": {
-				"type":         "vector",
-				"units":        "minmax",
-				"delay":        6,
-				"delay_frac":   0.0,
-				"fs":           3788,
-				"broad_order":  512,
-				"broad_mu":     0.03,
-				"broad_freeze_closed": false,
-				"clamp":        1.0,
-				"start_delay":  2.0,
-				"ramp":         10.0,
-				"adapt_period": 8.0,
-				"adapt_df_max": 0.5,
-				"adapt_tau":    5.0,
-				"y": {
-					"K":     0.630,
-					"r":     1.0,
-					"freqs": [5.64, 11.3, 21.1, 29.6, 57.5, 20.0],
-					"zeta":  [0.002, 0.002, 0.002, 0.002, 0.003, 0.30],
-					"q":     [1.0e-5, 1.5e-5, 1.5e-5, 1.0e-5, 0.5e-5, 1.0e-5]
-				},
-				"x": {
-					"_delay": "per-axis override, same numbers as steering_fsp.json: x bode 5.62 fr, latency 5x runs 50% = 5.00 fr; y inherits global 6",
-					"delay":      5,
-					"delay_frac": 0.62,
-					"K":     0.868,
-					"r":     1.0,
-					"freqs": [9.8, 12.0, 21.7, 24.9, 57.5, 83.3, 20.0],
-					"zeta":  [0.002, 0.002, 0.002, 0.002, 0.003, 0.003, 0.30],
-					"q":     [1.0e-5, 1.0e-5, 2.0e-5, 1.5e-5, 0.5e-5, 0.3e-5, 1.0e-5]
-				}
-			}
-		},
-		{
-			"uri": "anyloop:clamp",
-			"params": { "type": "vector", "min": -1.0, "max": 1.0 }
-		},
-		{
-			"uri": "anyloop:piplate_bridge",
-			"params": {
-				"port":    "/dev/ttyACM0",
-				"board":   0,
-				"channel": [0, 1, 2, 3],
-				"index":   [0, 1, 0, 0],
-				"scale":   [2, -2, 0, 0],
-				"offset":  [2, 2, 1.98, 1.97],
-				"baud":    460800,
-				"start_delay": [2.0, 2.0, 0, 0],
-				"wait_response": false,
-				"skip_unchanged": true
-			}
-		}
-	]
+  "_comment": {
+    "1": "ATTENUATION 20 A/B HARNESS for the adaptive FSP. This is steering_fsp.json",
+    "2": "(same camera/CoM/fsp/clamp/piplate, exact params) with anyloop:attenuation_test",
+    "3": "inserted between the CoM sinks and the fsp, so open-vs-closed is apples-to-apples.",
+    "4": "Auto-generated from steering_fsp.json 2026-07-21 PM. fsp start_delay/ramp shortened",
+    "5": "(20/10) because attenuation_test owns the open/closed sequencing. Compare closed",
+    "6": "RMS to attenuation_fsp15 (run 15: y 0.073 / x 0.168 px) on the shared 500/500/4096 grid."
+  },
+  "pipeline": [
+    {
+      "uri": "file:/home/fsl/anyloop_levfork/anyloop/build/asi_source.so",
+      "params": {
+        "camera_name": "ASI290MM",
+        "width": 32,
+        "height": 32,
+        "start_x": 384,
+        "start_y": 310,
+        "_roi_note": "start_x/start_y centre the 32x32 ROI on the beam parked at coarse bias 2/2 (fine 1.5/2.15): probe-verified 2026-07-21, full-sensor CoM (x 919, y 507). Re-derive with contrib/probe_frame.json only if the alignment (not the bias) changes -- the ROI now follows the beam by cropping instead of re-biasing.",
+        "exposure": 250,
+        "gain": 100,
+        "bandwidth": 100,
+        "high_speed": 1,
+        "die_on_stall": 0,
+        "stall_timeout_ms": 50
+      }
+    },
+    {
+      "_comment": "raw frame to watch_steering.jl",
+      "uri": "anyloop:udp_sink",
+      "params": {
+        "ip": "127.0.0.1",
+        "port": "64730",
+        "decimation": 64
+      }
+    },
+    {
+      "_comment": "tracking window copied from steering_tuned.json",
+      "uri": "anyloop:center_of_mass",
+      "params": {
+        "region_height": 20,
+        "region_width": 20,
+        "threshold": 22,
+        "track": true
+      }
+    },
+    {
+      "_comment": "[y,x] CoM vector to watch_steering.jl",
+      "uri": "anyloop:udp_sink",
+      "params": {
+        "ip": "127.0.0.1",
+        "port": "64731",
+        "decimation": 64
+      }
+    },
+    {
+      "_comment": "[y,x] CoM vector (full rate) to watch_error_ts.jl",
+      "uri": "anyloop:udp_sink",
+      "params": {
+        "ip": "127.0.0.1",
+        "port": "64732"
+      }
+    },
+    {
+      "_note1": "THE TEST. Sits after the CoM sinks (watchers see the true error) and before the FSP. Open phase feeds the FSP zeros (command parks at 0, DAC at bias); settle_time covers FSP/NLMS/adapt re-convergence after closure. pixel_scale 15.5 = (32-1)/2 for the 32x32 ROI. 500/500 @ nfft 4096 matches attenuation_fsp15 (run 15) for a SHARED frequency grid -> directly comparable closed RMS.",
+      "uri": "anyloop:attenuation_test",
+      "params": {
+        "start_delay": 100.0,
+        "open_time": 500.0,
+        "settle_time": 120.0,
+        "closed_time": 500.0,
+        "nfft": 4096,
+        "labels": "y,x",
+        "pixel_scale": 15.5,
+        "config": "ATTENUATION 20 -- FSP at the 2026-07-21 PM re-centred operating point, SYNCED to steering_fsp.json (the loop verified this session).\nCamera/CoM: 32x32 ROI start_x 1025 / start_y 492, exposure 125, gain 100, bw 100, 20x20 tracked window thr 22; coarse bias 2/2 (offset [2,2,2,2]).\nFSP: broad_order 512, broad_mu .03; delay per-axis y 5+0.828 / x 6+0 (full-band bode phase 07-21 PM); K y 0.645 / x 0.803 (full-band bode plateau, <=30 Hz); adapt_period 8 adapt_tau 5.\nGuard: OFF (guard_ratio 0) -- matches steering_fsp; the 316/344 Hz band-pass was false-tripping on low-freq leakage. Stall-gap patch ON. stall_timeout_ms 50 added (rides through 5-50 ms late frames instead of a 290 ms self-inflicted capture restart).\nFIXES active this session: mlockall+warmed-adapt in fsp init (no first-adapt page-fault burst); RUN THIS UNDER perf-mode: performance governor + C-states capped at C1E + xhci IRQ pinned, and launch with `sudo chrt -f 80 taskset -c 2` -- that took mid-run frame drops from ~10700 to ~20 over 140 s.\nCOMPARE the closed RMS-about-mean per axis to attenuation_fsp15 (run 15): y 0.073 / x 0.168 px. Same 500/500/4096 grid. refs: Kulcsar 2006 / Petit 2008 / Meimon 2010 / Correia 2010",
+        "output_file": "attenuation_fsp20.pdf"
+      }
+    },
+    {
+      "_note1": "THE CONTROLLER. Attenuation11 full-band FSP parameters with the 2026-07-16 timing taken from the BODE PHASE, not the departure latency: full-band (5-300 Hz) phase-slope fits of fsm_bodex/y_716 plus the one hidden bode frame give loop delays x 1.484 ms = 5.62 frames and y 1.681 ms = 6.37 frames at 3788 Hz. delay is a single global param, so it is set to the midpoint 6.0 (delay=6, delay_frac=0). NOTE the frame COUNT went UP versus the 2310-era 4.18 even though the latency in ms went down: frames shrank (433->264 us) faster than the physical pipeline latency did. delay=4+.02 (departure latency, 1.061 ms) under-modeled the delay by 1.6-2.3 frames and left a near-unity command-echo residual around 300 Hz; the 2026-07-16 20:55 run spiraled at ~310 Hz once the ramp passed ~50% authority. broad_order=512 and broad_mu=.03 match attenuation11.",
+      "_note2": "K is the SIGNED command->error gain (error units per command unit). CURRENT values are the 2026-07-20 latency step-gains at bias 1.2/2.45: Kx=0.641, Ky=0.562, both sign + (see each axis's _K). These are LOWER than the bode plateaus at the old 1.98/1.97 bias (Kx=0.902/Ky=0.621) because K is bias-dependent -- NOT because the units changed. Bode-era context: CoM units are normalized to the frame half-width, so the 32px-ROI plateaus are DOUBLE the 64px-era 0.434/0.315. K too SMALL means commands too STRONG (u=-cancel/K), so the drop to 0.641/0.562 makes commands stronger than before -- verify the push-test sign and watch the burst guard on the first closed run. A bode at 1.2/2.45 is still owed to confirm the step-gain.",
+      "_note3": "With broad_order>0 the identified full-band observer supplies the command and the AR2 modal estimate is not added, avoiding double cancellation. The modal q/r values remain available for diagnostics and for rollback with broad_order=0. broad_mu is the NLMS identification step: lower it if weights are noisy, raise it only if the disturbance spectrum changes faster than the current observer converges.",
+      "_note4": "zeta ~0.002 = sharp line; ~0.3 = broadband hump. adapt_period>0 turns on Petit/Meimon re-identification: every 8 s it refreshes each mode's q from its recent energy, r from the innovation floor, nudges center frequencies toward the measured lines (capped at adapt_df_max Hz/update, matching the ~0.5 Hz/run wander), and recomputes the Kalman gain. Set adapt_period 0 for a fixed FSP while first validating.",
+      "uri": "anyloop:fsp",
+      "params": {
+        "type": "vector",
+        "units": "minmax",
+        "_delay": "2026-07-21 PM PERFECTLY-ACCURATE per-axis delay from the FULL-BAND (5-300 Hz) bode phase slope at the re-centred operating point (coarse 2/2, ROI 904/492, exp 150): x tau 1.325 ms => 5.995 fr (fsm_bodex_721_full, fs 3769); y tau 1.284 ms => 5.828 fr (fsm_bodey_721_full, fs 3761); +1 hidden frame already included. Cross-checked vs the latency 50%-crossing (x 5.9 / y 6.0) -- agree within 0.15 fr, trusted. Set PER-AXIS: global/x = 6+0.0, y override = 5+0.828 (see y block). The 30-Hz-capped bode could NOT resolve tau (too little phase over 5-30 Hz -> bogus 4.98); this full-band sweep is the long-owed measurement. departure floor x4.0/y5.0 fr, NEVER used (too short caused the 07-16 310 Hz spiral).",
+        "delay": 6,
+        "delay_frac": 0.0,
+        "fs": 3788,
+        "broad_order": 512,
+        "broad_mu": 0.03,
+        "_broad_lp": "2026-07-22 observer band-limit, synced from steering_fsp.json (see its _broad_lp note): 11-tap boxcar prefilter on the NLMS input kills the 300-420 Hz command-echo regeneration (the 380 Hz x limit cycle) at the root; +5 frames folded into the broad horizon, in-band timing unchanged.",
+        "broad_lp": 11,
+        "broad_freeze_closed": false,
+        "clamp": 1.0,
+        "start_delay": 20.0,
+        "ramp": 10.0,
+        "adapt_period": 8.0,
+        "adapt_df_max": 0.5,
+        "adapt_tau": 5.0,
+        "_guard": "burst guard (2026-07-17, on by default): the run-15 rerun showed intermittent ~250-450 Hz ring bursts (regeneration at fs/(2*delay) when K/delay drift off the plant, e.g. after a coarse-bias move) that tripled the closed RMS. Per-axis band-pass detector on the raw error at the regeneration freq fs/(2*(delay+delay_frac)) ~344 Hz (both axes, delay 5.5); on a burst the axis's authority is cut to 0 for guard_hold s, NLMS training and adaptation stats freeze, then authority ramps back over guard_ramp s. Trigger = band envelope > guard_ratio x max(learned quiet baseline, guard_floor). A ticker prints the activation count every guard_tick s. Recurring activations = re-measure K/delay at the current bias.",
+        "guard_ratio": 0.0,
+        "_guard_disabled": "2026-07-21 PM guard_ratio set to 0 (band-pass burst detector OFF) TEMPORARILY for a clean validation run after the y re-centre. WHY: with the loop closed the x error is 99.6% below 30 Hz and ~0% above 100 Hz -- there is NO real high-frequency regeneration -- yet the 316/344 Hz detector kept tripping on low-frequency LEAKAGE through its band-pass, cutting x authority every ~1.25 s (its hold+ramp) and MANUFACTURING the 'random spikes' (x error spiked to 4.75 px at exactly the guard cadence). Re-enable (guard_ratio 4) when real burst protection is wanted; the proper fix is a higher-Q / sustained-energy detector, not the floor (my earlier floor 0.015 was a wrong noise-floor hypothesis and only let the leakage-driven envelope grow bigger). The stall-gap patch (gap_trip) stays ON regardless.",
+        "guard_floor": 0.008,
+        "guard_hold": 0.25,
+        "guard_ramp": 1.0,
+        "guard_tick": 10.0,
+        "y": {
+          "_K": "2026-07-21 PM full-band bode plateau at the re-centred operating point (fsm_bodey_721_full, 5-300 Hz, K from <=30 Hz): Ky=0.645 +/-0.005 err-units/minmax cmd, sign +, LINEAR (robust median 2.5%). DOWN from the pre-recentre 0.679 (K is position/bias-dependent; re-centring y shifted it); matches the latency step median 0.656. K is bias-dependent.",
+          "_delay": "y OWN full-band delay: bode tau 1.284 ms => 5.828 fr (fs 3761), latency 50%-cross 6.0 -- set 5+0.828, slightly shorter than x's 6.00 (which x inherits from the global).",
+          "delay": 5,
+          "delay_frac": 0.828,
+          "K": 0.645,
+          "r": 1.0,
+          "freqs": [
+            5.64,
+            11.3,
+            21.1,
+            29.6,
+            57.5,
+            20.0
+          ],
+          "zeta": [
+            0.002,
+            0.002,
+            0.002,
+            0.002,
+            0.003,
+            0.3
+          ],
+          "q": [
+            1e-05,
+            1.5e-05,
+            1.5e-05,
+            1e-05,
+            5e-06,
+            1e-05
+          ]
+        },
+        "x": {
+          "_K": "2026-07-21 PM full-band bode plateau at the re-centred operating point (fsm_bodex_721_full, 5-300 Hz, K from <=30 Hz): Kx=0.803 +/-0.006 err-units/minmax cmd, sign +, LINEAR -- confirms the earlier 30-Hz 0.805. Full-band |H| flatness 5.6% (the x resonance ~130 Hz is now in-band, above crossover). The FSP corrects small jitter (<<0.2) = small-signal regime; the latency large-step gain was only 0.622 (x COMPRESSES at large drive), but small-signal is the right one and the safe (gentler) direction. x delay = the global 6+0.0 (full-band tau 1.325 ms => 5.995 fr).",
+          "K": 0.803,
+          "r": 1.0,
+          "freqs": [
+            9.8,
+            12.0,
+            21.7,
+            24.9,
+            57.5,
+            83.3,
+            20.0
+          ],
+          "zeta": [
+            0.002,
+            0.002,
+            0.002,
+            0.002,
+            0.003,
+            0.003,
+            0.3
+          ],
+          "q": [
+            1e-05,
+            1e-05,
+            2e-05,
+            1.5e-05,
+            5e-06,
+            3e-06,
+            1e-05
+          ]
+        }
+      }
+    },
+    {
+      "uri": "anyloop:clamp",
+      "params": {
+        "type": "vector",
+        "min": -1.0,
+        "max": 1.0
+      }
+    },
+    {
+      "_note": "same DAC bridge as steering_tuned.json: fine ch0(+2 V/unit, y)=index0, ch1(-2 V/unit, x)=index1, coarse parked at bias. The fsp output is plain [y,x] in command units, exactly like the pid was.",
+      "uri": "anyloop:piplate_bridge",
+      "params": {
+        "port": "/dev/ttyACM0",
+        "board": 0,
+        "channel": [
+          0,
+          1,
+          2,
+          3
+        ],
+        "index": [
+          0,
+          1,
+          0,
+          0
+        ],
+        "scale": [
+          2,
+          -2,
+          0,
+          0
+        ],
+        "offset": [
+          2,
+          2,
+          2,
+          2
+        ],
+        "baud": 460800,
+        "start_delay": [
+          2.0,
+          2.0,
+          0,
+          0
+        ],
+        "wait_response": false,
+        "skip_unchanged": true
+      }
+    }
+  ]
 }

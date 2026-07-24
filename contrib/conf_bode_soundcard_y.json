@@ -1,0 +1,114 @@
+{
+ "_comment": {
+  "1": "SOUNDCARD DELAY TEST (y axis). The LEFT channel (vector[0]) drives the",
+  "2": "FSM y/tip; RIGHT is not connected (verified 2026-07-22 two-tone L20/R30:",
+  "3": "20 Hz -> y at 8x, 30 Hz at noise floor). Because the soundcard is AC-",
+  "4": "coupled, a STEP decays back to baseline, so latency_test's settled-step",
+  "5": "calibration aborts (step << 8 sigma). The correct delay measurement is the",
+  "6": "BODE PHASE SLOPE: bode_plot injects a sine into command element 0 (y),",
+  "7": "aylp_alsa scale [1,0] sends it to L, and the beam's y CoM response is read",
+  "8": "back. fit_tau_ms + loop_frames in the log/dat IS the command->error delay",
+  "9": "of the soundcard->FSM->camera->CoM path (project's trusted delay method).",
+  "10": "freq_start 12 Hz keeps the fit ABOVE the AC high-pass corner so the phase",
+  "11": "is a clean pure-delay slope (below the corner the high-pass adds phase",
+  "12": "lead and biases tau). aylp_alsa in LOW-LATENCY threaded mode (0.083 ms",
+  "13": "queue) so the actuator adds ~0 delay, matching the intended loop. Piplate",
+  "14": "PARKED holding the 2 V bias so the FSM sits in range. Run under sudo for",
+  "15": "rt_prio/mlockall. Read: fit tau_meas_ms and loop_frames from the log."
+ },
+ "pipeline": [
+  {
+   "uri": "file:/home/fsl/anyloop_levfork/anyloop/build/asi_source.so",
+   "params": {
+    "camera_name": "ASI290MM",
+    "width": 32,
+    "height": 32,
+    "start_x": 384,
+    "start_y": 310,
+    "exposure": 200,
+    "gain": 100,
+    "bandwidth": 100,
+    "high_speed": 1,
+    "die_on_stall": 0
+   }
+  },
+  {
+   "uri": "anyloop:udp_sink",
+   "params": { "ip": "127.0.0.1", "port": "64730", "decimation": 64 }
+  },
+  {
+   "uri": "anyloop:center_of_mass",
+   "params": {
+    "region_height": 20,
+    "region_width": 20,
+    "threshold": 22,
+    "track": true
+   }
+  },
+  {
+   "uri": "anyloop:udp_sink",
+   "params": { "ip": "127.0.0.1", "port": "64731", "decimation": 64 }
+  },
+  {
+   "_comment": "Inject a sine into command element 0 (y) and read the y CoM back.",
+   "uri": "anyloop:bode_plot",
+   "params": {
+    "sample_rate": 3728.0,
+    "element": 0,
+    "inject": "replace",
+    "output": "raw",
+    "freq_start": 12.0,
+    "freq_end": 300.0,
+    "n_freqs": 40,
+    "n_settle": 400,
+    "n_settle_cycles": 2.0,
+    "n_cycles": 30.0,
+    "n_segments": 6,
+    "amplitude": 0.3,
+    "amplitude2": 0.15,
+    "k_max_freq": 60.0,
+    "avoid_freqs": [
+     20.0, 30.0, 57.5, 58.08, 83.3, 84.02,
+     21.26, 29.63, 35.53, 13.17, 15, 17.49, 19.42
+    ],
+    "avoid_df": 0.75,
+    "config": "SOUNDCARD y/tip delay: aylp_alsa L (hw:0,0 S16_LE 48kHz, threaded 0.083ms) -> analog sum -> FSM y-fine, coarse bias 2/2, 32x32 exp200 bw100. Piplate parked (scale 0) holding DC bias. R channel not connected.",
+    "start_delay": 20.0,
+    "output_file": "fsm_bode_soundcard_y.pdf"
+   }
+  },
+  {
+   "_note": "SOUNDCARD under test, LOW-LATENCY threaded. scale [1,0]: drive ONLY L (=vector element 0, the y command bode injects); R muted (not connected). latency_frames 4 = 0.083 ms queue so the actuator adds ~0 delay.",
+   "uri": "file:/home/fsl/anyloop_levfork/anyloop/build/aylp_alsa.so",
+   "params": {
+    "device": "hw:0,0",
+    "format": "S16_LE",
+    "channels": 2,
+    "rate": 48000,
+    "period_time": 350,
+    "buffer_time": 700,
+    "latency_frames": 4,
+    "threaded": true,
+    "poll_us": 30,
+    "rt_prio": 80,
+    "scale": [1, 0]
+   }
+  },
+  {
+   "_note": "Piplate PARKED: scale 0 drives nothing, offset 2 holds the DC bias so the FSM sits in its linear range while the AC-coupled soundcard sweeps.",
+   "uri": "anyloop:piplate_bridge",
+   "params": {
+    "port": "/dev/ttyACM0",
+    "board": 0,
+    "channel": [0, 1, 2, 3],
+    "index": [0, 1, 0, 0],
+    "scale": [0, 0, 0, 0],
+    "offset": [2, 2, 2, 2],
+    "baud": 460800,
+    "start_delay": [8.0, 8.0, 0, 0],
+    "wait_response": false,
+    "skip_unchanged": true
+   }
+  }
+ ]
+}

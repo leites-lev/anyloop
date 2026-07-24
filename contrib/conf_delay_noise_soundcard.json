@@ -1,0 +1,104 @@
+{
+ "_comment": {
+  "1": "SOUNDCARD L->y TRANSPORT-DELAY test by in-loop white-noise cross-",
+  "2": "correlation. The LEFT channel (vector[0]) drives FSM y (R not connected).",
+  "3": "test_source injects white noise into the command; it is recorded AFTER",
+  "4": "injection (delay_cmd.aylp) and the measured CoM error is recorded BEFORE",
+  "5": "it (delay_err.aylp), both once per frame on the SAME frame index -- so no",
+  "6": "aplay/camera clock gap. Cross-correlate err_y[n] vs cmd_ch0[n]: with a",
+  "7": "white input the cross-correlation IS the impulse response, whose ONSET",
+  "8": "lag = transport delay ('appears X frames later') and PEAK lag = group",
+  "9": "delay. This is the AC-valid replacement for latency_test, which aborts on",
+  "10": "this path because a DC step decays before its settled window (step/sigma",
+  "11": "~1). aylp_alsa runs LOW-LATENCY threaded (0.083 ms queue) so the actuator",
+  "12": "adds ~0 delay, matching the real loop. Piplate PARKED holds the 2 V bias",
+  "13": "so the beam stays on-sensor. Run under sudo (rt_prio/mlockall)."
+ },
+ "pipeline": [
+  {
+   "uri": "file:/home/fsl/anyloop_levfork/anyloop/build/asi_source.so",
+   "params": {
+    "camera_name": "ASI290MM",
+    "width": 32,
+    "height": 32,
+    "start_x": 384,
+    "start_y": 310,
+    "exposure": 200,
+    "gain": 100,
+    "bandwidth": 100,
+    "high_speed": 1,
+    "die_on_stall": 0
+   }
+  },
+  {
+   "uri": "anyloop:center_of_mass",
+   "params": {
+    "region_height": 20,
+    "region_width": 20,
+    "threshold": 22,
+    "track": true,
+    "acquire_seconds": 5.0
+   }
+  },
+  {
+   "_note": "MEASURED error [y,x], BEFORE injection.",
+   "uri": "anyloop:file_sink",
+   "params": { "filename": "delay_err.aylp" }
+  },
+  {
+   "_note": "White-noise stimulus. type vector size1 2 -> both elements get the same white value; aylp_alsa scale [1,0] routes element 0 to L, mutes R. amplitude 0.3: broadband drive that the plant low-passes, so beam motion stays small/on-sensor. seed fixed for reproducibility (recorded anyway).",
+   "uri": "anyloop:test_source",
+   "params": {
+    "type": "vector",
+    "kind": "noise",
+    "size1": 2,
+    "amplitude": 0.3,
+    "offset": 0.0,
+    "seed": 1
+   }
+  },
+  {
+   "_note": "EMITTED command [noise,noise], AFTER injection.",
+   "uri": "anyloop:file_sink",
+   "params": { "filename": "delay_cmd.aylp" }
+  },
+  {
+   "_note": "SOUNDCARD actuator, low-latency threaded (0.083 ms queue). scale [1,0]: drive ONLY L; R muted (not connected). rt_prio 80 needs privilege.",
+   "uri": "file:/home/fsl/anyloop_levfork/anyloop/build/aylp_alsa.so",
+   "params": {
+    "device": "hw:0,0",
+    "format": "S16_LE",
+    "channels": 2,
+    "rate": 48000,
+    "period_time": 350,
+    "buffer_time": 700,
+    "latency_frames": 4,
+    "threaded": true,
+    "poll_us": 30,
+    "rt_prio": 80,
+    "scale": [1, 0]
+   }
+  },
+  {
+   "_note": "Piplate PARKED: scale 0 drives nothing, offset 2 holds the DC bias so the beam sits on-sensor while the soundcard jitters y.",
+   "uri": "anyloop:piplate_bridge",
+   "params": {
+    "port": "/dev/ttyACM0",
+    "board": 0,
+    "channel": [0, 1, 2, 3],
+    "index": [0, 1, 0, 0],
+    "scale": [0, 0, 0, 0],
+    "offset": [2, 2, 2, 2],
+    "baud": 460800,
+    "start_delay": [8.0, 8.0, 0, 0],
+    "wait_response": false,
+    "skip_unchanged": true
+   }
+  },
+  {
+   "_note": "~100000 frames (~27 s at ~3728 Hz) then stop.",
+   "uri": "anyloop:stop_after_count",
+   "params": { "count": 100000 }
+  }
+ ]
+}

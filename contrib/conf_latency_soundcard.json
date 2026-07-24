@@ -1,0 +1,100 @@
+{
+ "_comment": {
+  "1": "SOUNDCARD actuation-latency test. The soundcard line-out drives the",
+  "2": "y-FINE input (where the piplate y-fine wire used to go, divided by ~16).",
+  "3": "latency_test outputs [y,x]; aylp_alsa sends vector[0]->L, vector[1]->R.",
+  "4": "index_cmd 0 steps the element that drives soundcard L; set 1 for R (we",
+  "5": "do not know which channel is wired to y-fine, so run BOTH). index_err 0",
+  "6": "= watch CoM y (the axis actually driven). Whichever channel moves y is",
+  "7": "the connected one; the other reads a ~0 step in calibration.",
+  "8": "AC-COUPLING: the step decays back toward baseline, so the calibration",
+  "9": "'settled step' may be small and the 50% crossing skewed -- read the",
+  "10": "DEPARTURE (first motion) for the pure transport delay.",
+  "11": "ACTUATOR is the low-latency threaded aylp_alsa (0.083 ms queue). The",
+  "12": "piplate stays PARKED (scale 0) to hold coarse + x-fine at 2 V bias so",
+  "13": "the beam sits on-sensor while only the soundcard moves y. 96x96 ROI +",
+  "14": "acquire because the y rest position shifts when the AC-coupled soundcard",
+  "15": "replaces the piplate's 2 V y bias. NOTE: 96 rows lowers the frame rate",
+  "16": "(~1260 Hz) and adds readout latency vs the 32-row loop -- fine for a",
+  "17": "first delay look; the reported ms includes it.",
+  "18": "Run L then R: build/anyloop -l info contrib/conf_latency_soundcard.json"
+ },
+ "pipeline": [
+  {
+   "uri": "file:/home/fsl/anyloop_levfork/anyloop/build/asi_source.so",
+   "params": {
+    "camera_name": "ASI290MM",
+    "width": 32,
+    "height": 32,
+    "start_x": 384,
+    "start_y": 310,
+    "_roi_note": "32x32 (operating ROI = ~3788 Hz, minimum readout delay) centred on the CURRENT beam CoM (sensor x290,y395, peak 167) at the soundcard-driven y rest position -- located by contrib/find_roi.py 2026-07-22 (beam lands ~18,16 in-window). Re-run find_roi.py if the beam moves.",
+    "exposure": 200,
+    "gain": 100,
+    "bandwidth": 100,
+    "high_speed": 1,
+    "die_on_stall": 0
+   }
+  },
+  {
+   "uri": "anyloop:center_of_mass",
+   "params": {
+    "region_height": 20,
+    "region_width": 20,
+    "threshold": 22,
+    "track": true,
+    "acquire_seconds": 5.0
+   }
+  },
+  {
+   "_note": "index_cmd 0 -> soundcard L; change to 1 for R. index_err 0 = watch CoM y. out_size 2 = [y,x]. low/high +-1.0 = full-scale soundcard drive (through the ~16x divider it is small, so use the whole range). period 0.15 s: short enough that the AC-coupled response has not fully decayed within a half-cycle. warmup 35 s > piplate start_delay 30 + CoM acquire 5.",
+   "uri": "anyloop:latency_test",
+   "params": {
+    "index_cmd": 0,
+    "index_err": 0,
+    "out_size": 2,
+    "low": -1.0,
+    "high": 1.0,
+    "period": 0.02,
+    "warmup": 10.0,
+    "cal_cycles": 8,
+    "n_steps": 60,
+    "label": "sc_L",
+    "results_file": "/home/fsl/anyloop_levfork/anyloop/Bode_and_testruns/latency_soundcard.dat"
+   }
+  },
+  {
+   "_note": "SOUNDCARD actuator, low-latency threaded (0.083 ms queue). scale [1,1]: full-scale on both channels; the driven element is set by latency_test index_cmd. rt_prio 80 needs privilege (falls back to normal priority with a warning otherwise).",
+   "uri": "file:/home/fsl/anyloop_levfork/anyloop/build/aylp_alsa.so",
+   "params": {
+    "device": "hw:0,0",
+    "format": "S16_LE",
+    "channels": 2,
+    "rate": 48000,
+    "period_time": 350,
+    "buffer_time": 700,
+    "latency_frames": 4,
+    "threaded": true,
+    "poll_us": 30,
+    "rt_prio": 80,
+    "scale": [1, 1]
+   }
+  },
+  {
+   "_note": "Piplate PARKED: scale [0,0,0,0] holds coarse (ch2,ch3) + x-fine (ch1) + the now-disconnected y-fine (ch0) at their 2 V bias so the beam stays on-sensor while only the soundcard moves y. start_delay lets coarse stabilize.",
+   "uri": "anyloop:piplate_bridge",
+   "params": {
+    "port": "/dev/ttyACM0",
+    "board": 0,
+    "channel": [0, 1, 2, 3],
+    "index": [0, 1, 0, 0],
+    "scale": [0, 0, 0, 0],
+    "offset": [2, 2, 2, 2],
+    "baud": 460800,
+    "start_delay": [8.0, 8.0, 0, 0],
+    "wait_response": false,
+    "skip_unchanged": true
+   }
+  }
+ ]
+}

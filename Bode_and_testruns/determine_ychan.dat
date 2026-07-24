@@ -1,0 +1,10 @@
+# ===== latency_test run 2026-07-22T18:03:21 label determine_L_watch_y =====
+# index_cmd 0 index_err 0 low -1 high 1 period 0.02 warmup 10 cal_cycles 8 n_steps 8 settle_frac 0.4
+# columns: edge direction departure_ms half_ms (-1 = not detected)
+# calibrated: settled_low 0.0656355 settled_high 0.0473113 step -0.0179748 sigma 0.0183135 step/sigma 1.0 gain -0.00898741
+# FATAL: test aborted before completion (see log)
+# ===== latency_test run 2026-07-22T18:04:11 label determine_R_watch_y =====
+# index_cmd 1 index_err 0 low -1 high 1 period 0.02 warmup 10 cal_cycles 8 n_steps 8 settle_frac 0.4
+# columns: edge direction departure_ms half_ms (-1 = not detected)
+# calibrated: settled_low 0.0413702 settled_high 0.0737845 step 0.0291827 sigma 0.0275494 step/sigma 1.1 gain 0.0145913
+# FATAL: test aborted before completion (see log)

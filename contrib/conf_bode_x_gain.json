@@ -1,0 +1,99 @@
+{
+	"_comment": {
+		"1": "DEEP GAIN (K) sweep of the x/tilt axis, 5-30 Hz only. Same plant",
+		"2": "path and operating point as conf_bode_x.json (32x32 exp125 gain100",
+		"3": "bw100, beam-centred ROI, coarse bias 2/2, software injection replacing",
+		"4": "the x element, piplate on ch1). The ONLY differences are in bode_plot:",
+		"5": "the sweep ends at 30 Hz (the k_max_freq band) and each point is",
+		"6": "averaged ~2.5x deeper (100 cycles / 10 segments vs 49/7) over ~2.5x",
+		"7": "as many in-band points, so the error-weighted K over <=30 Hz is much",
+		"8": "tighter. Purpose: pin the gain. NOT for delay -- a 5-30 Hz phase slope",
+		"9": "is delay-limited and tau from this run is unreliable; keep the full",
+		"10": "5-300 Hz conf_bode_x.json for tau/loop_frames.",
+		"11": "Runtime: ~2 passes x ~190 s (amplitude + linearity) + 30 s hold ~= 7 min.",
+		"12": "CAVEAT: deeper averaging shrinks the WITHIN-run K error bar and smooths",
+		"13": "the curve, but run-to-run K swing is mostly physical (line wander / beam",
+		"14": "drift). To tighten THAT, average several runs, not one deeper run."
+	},
+	"pipeline": [
+		{
+			"uri": "file:/home/fsl/anyloop_levfork/anyloop/build/asi_source.so",
+			"params": {
+				"camera_name": "ASI290MM",
+				"width": 32,
+				"height": 32,
+				"start_x": 384,
+				"start_y": 310,
+				"_roi_note": "ROI centred on beam at coarse bias 2/2 (fine 1.5/2.15): probe-verified 2026-07-21, full-sensor CoM (x 919, y 507). Re-derive via contrib/probe_frame.json only on an alignment change.",
+				"exposure": 250,
+				"gain": 100,
+				"bandwidth": 100,
+				"high_speed": 1,
+				"die_on_stall": 0
+			}
+		},
+		{
+			"_comment": "frame -> UDP viewer, so you can watch the beam + tracking (same as steering_fsp)",
+			"uri": "anyloop:udp_sink",
+			"params": { "ip": "127.0.0.1", "port": "64730", "decimation": 64 }
+		},
+		{
+			"uri": "anyloop:center_of_mass",
+			"params": {
+				"_note": "tracked 20x20 window, threshold 22 -- matches conf_bode_x.json so the sweep measures the same sensor the loop sees.",
+				"region_height": 20,
+				"region_width": 20,
+				"threshold": 22,
+				"track": true
+			}
+		},
+		{
+			"_comment": "CoM -> UDP viewer so the tracked centroid can be overlaid on the frame",
+			"uri": "anyloop:udp_sink",
+			"params": { "ip": "127.0.0.1", "port": "64731", "decimation": 64 }
+		},
+		{
+			"_comment": "Replace the x/tilt element (1) with the swept sine; read CoM x as response",
+			"uri": "anyloop:bode_plot",
+			"params": {
+				"sample_rate": 3788.0,
+				"element": 1,
+				"inject": "replace",
+				"output": "raw",
+				"freq_start": 5.0,
+				"freq_end": 30.0,
+				"_tuning": "DEEP K: 20 log points from 5 to 30 Hz, 100 cycles/point split into 10 integer-cycle segments (10 cyc/seg). vs the full sweep's 49/7. Every point is inside the k_max_freq band so K is the error-weighted mean over all 20 deep points. 100 cycles at 5 Hz = 20 s and gives ~0.05 Hz lock-in RBW, cleanly resolving the 5.64/9.59 Hz lines.",
+				"n_freqs": 40,
+				"n_settle": 400,
+				"n_settle_cycles": 2.0,
+				"n_cycles": 100.0,
+				"n_segments": 10,
+				"amplitude": 0.2,
+				"_amplitude2": "half-amplitude linearity check: if |H| moves between amplitudes the CoM has left its linear region and K is not trustworthy. Kept here because an accurate K is worthless if it is measured in a nonlinear regime.",
+				"amplitude2": 0.1,
+				"k_max_freq": 30.0,
+				"_avoid_freqs": "only the measured bench lines at/below 30 Hz matter for this band; a line inside the lock-in skirt biases the point coherently (deeper averaging does NOT remove it -- only dodging the line does).",
+				"avoid_freqs": [5.84, 9.07, 12.06, 13.17, 15, 17.49, 19.42, 21.26, 29.63],
+				"avoid_df": 0.75,
+				"config": "x/tilt DEEP GAIN 5-30 Hz, coarse bias 2.0/2.0, 32x32 exp125 gain100 bw100, beam-centred ROI, tracked 20x20 thr22. K only (tau unreliable over this short band -- use conf_bode_x.json for delay).",
+				"start_delay": 30.0,
+				"output_file": "fsm_bodex_gain722_3.pdf"
+			}
+		},
+		{
+			"_note": "same mapping as conf_bode_x.json: ch0=y(parked), ch1=x(driven), ch2/ch3 coarse parked. Coarse offsets 2.0/2.0 = current operating point.",
+			"uri": "anyloop:piplate_bridge",
+			"params": {
+				"port": "/dev/ttyACM0",
+				"board": 0,
+				"channel": [0, 1, 2, 3],
+				"index": [0, 1, 0, 0],
+				"scale": [0, -2, 0, 0],
+				"offset": [2, 2, 2, 2],
+				"baud": 460800,
+				"wait_response": false,
+				"skip_unchanged": true
+			}
+		}
+	]
+}

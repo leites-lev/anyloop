@@ -4,7 +4,7 @@
 		"2": "SOFTWARE injection: bode_plot replaces the x element (1; CoM is [y, x])",
 		"3": "with a sine each iteration, and piplate_bridge writes offset + sine*scale",
 		"4": "to DAC ch1 every cycle. Camera/CoM settings match the current steering",
-		"5": "geometry (56x32, exp 50, gain 100). Whole-frame CoM, no",
+		"5": "geometry (32x32, exp 250, gain 100). Whole-frame CoM, no",
 		"6": "tracking/acquisition: bode_plot holds the command at 0 (fine channel",
 		"7": "parked at bias) for start_delay 30 s so the coarse channels can adjust,",
 		"7b": "then sweeps; there must be no acquisition phase after that point.",
@@ -23,12 +23,21 @@
 				"camera_name": "ASI290MM",
 				"width": 32,
 				"height": 32,
-				"exposure": 50,
+				"start_x": 384,
+				"start_y": 310,
+				"start_y":     310,
+				"_roi_note": "ROI centred on beam at coarse bias 2/2 (fine 1.5/2.15): probe-verified 2026-07-21, full-sensor CoM (x 919, y 507). Re-derive via contrib/probe_frame.json only on an alignment change.",
+				"exposure": 250,
 				"gain": 100,
 				"bandwidth": 100,
 				"high_speed": 1,
 				"die_on_stall": 0
 			}
+		},
+		{
+			"_comment": "frame -> UDP viewer, so you can watch the beam + tracking (same as steering_fsp)",
+			"uri": "anyloop:udp_sink",
+			"params": { "ip": "127.0.0.1", "port": "64730", "decimation": 64 }
 		},
 		{
 			"uri": "anyloop:center_of_mass",
@@ -41,6 +50,11 @@
 			}
 		},
 		{
+			"_comment": "CoM -> UDP viewer so the tracked centroid can be overlaid on the frame",
+			"uri": "anyloop:udp_sink",
+			"params": { "ip": "127.0.0.1", "port": "64731", "decimation": 64 }
+		},
+		{
 			"_comment": "Replace the x/tilt element (1) with the swept sine; read CoM x as response",
 			"uri": "anyloop:bode_plot",
 			"params": {
@@ -50,18 +64,27 @@
 				"output": "raw",
 				"freq_start": 5.0,
 				"freq_end": 300.0,
-				"_tuning": "n_freqs 100 / n_settle 400 / n_cycles 40 (2026-07-14): the 240-pt/12-cycle sweep was jagged -- 12 cycles is only ~0.12 s of correlation at 100 Hz, so ambient lines and CoM drift don't average out (estimator error falls as 1/n_cycles for line/DC leakage). 40 cycles also makes the 5 Hz window 8 s long, resolving it from the 5.64 Hz line. Total ~3.5 min.",
-				"n_freqs": 100,
+				"_tuning": "v2 (2026-07-17): 60 log points x 49 cycles, split into 7 integer-cycle segments per point. The segment scatter gives the per-point error bar + a coherence quality (1=clean; <0.9 flagged as a disturbance line or drift inside the window). Integer-cycle segment boundaries (on excitation-phase crossings) kill the partial-cycle DC/line leakage the old fixed-time cutoff left in. 49 cycles keeps the 5 Hz window ~10 s, resolving it from the 5.64 Hz line.",
+				"n_freqs": 60,
 				"n_settle": 400,
-				"n_cycles": 70.0,
+				"n_settle_cycles": 2.0,
+				"n_cycles": 49.0,
+				"n_segments": 7,
 				"amplitude": 0.2,
+				"_amplitude2": "second full sweep at half amplitude: if |H| moves between the two, the DAC is clipping or the CoM has left its linear region and K is not trustworthy. bode_plot logs the worst-case change and flags >10%.",
+				"amplitude2": 0.1,
+				"k_max_freq": 30.0,
+				"_avoid_freqs": "nudge sweep points off the measured bench lines (a line inside the lock-in skirt biases the point coherently -- segments do not average it out). List from attenuation6/8 memory.",
+				"avoid_freqs": [5.84, 9.07, 12.06, 13.17, 15, 17.49, 19.42, 21.26, 29.63, 35.53, 57.5, 58.08, 83.3, 84.02],
+				"avoid_df": 0.75,
+				"config": "x/tilt open-loop plant, coarse bias 2.0/2.0 (beam realigned, matches steering_tuned.json operating point), 32x32 exp250 gain100 bw100, beam-centred ROI via start_x/start_y, tracked 20x20 thr22. Re-bode at the new bias to refresh Kx/tau for the loop retune. K uses <=30 Hz; tau (delay) uses the full 5-300 Hz phase slope, so the sweep must run to 300.",
 				"_start_delay": "hold injection at 0 (= fine channel parked at its bias) for 30 s so the coarse channels have time to adjust before the sweep starts",
 				"start_delay": 30.0,
-				"output_file": "fsm_bodex_716.pdf"
+				"output_file": "fsm_bodex_722_full7.pdf"
 			}
 		},
 		{
-			"_note": "same mapping as steering_tuned.json: ch0=y(idx0, parked), ch1=x(idx1, driven), ch2/ch3 coarse parked. skip_unchanged: only the driven channel costs wire time. Coarse offsets 1.95/2.02 = current operating point (2026-07-16 evening, 56x32 setup: beam parks at the default-centred ROI, no start_x/start_y needed) so the sweep measures the plant the tuned loop actually sees; earlier operating points: 2.52/1.62 (07-14), 2.7/1.65, 2.6/1.4 (07-13), 1.05/2.35 (attenuation runs), 0.8/2.394 (07-10, |P|x=0.43).",
+			"_note": "same mapping as steering_tuned.json: ch0=y(idx0, parked), ch1=x(idx1, driven), ch2/ch3 coarse parked. skip_unchanged: only the driven channel costs wire time. Coarse offsets 2.0/2.0 = current operating point (beam realigned, matches steering_tuned.json) so the sweep measures the plant the tuned loop actually sees; earlier: 1.5/2.15 (07-21), 1.2/2.45 (07-20), 1.98/1.97 (07-17), 1.95/2.02 (07-16), 2.52/1.62 (07-14), 2.7/1.65, 2.6/1.4 (07-13), 1.05/2.35, 0.8/2.394 (07-10).",
 			"uri": "anyloop:piplate_bridge",
 			"params": {
 				"port": "/dev/ttyACM0",
@@ -84,7 +107,7 @@
 					0,
 					0
 				],
-				"offset": [2,  2, 1.95, 2.02],
+				"offset": [2,  2, 2, 2],
 				"baud": 460800,
 				"wait_response": false,
 				"skip_unchanged": true

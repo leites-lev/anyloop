@@ -53,6 +53,10 @@ struct aylp_latency_test_data {
 	size_t mcnt[2];
 	double step;		// signed settled response to a low->high step
 	double sigma;		// fast (within-window) noise, standard deviation
+	double gain;		// plant DC gain = step / (high - low), i.e. settled
+				// error response (px) per unit minmax command.
+				// Same units as bode_plot's fit_K, so the latency
+				// run and a bode sweep are directly comparable.
 
 	// baseline for the edge being measured: the settled mean of the
 	// half-cycle we just left, re-measured every edge so beam drift

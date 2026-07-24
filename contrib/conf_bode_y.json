@@ -16,12 +16,20 @@
 				"camera_name": "ASI290MM",
 				"width": 32,
 				"height": 32,
-				"exposure": 50,
+				"start_x":     384,
+				"start_y":     310,
+				"_roi_note": "ROI centred on beam at coarse bias 2/2 (fine 1.5/2.15): probe-verified 2026-07-21, full-sensor CoM (x 919, y 507). Re-derive via contrib/probe_frame.json only on an alignment change.",
+				"exposure": 250,
 				"gain": 100,
 				"bandwidth": 100,
 				"high_speed": 1,
 				"die_on_stall": 0
 			}
+		},
+		{
+			"_comment": "frame -> UDP viewer, so you can watch the beam + tracking (same as steering_fsp)",
+			"uri": "anyloop:udp_sink",
+			"params": { "ip": "127.0.0.1", "port": "64730", "decimation": 64 }
 		},
 		{
 			"uri": "anyloop:center_of_mass",
@@ -34,6 +42,11 @@
 			}
 		},
 		{
+			"_comment": "CoM -> UDP viewer so the tracked centroid can be overlaid on the frame",
+			"uri": "anyloop:udp_sink",
+			"params": { "ip": "127.0.0.1", "port": "64731", "decimation": 64 }
+		},
+		{
 			"_comment": "Replace the y/tip element (0) with the swept sine; read CoM y as response",
 			"uri": "anyloop:bode_plot",
 			"params": {
@@ -41,20 +54,28 @@
 				"element": 0,
 				"inject": "replace",
 				"output": "raw",
-				"freq_start": 1.0,
+				"freq_start": 5.0,
 				"freq_end": 300.0,
-				"_tuning": "n_freqs 100 / n_settle 400 / nnate short correlations, and the 5 Hz point was swamped by the 5.64 Hz line).",
-				"n_freqs": 100,
+				"_tuning": "v2 (2026-07-17): 60 log points x 49 cycles, 7 integer-cycle segments per point for per-point error bars + coherence quality (<0.9 flagged). Integer-cycle segment boundaries remove the partial-cycle DC/line leakage of the old fixed-time cutoff. freq_start 5 Hz (was 1): the flat+delay plant is fully pinned by the 5-30 Hz K band and 49 cycles at 1 Hz would cost ~50 s/point.",
+				"n_freqs": 60,
 				"n_settle": 400,
-				"n_cycles": 70.0,
-				"amplitude": 0.15,
+				"n_settle_cycles": 2.0,
+				"n_cycles": 49.0,
+				"n_segments": 7,
+				"amplitude": 0.06,
+				"_amplitude2": "half-amplitude linearity/clipping check; bode_plot flags a >10% |H| change between amplitudes. RAISED 2026-07-21 from 0.15/0.075: at that drive the y response was only ~1.1/0.55 px, inside the y FSM stiction/dead-zone (mag2 < mag by ~15%, flagged NONLINEAR). 0.3/0.15 drives ~2.2 px, matching the x sweep's clean regime. Since Ky (0.46) < Kx (0.69), y needs a larger command than x for the same response.",
+				"amplitude2": 0.03,
+				"k_max_freq": 30.0,
+				"avoid_freqs": [5.84, 9.73, 12.06, 17.5, 19.42, 21.26, 28.16, 29.63, 35.53, 57.5, 58.08, 84.02],
+				"avoid_df": 0.75,
+				"config": "y/tip open-loop plant, coarse bias 2.0/2.0 (beam realigned, matches steering_tuned.json operating point), 32x32 exp250 gain100 bw100, beam-centred ROI via start_x/start_y, tracked 20x20 thr22. Re-bode at the new bias to refresh Ky/tau. Beam now centred so the 07-21 y-clipping (beam parked row 23/32) should be gone; K uses <=30 Hz, tau uses full 5-300 Hz slope.",
 				"_start_delay": "hold injection at 0 (= fine channel parked at its bias) for 30 s so the coarse channels have time to adjust before the sweep starts",
 				"start_delay": 30.0,
-				"output_file": "fsm_bodey_716.pdf"
+				"output_file": "fsm_bodey_722_full4.pdf"
 			}
 		},
 		{
-			"_note": "same mapping as steering_tuned.json: ch0=y(idx0, driven), ch1=x(idx1, parked), ch2/ch3 coarse parked. Coarse offsets 1.95/2.02 = current operating point (2026-07-16 evening, 56x32 setup: beam parks at the default-centred ROI; was 2.52/1.62 on 07-14, 2.7/1.65 on 07-13, 0.8/2.394 for the 2026-07-10 sweep).",
+			"_note": "same mapping as steering_tuned.json: ch0=y(idx0, driven), ch1=x(idx1, parked), ch2/ch3 coarse parked. Coarse offsets 2.0/2.0 = current operating point (beam realigned, matches steering_tuned.json); was 1.5/2.15 (07-21), 1.2/2.45 (07-20), 1.98/1.97 (07-17), 1.95/2.02 (07-16), 2.52/1.62 (07-14), 2.7/1.65 (07-13), 0.8/2.394 (07-10).",
 			"uri": "anyloop:piplate_bridge",
 			"params": {
 				"port": "/dev/ttyACM0",
@@ -78,7 +99,7 @@
 					0
 				],
 				"offset": [
-2,  2, 1.95, 2.02
+2,  2, 2, 2
 				],
 				"baud": 460800,
 				"wait_response": false,

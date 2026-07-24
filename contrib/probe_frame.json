@@ -16,7 +16,7 @@
 				"camera_name": "ASI290MM",
 				"width": 1936,
 				"height": 1096,
-				"exposure": 50,
+				"exposure": 200,
 				"gain": 100,
 				"bandwidth": 100,
 				"high_speed": 1

@@ -7,7 +7,7 @@
 #include "xalloc.h"
 
 
-enum {KIND_CONSTANT=1, KIND_SINE=2};
+enum {KIND_CONSTANT=1, KIND_SINE=2, KIND_NOISE=3};
 
 int test_source_init(struct aylp_device *self)
 {
@@ -20,6 +20,10 @@ int test_source_init(struct aylp_device *self)
 	data->frequency = 0.1;
 	data->amplitude = 1.0;
 	data->offset = 0.0;
+	data->seed = 1;
+	// multitone (kind sine): "frequencies" [Hz] + "fs" [Hz] -> freqs[] rad/call
+	struct json_object *freqs_arr = NULL;
+	double fs_hz = 0.0;
 
 	// parse parameters
 	if (!self->params) {
@@ -41,9 +45,9 @@ int test_source_init(struct aylp_device *self)
 			log_trace("type = %s (0x%hhX)", s, data->type);
 		} else if (!strcmp(key, "kind")) {
 			const char *s = json_object_get_string(val);
-			// TODO: add KIND_NOISE?
 			if (!strcmp(s, "constant")) data->kind = KIND_CONSTANT;
 			else if (!strcmp(s, "sine")) data->kind = KIND_SINE;
+			else if (!strcmp(s, "noise")) data->kind = KIND_NOISE;
 			else log_error("Unrecognized kind: %s", s);
 			log_trace("kind = %s (0x%hhX)", s, data->kind);
 		} else if (!strcmp(key, "size1")) {
@@ -61,6 +65,14 @@ int test_source_init(struct aylp_device *self)
 		} else if (!strcmp(key, "offset")) {
 			data->offset = json_object_get_double(val);
 			log_trace("offset = %G", data->offset);
+		} else if (!strcmp(key, "seed")) {
+			data->seed = (unsigned)json_object_get_uint64(val);
+			log_trace("seed = %u", data->seed);
+		} else if (!strcmp(key, "frequencies")) {
+			freqs_arr = val;
+		} else if (!strcmp(key, "fs")) {
+			fs_hz = json_object_get_double(val);
+			log_trace("fs = %G", fs_hz);
 		} else {
 			log_warn("Unknown parameter \"%s\"", key);
 		}
@@ -81,6 +93,23 @@ int test_source_init(struct aylp_device *self)
 	if (data->type & (AYLP_T_MATRIX|AYLP_T_MATRIX_UCHAR) && !data->size2) {
 		log_error("You must provide a valid size2 param.");
 		return -1;
+	}
+	// seed the white-noise PRNG (reproducible stimulus for cross-correlation)
+	if (data->kind == KIND_NOISE) srand(data->seed);
+	// build the multitone frequency list (Hz -> radians per proc() call)
+	if (freqs_arr) {
+		if (fs_hz <= 0.0) {
+			log_error("\"frequencies\" needs \"fs\" (loop rate in Hz).");
+			return -1;
+		}
+		data->nfreqs = json_object_array_length(freqs_arr);
+		data->freqs = xcalloc(data->nfreqs, sizeof(double));
+		for (size_t i = 0; i < data->nfreqs; i++) {
+			double f_hz = json_object_get_double(
+				json_object_array_get_idx(freqs_arr, i));
+			data->freqs[i] = 2.0 * M_PI * f_hz / fs_hz;
+			log_trace("multitone freq %zu = %G Hz", i, f_hz);
+		}
 	}
 	// warn about clipping
 	if (fabs(data->offset) + fabs(data->amplitude) > 1) {
@@ -124,9 +153,26 @@ int test_source_proc(struct aylp_device *self, struct aylp_state *state)
 		val = data->offset;
 		break;
 	case KIND_SINE:
-		val = data->offset + data->amplitude * sin(
-			data->frequency * data->acc
-		);
+		if (data->nfreqs) {
+			// multitone: sum of equal-amplitude sines, so one in-loop run
+			// integrates every tone over the whole record (max SNR/freq)
+			double s = 0.0;
+			for (size_t i = 0; i < data->nfreqs; i++)
+				s += sin(data->freqs[i] * data->acc);
+			val = data->offset
+				+ data->amplitude / data->nfreqs * s;
+		} else {
+			val = data->offset + data->amplitude * sin(
+				data->frequency * data->acc
+			);
+		}
+		break;
+	case KIND_NOISE:
+		// white uniform noise in [offset-amp, offset+amp]; a white command
+		// makes the command<->error cross-correlation the impulse response,
+		// whose onset lag is the transport delay and peak lag the group delay
+		val = data->offset + data->amplitude
+			* (2.0 * ((double)rand() / RAND_MAX) - 1.0);
 		break;
 	}
 	if (val > 1) val = 1;
@@ -175,6 +221,7 @@ int test_source_fini(struct aylp_device *self)
 		xfree_type(gsl_matrix, data->matrix);
 		break;
 	}
+	xfree(data->freqs);
 	xfree(data);
 	return 0;
 }

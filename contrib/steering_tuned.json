@@ -45,11 +45,12 @@
 			"uri": "file:/home/fsl/anyloop_levfork/anyloop/build/asi_source.so",
 			"params": {
 				"camera_name": "ASI290MM",
-				"width":      32,
-				"height":      32,
-				"_roi_note": "no start_x/start_y: with the coarse biases below (1.95/2.02) the beam parks at sensor (y 548, x 967), the centre of the driver-default ROI -- probe-verified 2026-07-16 evening, ROI (16, 27). The coarse channels need ~30 s to stabilize after startup before the beam parks. If the biases or alignment change, verify with contrib/probe_frame.json.",
-				"_note": "start_x/start_y centre the ROI on the beam's parked position, sensor ~(y 520, x 952) with the DAC biases below (coarse ch2=0.8 V, ch3=2.394 V). If the coarse biases change, re-derive these with a probe frame (0.7 V on ch2 moved the beam to y 507/x 947). 32x32 was tried 2026-07-10 and reverted: frame rate only rises 2400->~3060 Hz, delay drops just ~0.25 ms (camera fixed latency + DAC ZOH dominate), performance is identical, and the stray reflection ends up only 11 px from the beam. Remember CoM normalization: at 32x32 loop gain doubles, so i/iy and line gains must be halved (i=300/iy=700 was stable there).",
-				"exposure":    50,
+				"width":     32,
+				"height":     32,
+				"start_x":     1099,
+				"start_y":     772,
+				"_roi_note": "start_x/start_y centre the 248x248 ROI on the beam parked at coarse bias 2/2 (fine 1.5/2.15): probe-verified 2026-07-21 after realignment, full-sensor CoM (x 919, y 507). Re-derive with contrib/probe_frame.json only if the alignment (not the bias) changes -- the ROI now follows the beam by cropping instead of re-biasing.",
+				"exposure":   250,
 				"gain":        100,
 				"bandwidth":   100,
 				"high_speed":  1,
@@ -109,7 +110,7 @@
 				"gainy": 1.0,
 				"ramp": 10.0,
 				"clamp": 1.0,
-				"start_delay": 10
+				"start_delay": 100000
 			}
 		},
 		{
@@ -119,23 +120,6 @@
 				"type": "vector",
 				"p": 0,
 				"py":0,
-				"i": 1050,
-				"iy": 1500,
-				"d": 0,
-				"lead_fz": 8,
-				"lead_fp": 32,
-				"lead_fzy": 8,
-				"lead_fpy": 32,
-				"clamp": 1.0,
-				"units": "minmax",
-				"start_delay": 20,
-				"lines": [9.6, 12.1, 21.3, 25.8, 57.5, 83.7],
-				"line_gain": [40, 60, 60, 40, 20, 15],
-				"line_phase": [41.2, 37.6, 32.7, 31.7, 19.1, -3.1],
-				"linesy": [5.6, 10.9, 21.3, 29.8, 57.5],
-				"line_gainy": [50, 50, 40, 30, 15],
-				"line_phasey": [52.5, 39.1, 32.8, 31.0, 19.3],
-				"line_delay": 0.0018
 			}
 		},
 		{
@@ -155,7 +139,7 @@
 				"channel": [0,  1,  2, 3],
 				"index":   [0,  1,  0,    0],
 				"scale":   [2, -2, 0, 0],
-				"offset":  [2,  2, 1.95, 2.02],
+				"offset":  [2,  2, 2, 2],
 				"baud":    460800,
 				"_note1": "pid is NOT in coarse mode, so its output is plain [y, x]: ch0 (y fine, +2 V/unit) takes index 0, ch1 (x fine, -2 V/unit) index 1 -- verified by step test 2026-07-10 (ch0 -> CoM y, ch1 -> CoM x, positive i = negative feedback on both). Coarse scales are 0 (parked at bias) per the push-test rule: they had been left live at +-2 with unverified sign, which risks positive feedback; with the beam-centred ROI the fine stages have full authority and the coarse stages are not needed. The coarse biases (0.8, 2.394 V) are the ones the ROI position was derived under.",
 				"_note2": "baud 460800 is about pacing, not the wire: the port is USB CDC (baud is cosmetic) but the bridge throttles itself to ~440 cmds/s at the default 115200 -- at a 2310 Hz loop that is a ~2.3 ms command ZOH stacked on the 1.4 ms path delay. Measured 2026-07-10: the bridge drains ~1800 cmds/s; pacing at 460800 (~1770/s) keeps latency flat, while 921600 overruns the drain rate and bufferbloats ~10 ms into a full FIFO. Do not raise past 460800.",

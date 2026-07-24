@@ -80,6 +80,46 @@
 // AR dynamics is a contraction: same phase advance, no noise amplification.)
 // Recomputed on every adaptation tick when f_i moves. cmd_fc = 0 disables
 // (raw minimum-variance command).
+//
+// BURST GUARD (guard_ratio > 0, on by default): any mismatch between the
+// configured plant model (K, delay) and the true plant leaks the command back
+// into the Smith reconstruction, closing a parasitic loop whose phase hits
+// -180 deg at f = fs / (2 * (delay + delay_frac)) -- ~310-340 Hz here. When
+// the margin at that frequency goes negative (K drifts with the coarse bias /
+// alignment; see the 2026-07-16 "310 Hz spiral" and the 2026-07-17 run-15
+// rerun), the loop emits intermittent BURSTS of ringing there that the 500 s
+// PSD averages into a broad 250-450 Hz hump and a ruined RMS. The guard runs
+// a per-axis band-pass at that frequency on the raw error, tracks a fast
+// envelope against a slow baseline (with an absolute floor so a quiet bench
+// can't lower the bar to noise), and on detection: cuts that axis's authority
+// to zero, freezes NLMS training and the adaptation statistics (so the
+// predictor does not learn the ringing), holds guard_hold seconds, then ramps
+// authority back over guard_ramp seconds. Every activation is counted and a
+// ticker line is printed every guard_tick seconds of closed-loop time. This
+// keeps a marginal run alive; the FIX for recurring activations is
+// re-measuring K/delay at the current operating point.
+//
+// STALL-GAP HANDLING (gap_trip > 0, on by default): if the source drops
+// frames (a scheduler hiccup) or stalls outright (the ASI camera stream
+// stall + capture restart, a ~0.3-0.6 s hole), the DAC holds the last
+// command while the disturbance keeps moving, and every history in the
+// predictor ends up spanning the hole. Neither re-entering at full
+// authority onto stale state (burst seed) nor cutting authority (releases
+// the DC correction: the FSM snaps to bias and the accumulated drift
+// re-appears as a multi-px excursion -- observed 2026-07-17) is right.
+// Instead the gap is simply PATCHED, sized to the frames actually missed:
+// the Smith command ring is padded with the held command (exact -- that is
+// what the plant received), the modal state is propagated through the gap
+// with the AR recursion (the model knows how phases advance), and the NLMS
+// input history is padded with a slow EWMA of the reconstructed disturbance
+// -- so the prediction carries the DC correction straight through the hole
+// and recovers full AC prediction as real frames refill the tap window
+// (~broad_hist_len/fs, ~140 ms). No hold, no ramp, no authority change: a
+// 2-frame drop costs 2 frames; a capture restart costs the hole plus the
+// refill. NLMS training pauses only while fabricated samples meaningfully
+// pollute the tap window (skipped entirely for drops of a few frames).
+// Gap events are counted separately from burst events: bursts mean
+// "re-measure K", gaps mean "the camera stalled".
 
 #define AYLP_FSP_MAX_MODES 8
 #define AYLP_FSP_MAX_DIM (2 * AYLP_FSP_MAX_MODES)
@@ -100,7 +140,7 @@ struct aylp_fsp_axis {
 	// per-axis command ring and full-band observer bookkeeping -- lengths
 	// depend on the axis delay so they cannot be shared
 	size_t uhead;			// ring write index into ucmd
-	size_t broad_hist_len;		// = broad_order + delay + 1
+	size_t broad_hist_len;		// = broad_order + delay + broad_gd + 2
 	size_t broad_head;
 	size_t broad_seen;
 	// per-mode nominal parameters (also the adaptation targets)
@@ -124,6 +164,17 @@ struct aylp_fsp_axis {
 	double xhat[AYLP_FSP_MAX_DIM];
 	// stationary Kalman gain (column, length dim)
 	double L[AYLP_FSP_MAX_DIM];
+	// Amortized re-identification solve state. The Riccati gain solve is
+	// spread a few iterations per frame (fsp_proc) instead of run in one
+	// burst -- the burst stalled frame delivery ~7 ms every adapt_period and
+	// showed up as a periodic "source hiccup". adapt_A / adapt_P persist
+	// across frames while adapt_solving is set; the previous gain keeps
+	// running until the new one converges.
+	bool adapt_solving;
+	size_t adapt_it;			// current Riccati iteration
+	double adapt_prev_trace;		// trace of P at the last iteration
+	double adapt_A[AYLP_FSP_MAX_DIM * AYLP_FSP_MAX_DIM];
+	double adapt_P[AYLP_FSP_MAX_DIM * AYLP_FSP_MAX_DIM];
 	// command delay line of length `delay + 1`, also retaining the adjacent
 	// sample needed by the fractional-delay plant model
 	double *ucmd;
@@ -153,6 +204,10 @@ struct aylp_fsp_axis {
 	double *broad_w;
 	double *broad_w_next;
 	double *broad_xbuf;
+	// observer prefilter ring: the last broad_lp raw phi samples (see
+	// broad_lp in aylp_fsp_data)
+	double *broad_lpbuf;
+	size_t broad_lphead;
 	// First-order Thiran all-pass state for the fractional command delay:
 	// y(k) = a*u(k) + u(k-1) - a*y(k-1).
 	double frac_x1, frac_y1;
@@ -163,6 +218,29 @@ struct aylp_fsp_axis {
 	// magnitude with the learned open-loop magnitude plus trip_error.
 	double trip_center;
 	size_t trip_count;
+	// Burst guard (see header comment). Band-pass biquad at this axis's
+	// regeneration frequency fs/(2*(delay+delay_frac)), DF2T state, fast
+	// envelope and slow baseline of the band POWER, and the recovery state
+	// machine: guard_gain multiplies this axis's authority (0 during the
+	// hold, 0->1 over guard_ramp afterward).
+	double gd_f0;			// detector center (Hz), for logging
+	double gd_b0, gd_b2, gd_a1, gd_a2;	// band-pass coeffs (b1 = 0)
+	double gd_z1, gd_z2;
+	double gd_env;			// fast EWMA of bp^2
+	double gd_base;			// slow EWMA of bp^2 (quiet frames only)
+	bool guard_active;
+	bool guard_ramping;		// recovery ramp has begun since the trip
+	double guard_t_trip;		// time of the latest trigger (s)
+	double guard_t_log;		// last per-event log line (rate limit)
+	size_t guard_events;		// activations since start
+	size_t guard_frames;		// frames spent at reduced authority
+	// stall-gap bookkeeping: slow EWMA of the reconstructed disturbance,
+	// used to pad the NLMS history across a frame gap (so the prediction
+	// carries the DC correction straight through the hole), and a
+	// countdown of frames until fabricated samples have left the tap
+	// window (training pauses while it is nonzero).
+	double phi_dc;
+	size_t broad_fab;
 };
 
 struct aylp_fsp_data {
@@ -205,6 +283,21 @@ struct aylp_fsp_data {
 	// is not added again (which would double-count the same disturbance).
 	size_t broad_order;
 	double broad_mu;
+	// Observer band-limit (broad_lp > 0, odd): boxcar prefilter length on the
+	// reconstructed disturbance feeding the full-band observer. The NLMS is
+	// otherwise broadband to Nyquist, and any K/delay model error leaks the
+	// command back into its input as a predictable high-frequency echo that
+	// it LEARNS and chases into a self-sustained ring (2026-07-22: ~380 Hz
+	// x-axis limit cycle, 4.8 px rms, ignited ~1 min after close with zero
+	// external trigger, even with K/delay set from same-day bodes -- the
+	// mismatch is amplitude-dependent, so no static tune removes it). The
+	// boxcar zeroes the observer's loop gain at fs/broad_lp and attenuates
+	// the whole regeneration band; being linear-phase with exactly integer
+	// group delay (broad_lp-1)/2, that delay is simply ADDED to the broad
+	// prediction horizon, so in-band cancellation timing is unchanged
+	// (passband droop at 30 Hz is <1%). 0 disables (raw broadband observer).
+	size_t broad_lp;
+	size_t broad_gd;	// = (broad_lp-1)/2, derived at init
 	// Identification is safest under a known zero command. When true, NLMS
 	// weights freeze as soon as the startup hold ends.
 	bool broad_freeze_closed;
@@ -216,6 +309,27 @@ struct aylp_fsp_data {
 	double trip_command;
 	size_t trip_frames;
 	bool tripped;
+	// Burst guard tuning (see header comment). guard_ratio is an AMPLITUDE
+	// ratio: trigger when the band envelope exceeds guard_ratio times the
+	// quiet baseline (or the guard_floor, whichever is larger; floor is in
+	// normalized error units). <= 0 disables the guard.
+	double guard_ratio;
+	double guard_floor;
+	double guard_hold;	// s at zero authority after a trigger
+	double guard_ramp;	// s to ramp authority back to 1
+	double guard_tick;	// s between ticker lines; 0 silences the ticker
+	double guard_beta_fast;	// EWMA weights derived at init
+	double guard_beta_slow;
+	double t_tick;		// last ticker print (s)
+	size_t guard_events;	// total activations, both axes
+	// Stall-gap handling (see header comment). Patch histories when the
+	// wall-clock gap between consecutive proc calls exceeds gap_trip
+	// seconds; <= 0 disables.
+	double gap_trip;
+	double gap_dc_beta;	// EWMA weight for the per-axis phi_dc estimate
+	double t_last;		// time of the previous proc call (s)
+	size_t gap_events;	// stall gaps detected since start
+	size_t n_closed;	// frames processed since the loop first closed
 	// shared biquad coefficients for the command filter (normalized)
 	double lp_b0, lp_b1, lp_b2, lp_a1, lp_a2;
 
