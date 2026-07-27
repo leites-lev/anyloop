@@ -21,7 +21,8 @@
 //                 means the camera stopped streaming. Default 0 = auto:
 //                 3 frame periods, measured at runtime (1 ms at 3788 fps).
 //                 Until the first rate estimate (~0.5 s in), a conservative
-//                 100 ms is used.
+//                 500 ms is used (the first frame after capture start
+//                 routinely takes >200 ms).
 //   "die_on_stall" (int): what to do when a stall is declared. 1 (default) =
 //                 abort the run immediately: proc() returns an error, which
 //                 is fatal for this device, so the run dies cleanly instead
@@ -280,9 +281,12 @@ int asi_source_init(struct aylp_device *self)
 	}
 
 	// effective wait until the first frame-rate estimate refines it (auto
-	// mode tightens to 3 measured frame periods after ~0.5 s)
+	// mode tightens to 3 measured frame periods after ~0.5 s). The very
+	// first frame after ASIStartVideoCapture routinely takes >200 ms
+	// (measured 2026-07-17), so start generous — same window the restart
+	// path uses — or every run opens with a spurious capture restart.
 	data->cur_timeout_ms = data->stall_timeout_ms > 0
-		? data->stall_timeout_ms : 100;
+		? data->stall_timeout_ms : 500;
 
 	if (width % 8 != 0) {
 		log_error("width must be a multiple of 8 (got %d)", width);

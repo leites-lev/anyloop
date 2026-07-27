@@ -1,0 +1,77 @@
+{
+ "_comment": {
+  "1": "SOUNDCARD L->y DELAY by in-loop MULTITONE phase slope. Five well-",
+  "2": "separated tones (dodging the known disturbance lines) are summed and",
+  "3": "played simultaneously on L, so EACH tone integrates over the whole ~25 s",
+  "4": "record -- the max-SNR trick the two-tone proved (single-freq coherent",
+  "5": "detection beat the beam drift 8-24x, while white noise and a time-shared",
+  "6": "bode sweep did not, coherence ~5%). command (after inject) and error",
+  "7": "(before) are recorded per frame on the same clock; DFT both at each tone,",
+  "8": "phase(H)=phase_err-phase_cmd, then slope of unwrapped phase vs frequency",
+  "9": "= -2*pi*tau -> transport delay (frames). aylp_alsa low-latency threaded",
+  "10": "so the actuator adds ~0 delay; piplate parked holds the DC bias."
+ },
+ "pipeline": [
+  {
+   "uri": "file:/home/fsl/anyloop_levfork/anyloop/build/asi_source.so",
+   "params": {
+    "camera_name": "ASI290MM",
+    "width": 32, "height": 32, "start_x": 384, "start_y": 310,
+    "exposure": 200, "gain": 100, "bandwidth": 100,
+    "high_speed": 1, "die_on_stall": 0
+   }
+  },
+  {
+   "uri": "anyloop:center_of_mass",
+   "params": {
+    "region_height": 20, "region_width": 20,
+    "threshold": 22, "track": true, "acquire_seconds": 5.0
+   }
+  },
+  {
+   "_note": "measured error [y,x], BEFORE injection",
+   "uri": "anyloop:file_sink",
+   "params": { "filename": "delay_err.aylp" }
+  },
+  {
+   "_note": "MULTITONE stimulus on element 0 (->L). amplitude 0.85 with 5 tones = 0.17/tone (peak 0.85, no clip), comparable to the two-tone 0.25/tone. fs 3788 = nominal loop rate, only used to convert Hz->rad/frame; the delay itself comes out in frames (fs-independent).",
+   "uri": "anyloop:test_source",
+   "params": {
+    "type": "vector", "kind": "sine", "size1": 2,
+    "amplitude": 0.8, "offset": 0.0,
+    "fs": 3788,
+    "frequencies": [20.0, 40.0, 80.0, 150.0]
+   }
+  },
+  {
+   "_note": "emitted command [tone,tone], AFTER injection",
+   "uri": "anyloop:file_sink",
+   "params": { "filename": "delay_cmd.aylp" }
+  },
+  {
+   "_note": "soundcard actuator, threaded; scale [1,0] drives L only. latency_frames 32 = one full period (0.667 ms queue) -- latency_frames 4 UNDER-DROVE 24x (underran the 32-frame period floor; xrun detection is disabled so it was silent). This queue latency is a KNOWN constant (plugin logs 'queue N fr = X ms') to subtract from the measured delay.",
+   "uri": "file:/home/fsl/anyloop_levfork/anyloop/build/aylp_alsa.so",
+   "params": {
+    "device": "hw:0,0", "format": "S16_LE", "channels": 2, "rate": 48000,
+    "period_time": 350, "buffer_time": 2000, "latency_frames": 32,
+    "threaded": true, "poll_us": 30, "rt_prio": 80, "scale": [1, 0]
+   }
+  },
+  {
+   "_note": "piplate parked, holds the 2 V bias so the beam stays on-sensor",
+   "uri": "anyloop:piplate_bridge",
+   "params": {
+    "port": "/dev/ttyACM0", "board": 0,
+    "channel": [0, 1, 2, 3], "index": [0, 1, 0, 0],
+    "scale": [0, 0, 0, 0], "offset": [2, 2, 2, 2],
+    "baud": 460800, "start_delay": [8.0, 8.0, 0, 0],
+    "wait_response": false, "skip_unchanged": true
+   }
+  },
+  {
+   "_note": "~95000 frames (~25 s at ~3788 Hz) then stop",
+   "uri": "anyloop:stop_after_count",
+   "params": { "count": 95000 }
+  }
+ ]
+}

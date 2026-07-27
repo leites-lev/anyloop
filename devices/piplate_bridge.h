@@ -30,6 +30,10 @@ struct aylp_piplate_bridge_data {
 	// wire can carry: anything sitting in the tty buffer is transport delay
 	long baud;		// configured line rate (bits/s)
 	double byte_time;	// seconds per byte on the wire (8N1 => 10 bits)
+	double cmd_time;	// seconds the board takes to service one setDAC:
+				// >0 => tx_admit paces per command (measured at
+				// init or set via cmd_time_us); <0 => pace on
+				// byte_time; 0 => calibrate at init
 	double max_backlog;	// seconds of queued tx we tolerate before dropping
 	double tx_free;		// CLOCK_MONOTONIC time the tx queue drains (s)
 	bool tx_primed;		// tx_free has been seeded
@@ -37,6 +41,7 @@ struct aylp_piplate_bridge_data {
 	long diag_writes;	// iterations that reached the wire
 	long diag_drops;	// iterations dropped because the line was busy
 	long diag_skips;	// channels skipped because the DAC code was unchanged
+	long diag_cmds;		// setDAC commands that reached the wire
 	double diag_t0;		// start of the current diagnostic window (s)
 	// function generator mode
 	int channel;		// FG channel: 1–2

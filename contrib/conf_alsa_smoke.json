@@ -1,0 +1,43 @@
+{
+ "_comment": {
+  "1": "STANDALONE aylp_alsa smoke test -- no camera, no FSM. Feeds a 2-vector",
+  "2": "sine (MINMAX) straight into the soundcard to confirm hw:0,0 accepts",
+  "3": "48 kHz / S16_LE / MMAP_INTERLEAVED and reports its buffer/period sizes.",
+  "4": "Outputs an audible/measurable ~1 kHz tone on both line-out channels.",
+  "5": "Run with `-l trace` to see the snd_pcm_dump. MEASURED on this host: the",
+  "6": "onboard ALC3234 (hw:0,0) supports ONLY 44100/48000 Hz -- NOT 192 kHz --",
+  "7": "so 192000 clamps to 48000 (a warn). 48 kHz is still far above the FSM",
+  "8": "control band, so it is fine; request 48000 to avoid the resample."
+ },
+ "pipeline": [
+  {
+   "uri": "anyloop:test_source",
+   "params": {
+    "type": "vector",
+    "kind": "sine",
+    "size1": 2,
+    "frequency": 1000.0,
+    "amplitude": 0.5,
+    "offset": 0.0
+   }
+  },
+  {
+   "uri": "file:/home/fsl/anyloop_levfork/anyloop/build/aylp_alsa.so",
+   "params": {
+    "device": "hw:0,0",
+    "format": "S16_LE",
+    "channels": 2,
+    "rate": 48000,
+    "buffer_time": 2000,
+    "period_time": 500,
+    "scale": [1, 1]
+   }
+  },
+  {
+   "uri": "anyloop:stop_after_count",
+   "params": {
+    "count": 20000
+   }
+  }
+ ]
+}

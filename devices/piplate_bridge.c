@@ -21,19 +21,24 @@
 //     every channel every iteration stays cheap. Leave it true (the default)
 //     when you want the ack for flow control / debugging.
 //
-// THE WIRE IS THE BOTTLENECK. A setDAC command is 26 ASCII bytes, so at the
-// default 115200 8N1 (11520 B/s) one command takes 2.26 ms and a single channel
-// tops out near 440 updates/s. A 2 kHz control loop wants to send one every
-// 0.5 ms. The excess cannot vanish: without backpressure it piles up in the tty
-// buffer, where it becomes pure transport delay in the feedback path -- and
-// transport delay destroys phase margin regardless of the PID gains. So in
-// fire-and-forget mode a transmit model (see tx_admit) refuses a write while the
-// line is still busy, dropping that iteration's command instead of queueing it.
-// The DAC holds its previous value one iteration longer and the next iteration
-// sends a fresher target. Watch the "piplate_bridge: ... writes/s | ...% dropped"
-// line: a high drop fraction means the loop is running faster than the actuator
-// can possibly be commanded, and you should slow the loop (longer camera
-// exposure) or raise `baud`, not push the gains.
+// THE BOARD IS THE BOTTLENECK. The BRIDGEplate is a USB CDC-ACM device, so the
+// configured `baud` does not pace the USB wire: the bytes arrive at USB speed
+// and the real cost is the firmware parsing the ASCII command and running the
+// SPI transaction to the DAQC2 -- ~0.5-0.7 ms per setDAC as seen in the ack
+// round-trip. A 2 kHz control loop wants to send one every 0.5 ms. The excess
+// cannot vanish: without backpressure it piles up in the tty/firmware buffers,
+// where it becomes pure transport delay in the feedback path -- and transport
+// delay destroys phase margin regardless of the PID gains. So in fire-and-forget
+// mode a transmit model (see tx_admit) refuses a write while the board is still
+// busy, dropping that iteration's command instead of queueing it. The DAC holds
+// its previous value one iteration longer and the next iteration sends a fresher
+// target. The model paces on the board's per-command service time, measured at
+// init by timing acked setDACs (override with cmd_time_us; a negative value
+// falls back to the old baud-derived byte-time pacing). Watch the
+// "piplate_bridge: ... writes/s | ...% dropped" line: a high drop fraction means
+// the loop is running faster than the actuator can possibly be commanded, and
+// you should slow the loop (longer camera exposure) or speed up the board's
+// firmware, not push the gains.
 //
 // skip_unchanged (default false) additionally suppresses the setDAC for any
 // channel whose DAC code has not changed since the last write -- e.g. a constant
@@ -72,14 +77,20 @@
 //                    set false for fire-and-forget in a fast loop)
 //   skip_unchanged -- only send a channel when its DAC code changes (default
 //                    false; keep false for loaded outputs that droop)
-//   baud      -- line rate: 9600/19200/38400/57600/115200/230400/460800/921600
-//                (default 115200). Raising it is the only way to raise the
-//                actuator update rate without shortening the command.
-//   max_backlog_ms -- how many ms of command bytes may sit queued on the wire
-//                before an iteration is dropped (default 0, i.e. only write when
-//                the line is idle: lowest latency, ~440 updates/s at 115200).
-//                Raise it to trade command latency for a higher write rate.
-//                Ignored when wait_response is true, which self-limits.
+//   baud      -- nominal line rate: 9600/19200/38400/57600/115200/230400/
+//                460800/921600 (default 115200). A USB CDC-ACM bridge ignores
+//                it on the wire; it only sets the pacing when cmd_time_us < 0
+//                (legacy byte-time model).
+//   cmd_time_us -- the board's per-setDAC service time in microseconds, used
+//                by the transmit model. 0 (default): measure it at init by
+//                timing acked setDACs (each channel is parked at its `offset`
+//                during the ~30 ms this takes). >0: use the given value.
+//                <0: pace on baud-derived byte time instead (legacy).
+//   max_backlog_ms -- how many ms of command time may sit queued at the board
+//                before an iteration is dropped (default 0, i.e. only write
+//                when the board is idle: lowest latency). Raise it to trade
+//                command latency for a higher write rate. Ignored when
+//                wait_response is true, which self-limits.
 //
 // Params (FG mode, mode="fg"):
 //   port      -- serial device path (default "/dev/ttyACM0")
@@ -95,6 +106,7 @@
 #include <math.h>
 #include <stdbool.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <termios.h>
 #include <time.h>
@@ -113,6 +125,11 @@
 #define DAC_CODE_MAX 4095
 // seconds between piplate_bridge throughput reports
 #define PIPLATE_DIAG_PERIOD 5.0
+// a setDAC command is at most 24 ASCII bytes ("DAQC2.setDAC(7,3,4.095)\n")
+#define PIPLATE_CMD_BYTES 24
+// acked round-trips used to measure the board's per-command service time
+#define PIPLATE_CALIB_WARMUP  4
+#define PIPLATE_CALIB_SAMPLES 24
 
 static speed_t baud_to_speed(long b)
 {
@@ -171,29 +188,37 @@ static int volts_to_code(double volts)
 	return (int)c;
 }
 
-/** Ask the transmit model whether `len` more bytes may go out now.
+/** Ask the transmit model whether `ncmds` more commands (`len` bytes) may go
+* out now.
 *
-* The tty buffer will accept far more than the wire can carry -- at 115200 8N1
-* one setDAC is 26 bytes, i.e. 2.26 ms of wire time, while a 2 kHz loop offers a
-* new command every 0.5 ms. Bytes queued behind the wire are pure transport delay
-* in the feedback path, and transport delay destroys phase margin no matter what
-* the gains are. So instead of queueing, we refuse: the DAC holds its previous
-* value for one more iteration and the *next* iteration sends a fresher command.
-* Same drop-stale-keep-newest discipline asi_source uses on the camera queue.
+* The tty buffer will accept far more than the board can service -- one setDAC
+* costs the firmware ~0.5-0.7 ms of parse + SPI time, while a 2 kHz loop offers
+* a new command every 0.5 ms. Commands queued behind the board are pure
+* transport delay in the feedback path, and transport delay destroys phase
+* margin no matter what the gains are. So instead of queueing, we refuse: the
+* DAC holds its previous value for one more iteration and the *next* iteration
+* sends a fresher command. Same drop-stale-keep-newest discipline asi_source
+* uses on the camera queue.
+*
+* Cost model: cmd_time > 0 charges per command (the measured firmware service
+* time -- the real bottleneck on a USB CDC bridge, where baud is nominal);
+* otherwise falls back to baud-derived byte time.
 *
 * A side effect worth having: because we never overfill the buffer, the blocking
 * write() below cannot stall the loop. */
-static bool tx_admit(struct aylp_piplate_bridge_data *data, size_t len)
+static bool tx_admit(struct aylp_piplate_bridge_data *data, size_t ncmds,
+	size_t len)
 {
 	double now = monotonic_s();
 	if (UNLIKELY(!data->tx_primed)) {
 		data->tx_free = now;
 		data->tx_primed = true;
 	}
-	// the line went idle while we weren't writing
+	// the board went idle while we weren't writing
 	if (data->tx_free < now) data->tx_free = now;
 	if (data->tx_free - now > data->max_backlog) return false;
-	data->tx_free += len * data->byte_time;
+	data->tx_free += data->cmd_time > 0.0 ? ncmds * data->cmd_time
+		: len * data->byte_time;
 	return true;
 }
 
@@ -226,6 +251,49 @@ static int send_cmd(int fd, const char *cmd)
 	if (write(fd, cmd, n) != (ssize_t)n) return -1;
 	drain_response(fd);
 	return 0;
+}
+
+/** Read one '\n'-terminated ack. Returns 1 on a full ack, 0 if the board went
+* silent (VTIME read timeout, 500 ms). */
+static int read_ack(int fd)
+{
+	char c;
+	while (read(fd, &c, 1) == 1)
+		if (c == '\n') return 1;
+	return 0;
+}
+
+static int cmp_dbl(const void *a, const void *b)
+{
+	double x = *(const double *)a, y = *(const double *)b;
+	return (x > y) - (x < y);
+}
+
+/** Measure the board's true per-setDAC service time by timing acked commands.
+*
+* Rotates through the configured channels writing each one's `offset` voltage
+* (the same bias the startup hold parks them at, so nothing moves that wasn't
+* about to). Warm-up round-trips are discarded, the median of the rest is
+* returned. 0.0 on failure (write error or no ack), in which case the caller
+* should fall back to byte-time pacing. */
+static double calibrate_cmd_time(struct aylp_piplate_bridge_data *data)
+{
+	double samples[PIPLATE_CALIB_SAMPLES];
+	char cmd[64];
+	int total = PIPLATE_CALIB_WARMUP + PIPLATE_CALIB_SAMPLES;
+	for (int k = 0; k < total; k++) {
+		size_t i = (size_t)k % data->n_outputs;
+		int code = volts_to_code(data->offsets[i]);
+		int len = snprintf(cmd, sizeof cmd, "DAQC2.setDAC(%d,%d,%.3f)\n",
+			data->board, data->channels[i], code * DAC_LSB);
+		double t0 = monotonic_s();
+		if (write_all(data->serial_fd, cmd, (size_t)len)) return 0.0;
+		if (!read_ack(data->serial_fd)) return 0.0;
+		if (k >= PIPLATE_CALIB_WARMUP)
+			samples[k - PIPLATE_CALIB_WARMUP] = monotonic_s() - t0;
+	}
+	qsort(samples, PIPLATE_CALIB_SAMPLES, sizeof *samples, cmp_dbl);
+	return samples[PIPLATE_CALIB_SAMPLES / 2];
 }
 
 // helpers for reading a param that may be either a scalar or an array, so a
@@ -313,6 +381,8 @@ int piplate_bridge_init(struct aylp_device *self)
 				data->skip_unchanged = json_object_get_boolean(val);
 			} else if (!strcmp(key, "baud")) {
 				data->baud = (long)json_object_get_int64(val);
+			} else if (!strcmp(key, "cmd_time_us")) {
+				data->cmd_time = json_object_get_double(val) * 1e-6;
 			} else if (!strcmp(key, "max_backlog_ms")) {
 				data->max_backlog = json_object_get_double(val) * 1e-3;
 			} else if (!strcmp(key, "frequency")) {
@@ -376,7 +446,8 @@ int piplate_bridge_init(struct aylp_device *self)
 			if (data->start_delays[i] > 0.0) data->has_start_delay = true;
 			data->last_codes[i] = -1;  // force a write on iteration 0
 		}
-		// one setDAC command is ~26 chars; 64 per channel is plenty
+		// one setDAC command is at most PIPLATE_CMD_BYTES chars; 64 per
+		// channel is plenty
 		data->cmdbuf_sz = 64 * n;
 		data->cmdbuf = xmalloc(data->cmdbuf_sz);
 	}
@@ -417,6 +488,24 @@ int piplate_bridge_init(struct aylp_device *self)
 			snprintf(cmd, sizeof cmd, "DAQC2.fgOFF(%d, %d)\n",
 				data->board, data->channels[i]);
 			send_cmd(data->serial_fd, cmd);
+		}
+
+		// pace on the board's real per-command service time, not the
+		// nominal baud (fictional over USB CDC): measure it unless the
+		// config supplied cmd_time_us (>0 fixed, <0 legacy byte pacing)
+		if (data->cmd_time == 0.0) {
+			double t = calibrate_cmd_time(data);
+			if (t > 0.0) {
+				data->cmd_time = t;
+				log_info("piplate_bridge: measured %.0f us/command"
+					" (ceiling %.0f commands/s)",
+					1e6 * t, 1.0 / t);
+			} else {
+				data->cmd_time = -1.0;
+				log_warn("piplate_bridge: cmd_time calibration "
+					"got no ack; pacing on %ld baud byte "
+					"time instead", data->baud);
+			}
 		}
 
 		self->type_in   = AYLP_T_VECTOR;
@@ -503,7 +592,7 @@ int piplate_bridge_proc(struct aylp_device *self, struct aylp_state *state)
 		data->pending_codes[i] = code;
 
 		len += (size_t)snprintf(data->cmdbuf + len, data->cmdbuf_sz - len,
-			"DAQC2.setDAC(%d, %d, %.3f)\n", data->board,
+			"DAQC2.setDAC(%d,%d,%.3f)\n", data->board,
 			data->channels[i], code * DAC_LSB);
 		written++;
 		log_trace("piplate_bridge: ch%d cmd=%g → code %d (%.3f V)",
@@ -514,7 +603,7 @@ int piplate_bridge_proc(struct aylp_device *self, struct aylp_state *state)
 		// wait_response mode self-limits: drain_response blocks for the
 		// board's ack, so nothing accumulates. Fire-and-forget has no such
 		// backpressure, so the transmit model provides it.
-		if (!data->wait_response && !tx_admit(data, len)) {
+		if (!data->wait_response && !tx_admit(data, written, len)) {
 			data->diag_drops++;
 			return 0;	// pending_codes discarded; retry next iteration
 		}
@@ -528,6 +617,7 @@ int piplate_bridge_proc(struct aylp_device *self, struct aylp_state *state)
 			if (data->pending_codes[i] >= 0)
 				data->last_codes[i] = data->pending_codes[i];
 		data->diag_writes++;
+		data->diag_cmds += (long)written;
 		// drain exactly one ack per command only when asked to; fire-and-
 		// forget skips this and clears the acks via tcflush next iteration
 		if (data->wait_response)
@@ -541,12 +631,15 @@ int piplate_bridge_proc(struct aylp_device *self, struct aylp_state *state)
 	double dt = now - data->diag_t0;
 	if (UNLIKELY(dt >= PIPLATE_DIAG_PERIOD)) {
 		long total = data->diag_writes + data->diag_drops;
-		log_info("piplate_bridge: %.0f writes/s | %.0f%% dropped (line "
-			"busy) | %.0f skips/s (code unchanged) | %ld B/s of %ld",
+		double cap = data->cmd_time > 0.0 ? 1.0 / data->cmd_time
+			: data->baud / (10.0 * PIPLATE_CMD_BYTES);
+		log_info("piplate_bridge: %.0f writes/s | %.0f%% dropped (board "
+			"busy) | %.0f skips/s (code unchanged) | %.0f cmds/s "
+			"of %.0f",
 			data->diag_writes / dt,
 			total ? 100.0 * data->diag_drops / total : 0.0,
 			data->diag_skips / dt,
-			lround(data->diag_writes * 26 / dt), data->baud / 10);
+			data->diag_cmds / dt, cap);
 		// the voltage each DAC channel is currently holding (last code
 		// actually written; "--" means nothing has reached it yet)
 		char vbuf[128];
@@ -566,6 +659,7 @@ int piplate_bridge_proc(struct aylp_device *self, struct aylp_state *state)
 		log_info("piplate_bridge: DAC%s", vbuf);
 		data->diag_t0 = now;
 		data->diag_writes = data->diag_drops = data->diag_skips = 0;
+		data->diag_cmds = 0;
 	}
 
 	return 0;

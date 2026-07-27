@@ -1,0 +1,84 @@
+{
+ "_comment": {
+  "1": "SOUNDCARD delay via a continuous 20 Hz drive (play_tone 20 1 is known to",
+  "2": "oscillate the beam). test_source sets ALL vector elements equal, so it",
+  "3": "drives BOTH soundcard channels at once (like play_tone) -> whichever is",
+  "4": "wired to y-fine moves the beam. We record the DRIVE (command, after",
+  "5": "test_source) and the RESPONSE (CoM [y,x], before test_source) every",
+  "6": "frame; the delay is the time lag between them (cross-correlation),",
+  "7": "measured offline by contrib/analyze_20hz.py. This is the FULL loop delay",
+  "8": "(command->soundcard->FSM->camera->CoM); subtract the known camera/",
+  "9": "sensing delay to isolate the actuator. Caveat: AC-coupling adds a small",
+  "10": "phase lead at 20 Hz, so the lag slightly UNDER-estimates the true delay.",
+  "11": "test_source frequency is rad/iteration: 2*pi*20/3788 = 0.033174 -> 20 Hz",
+  "12": "at the 3788 Hz camera loop (cross-correlation is robust to small rate",
+  "13": "error anyway). ROI 272,392 = current beam centre."
+ },
+ "pipeline": [
+  {
+   "uri": "file:/home/fsl/anyloop_levfork/anyloop/build/asi_source.so",
+   "params": {
+    "camera_name": "ASI290MM",
+    "width": 32,
+    "height": 32,
+    "start_x": 384,
+    "start_y": 310,
+    "exposure": 200,
+    "gain": 100,
+    "bandwidth": 100,
+    "high_speed": 1,
+    "die_on_stall": 0
+   }
+  },
+  {
+   "uri": "anyloop:center_of_mass",
+   "params": {
+    "region_height": 20,
+    "region_width": 20,
+    "threshold": 22,
+    "track": true,
+    "acquire_seconds": 3.0
+   }
+  },
+  {
+   "_note": "RESPONSE: CoM [y,x] every frame (element 0 = y = the driven axis).",
+   "uri": "anyloop:file_sink",
+   "params": { "filename": "/home/fsl/anyloop_levfork/anyloop/sc20_resp.aylp" }
+  },
+  {
+   "_note": "20 Hz sine into BOTH command elements (test_source sets all equal). amplitude 1.0 = full-scale soundcard drive (matches play_tone 20 1). frequency 0.033174 rad/iter = 20 Hz at 3788 Hz loop.",
+   "uri": "anyloop:test_source",
+   "params": {
+    "type": "vector", "kind": "sine", "size1": 2,
+    "frequency": 0.033174, "amplitude": 1.0, "offset": 0.0
+   }
+  },
+  {
+   "_note": "DRIVE: the command [y,x] every frame (both = the 20 Hz sine).",
+   "uri": "anyloop:file_sink",
+   "params": { "filename": "/home/fsl/anyloop_levfork/anyloop/sc20_cmd.aylp" }
+  },
+  {
+   "_note": "soundcard, low-latency threaded (0.083 ms queue). Both channels driven.",
+   "uri": "file:/home/fsl/anyloop_levfork/anyloop/build/aylp_alsa.so",
+   "params": {
+    "device": "hw:0,0", "format": "S16_LE", "channels": 2, "rate": 48000,
+    "period_time": 350, "buffer_time": 700,
+    "latency_frames": 4, "threaded": true, "poll_us": 30, "rt_prio": 80,
+    "scale": [1, 1]
+   }
+  },
+  {
+   "_note": "piplate parked: holds coarse + x-fine at 2 V bias (y-fine now on the soundcard).",
+   "uri": "anyloop:piplate_bridge",
+   "params": {
+    "port": "/dev/ttyACM0", "board": 0,
+    "channel": [0, 1, 2, 3], "index": [0, 1, 0, 0],
+    "scale": [0, 0, 0, 0], "offset": [2, 2, 2, 2],
+    "baud": 460800, "start_delay": [5.0, 5.0, 0, 0],
+    "wait_response": false, "skip_unchanged": true
+   }
+  },
+  { "uri": "anyloop:stop_after_count", "params": { "count": 30000 } }
+ ]
+}

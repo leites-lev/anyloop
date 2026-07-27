@@ -1,0 +1,46 @@
+{
+ "_comment": {
+  "1": "LOW-LATENCY aylp_alsa bench with the DEDICATED FEEDER THREAD.",
+  "2": "The feeder refills the card in its own tight loop (poll_us) and holds",
+  "3": "the queue at latency_frames, decoupled from the (camera-paced) anyloop",
+  "4": "loop -- so proc() just publishes the latest command and never stalls,",
+  "5": "and the queue can be far below one loop period of frames without",
+  "6": "underrunning. MEASURED 2026-07-22: latency_frames 4 = 0.083 ms held",
+  "7": "rock-steady, 0 xruns, even in free-run (main thread spinning = worst",
+  "8": "case for CPU contention).",
+  "9": "IMPORTANT: this is the snd_pcm_delay QUEUE latency (software). The TRUE",
+  "10": "command->voltage latency also includes DMA prefetch + codec analog",
+  "11": "pipeline, which software cannot see -- measure that with the camera loop",
+  "12": "(total delay minus the known camera/sensing delay) or a line-out->",
+  "13": "line-in loopback (alsabat --roundtriplatency).",
+  "14": "rt_prio 80 = SCHED_FIFO for the feeder (needs privilege/RLIMIT_RTPRIO;",
+  "15": "falls back to normal priority with a warning if not permitted). Run",
+  "16": "anyloop with the memlock+rtprio caps for glitch-free operation.",
+  "17": "No camera here: free-runs, so it proves the mechanism + reports queue",
+  "18": "latency/xruns. Run with -l info."
+ },
+ "pipeline": [
+  {
+   "uri": "anyloop:test_source",
+   "params": { "type": "vector", "kind": "sine", "size1": 2,
+               "frequency": 0.01, "amplitude": 0.5, "offset": 0.0 }
+  },
+  {
+   "uri": "file:/home/fsl/anyloop_levfork/anyloop/build/aylp_alsa.so",
+   "params": {
+    "device": "hw:0,0",
+    "format": "S16_LE",
+    "channels": 2,
+    "rate": 48000,
+    "period_time": 350,
+    "buffer_time": 700,
+    "latency_frames": 4,
+    "threaded": true,
+    "poll_us": 30,
+    "rt_prio": 80,
+    "scale": [1, 1]
+   }
+  },
+  { "uri": "anyloop:stop_after_count", "params": { "count": 1500000 } }
+ ]
+}

@@ -86,3 +86,19 @@ else
 	message('ZWO ASI SDK not found at ' + asi_sdk_dir + '; asi_source will not be built')
 endif
 
+# aylp_alsa: soundcard (ALSA playback) actuator plugin, for the AC path of a
+# dual-actuator FSM drive. Built only if alsa-lib and the source are present.
+alsa_dep = dependency('alsa', required: false)
+if alsa_dep.found() and fs.exists('contrib/aylp_alsa.c')
+	shared_library('aylp_alsa', 'contrib/aylp_alsa.c',
+		name_prefix: '',
+		install: true,
+		install_dir: get_option('libdir') / 'anyloop',
+		dependencies: deps + [alsa_dep],
+		include_directories: [incdir, include_directories('contrib')],
+		override_options: 'b_lundef=false'
+	)
+else
+	message('alsa-lib not found; aylp_alsa will not be built')
+endif
+

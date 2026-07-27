@@ -18,10 +18,13 @@
 			"uri": "file:/home/fsl/anyloop_levfork/anyloop/build/asi_source.so",
 			"params": {
 				"camera_name": "ASI290MM",
-				"width":      56,
+				"width":      32,
 				"height":     32,
-				"_note": "no start_x/start_y: at the coarse biases below the beam parks at the centre of the driver-default ROI (probe-verified 2026-07-16 evening, sensor y 548 x 967). Verify with contrib/probe_frame.json after any bias or alignment change.",
-				"exposure":    50,
+				"start_x":     384,
+				"start_y":     310,
+				"_roi_note": "ROI centred on beam at coarse bias 2/2 (fine 1.5/2.15): probe-verified 2026-07-21, full-sensor CoM (x 919, y 507). Re-derive via contrib/probe_frame.json only on an alignment change.",
+				"_note": "32x32 to match the fsp loop operating ROI exactly (attenuation_fsp.json/steering_fsp.json) so the measured latency is the plant the loop actually runs on. Width does not change the frame rate (height-paced ~3788 Hz), but the readout window should match the loop's. No start_x/start_y: at the coarse biases below the beam parks at the driver-default ROI centre; verify with contrib/probe_frame.json after any bias or alignment change.",
+				"exposure":   250,
 				"gain":       100,
 				"bandwidth":  100,
 				"high_speed":   1,
@@ -40,7 +43,7 @@
 			}
 		},
 		{
-			"_note": "out_size 2 = pid-style [y, x] vector, matching the piplate index map below. index_cmd 1 drives the x element (DAC ch1), index_err 1 watches CoM x. low/high +-0.5 with scale -2 is a 2 V step around the 2 V bias; raise it if calibration reports step/sigma < 8. warmup 35 s: it must exceed both the CoM acquire_seconds and the 30 s piplate start_delay that lets the coarse channels stabilize. label tells runs apart in the results file; the multi-run driver overwrites it per run.",
+			"_note": "out_size 2 = pid-style [y, x] vector, matching the piplate index map below. index_cmd 1 drives the x element (DAC ch1), index_err 1 watches CoM x. low/high +-0.5 with scale -2 is a 2 V step around the 2 V bias; raise it if calibration reports step/sigma < 8. warmup 35 s: it must exceed both the CoM acquire_seconds and the 30 s piplate start_delay that lets the coarse channels stabilize. label tells runs apart in the results file; the multi-run driver overwrites it per run. Besides latency, calibration now also reports the plant DC gain (settled CoM step / command step, px per unit minmax command) to the log and results_file -- same quantity/units as bode_plot's fit_K, so each run doubles as an x-gain check.",
 			"uri": "anyloop:latency_test",
 			"params": {
 				"index_cmd":  1,
@@ -65,7 +68,7 @@
 				"channel": [0,  1,  2, 3],
 				"index":   [0,  1,  0, 0],
 				"scale":   [2, -2,  0, 0],
-				"offset":  [2,  2,  1.95, 2.02],
+				"offset":  [2,  2,  2, 2],
 				"baud":    460800,
 				"start_delay": [30.0, 30.0, 0, 0],
 				"wait_response": false,

@@ -52,15 +52,30 @@ static const char *PLOT_SCRIPT =
 	"import matplotlib.pyplot as plt\n"
 	"import numpy as np\n"
 	"data=np.loadtxt(sys.argv[1])\n"
-	"freqs,mags,phases=data[:,0],data[:,1],data[:,2]\n"
-	"ok=mags>1e-6\n"
-	"freqs,mags,phases=freqs[ok],mags[ok],phases[ok]\n"
+	"f,m,p=data[:,0],data[:,1],data[:,2]\n"
+	"ms,ps,q=data[:,3],data[:,4],data[:,5]\n"
+	"ok=m>1e-6\n"
+	"f,m,p,ms,ps,q=f[ok],m[ok],p[ok],ms[ok],ps[ok],q[ok]\n"
+	"pd=np.degrees(np.unwrap(p))\n"
 	"fig,(ax1,ax2)=plt.subplots(2,1,figsize=(10,8),sharex=True)\n"
-	"fig.suptitle('Bode Plot')\n"
-	"ax1.semilogx(freqs,20*np.log10(mags+1e-300))\n"
+	"fig.suptitle(sys.argv[3],fontsize=9)\n"
+	"mdb=20*np.log10(m+1e-300)\n"
+	"mdb_err=8.6859*ms/np.maximum(m,1e-12)\n"
+	"ax1.errorbar(f,mdb,yerr=mdb_err,fmt='.-',lw=1,ms=3,capsize=2)\n"
+	"bad=q<0.9\n"
+	"ax1.plot(f[bad],mdb[bad],'rx',ms=6,label='quality<0.9')\n"
+	"if bad.any(): ax1.legend(fontsize=8)\n"
+	"ax1.set_xscale('log')\n"
 	"ax1.set_ylabel('Magnitude (dB)')\n"
 	"ax1.grid(True,which='both',ls='--',alpha=0.5)\n"
-	"ax2.semilogx(freqs,np.degrees(np.unwrap(phases)))\n"
+	"ax2.errorbar(f,pd,yerr=np.degrees(ps),fmt='.-',lw=1,ms=3,capsize=2)\n"
+	"ax2.plot(f[bad],pd[bad],'rx',ms=6)\n"
+	"if data.shape[1]>=8:\n"
+	"    m2,p2=data[:,6][ok],data[:,7][ok]\n"
+	"    ax1.plot(f,20*np.log10(m2+1e-300),'--',color='tab:orange',lw=1,label='amplitude2')\n"
+	"    ax2.plot(f,np.degrees(np.unwrap(p2)),'--',color='tab:orange',lw=1)\n"
+	"    ax1.legend(fontsize=8)\n"
+	"ax2.set_xscale('log')\n"
 	"ax2.set_ylabel('Phase (deg)')\n"
 	"ax2.set_xlabel('Frequency (Hz)')\n"
 	"ax2.grid(True,which='both',ls='--',alpha=0.5)\n"
@@ -69,38 +84,222 @@ static const char *PLOT_SCRIPT =
 	"print('Saved Bode plot to '+sys.argv[2])\n";
 
 
+static inline double get_time_seconds(void)
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return ts.tv_sec + ts.tv_nsec * 1e-9;
+}
+
+// flat-gain + pure-delay fit over the pass-0 points: K = error-weighted mean
+// |H| below k_max_freq; tau from the error-weighted LS slope of the unwrapped
+// phase. Points with quality < 0.5 are excluded. The measured phase EXCLUDES
+// one frame (the correlator references phi[n-1]); fit_frames adds it back
+// using the MEASURED mean sample rate.
+static void bode_fit(struct aylp_bode_plot_data *data)
+{
+	size_t n = data->n_freqs;
+	double ph_u_prev = 0.0;
+	double sw = 0, swf = 0, swf2 = 0, swp = 0, swfp = 0;
+	double kw = 0, kwm = 0;
+	size_t n_used = 0, n_k = 0;
+	double fs_meas = data->dt_n ? (double)data->dt_n / data->dt_sum
+		: data->sample_rate;
+
+	// first pass: weighted phase line fit + weighted K
+	for (size_t i = 0; i < n; i++) {
+		if (data->mags[i] <= 1e-9 || data->quality[i] < 0.5) continue;
+		double ph = data->phases[i];
+		if (n_used)	// unwrap toward the previous used point
+			ph += 2.0*M_PI * round((ph_u_prev - ph) / (2.0*M_PI));
+		ph_u_prev = ph;
+		double sem = data->ph_sem[i] > 1e-3 ? data->ph_sem[i] : 1e-3;
+		double w = 1.0 / (sem * sem);
+		double f = data->freqs[i];
+		sw += w; swf += w*f; swf2 += w*f*f; swp += w*ph; swfp += w*f*ph;
+		n_used++;
+		if (f <= data->k_max_freq) {
+			double msem = data->mag_sem[i] > 1e-6
+				? data->mag_sem[i] : 1e-6;
+			double mw = 1.0 / (msem * msem);
+			kw += mw;
+			kwm += mw * data->mags[i];
+			n_k++;
+		}
+	}
+	if (n_used < 3 || kw <= 0.0) {
+		log_warn("bode_plot: too few clean points for the K/tau fit "
+			"(%zu used)", n_used);
+		return;
+	}
+	double det = sw*swf2 - swf*swf;
+	if (fabs(det) < 1e-30) return;
+	double b = (sw*swfp - swf*swp) / det;	// rad per Hz
+	double a = (swf2*swp - swf*swfp) / det;
+	data->fit_tau_ms = -b / (2.0*M_PI) * 1e3;
+	data->fit_frames = data->fit_tau_ms * 1e-3 * fs_meas + 1.0;
+	data->fit_K = kwm / kw;
+	data->fit_K_err = sqrt(1.0 / kw) * sqrt((double)(n_k > 1 ? n_k : 1));
+
+	// residuals (unweighted rms over the used points)
+	double pr2 = 0, mr2 = 0;
+	size_t n2 = 0;
+	ph_u_prev = 0.0;
+	bool first = true;
+	for (size_t i = 0; i < n; i++) {
+		if (data->mags[i] <= 1e-9 || data->quality[i] < 0.5) continue;
+		double ph = data->phases[i];
+		if (!first)
+			ph += 2.0*M_PI * round((ph_u_prev - ph) / (2.0*M_PI));
+		first = false;
+		ph_u_prev = ph;
+		double r = ph - (a + b*data->freqs[i]);
+		pr2 += r*r;
+		double mr = (data->mags[i] - data->fit_K) / data->fit_K;
+		mr2 += mr*mr;
+		n2++;
+	}
+	data->fit_ph_resid_deg = sqrt(pr2 / n2) * 180.0 / M_PI;
+	data->fit_mag_flat_rms = sqrt(mr2 / n2);
+
+	log_info("bode_plot FIT: K(<=%G Hz) = %.4f +/- %.4f, tau = %.4f ms "
+		"(+1 hidden frame => %.3f frames at measured fs %.1f Hz); "
+		"phase resid %.2f deg rms, |H| flatness %.1f%% rms over %zu pts",
+		data->k_max_freq, data->fit_K, data->fit_K_err,
+		data->fit_tau_ms, data->fit_frames, fs_meas,
+		data->fit_ph_resid_deg, 100.0*data->fit_mag_flat_rms, n_used);
+	if (data->amplitude2 > 0.0) {
+		// Robust linearity: a real amplitude nonlinearity moves MANY
+		// points together, so judge on the MEDIAN |ratio-1| and the
+		// count over threshold -- a lone contaminated segment (one bad
+		// amp2 point) must not condemn K. Only points clean in the main
+		// pass (quality >= 0.9) count.
+		double dev[512];
+		size_t nd = 0, n_over = 0;
+		double worst = 0.0, wf = 0.0;
+		for (size_t i = 0; i < n && nd < 512; i++) {
+			if (data->mags[i] <= 1e-9 || data->mags2[i] <= 1e-9
+					|| data->quality[i] < 0.9)
+				continue;
+			double d = fabs(data->mags2[i]/data->mags[i] - 1.0);
+			dev[nd++] = d;
+			if (d > 0.10) n_over++;
+			if (d > worst) { worst = d; wf = data->freqs[i]; }
+		}
+		double med = 0.0;
+		if (nd) {
+			for (size_t a = 0; a < nd; a++)	// tiny insertion sort
+				for (size_t b = a+1; b < nd; b++)
+					if (dev[b] < dev[a]) {
+						double t = dev[a];
+						dev[a] = dev[b]; dev[b] = t;
+					}
+			med = dev[nd/2];
+		}
+		bool nonlin = med > 0.05 || n_over > nd/10 + 1;
+		log_info("bode_plot LINEARITY: median |H| change between "
+			"amplitudes %G and %G is %.1f%% (%zu/%zu pts over 10%%, "
+			"worst %.1f%% at %.1f Hz) -- %s", data->amplitude,
+			data->amplitude2, 100.0*med, n_over, nd, 100.0*worst, wf,
+			nonlin ? "NONLINEAR/CLIPPING, do not trust K"
+			: "plant is linear, K trustworthy");
+	}
+}
+
+// write the annotated .dat (header + per-point columns) to path
+static int write_dat(struct aylp_bode_plot_data *data, const char *path)
+{
+	FILE *f = fopen(path, "w");
+	if (!f) {
+		log_error("bode_plot: fopen %s: %m", path);
+		return -1;
+	}
+	time_t tt = time(NULL);
+	struct tm tm;
+	localtime_r(&tt, &tm);
+	double fs_meas = data->dt_n ? (double)data->dt_n / data->dt_sum
+		: data->sample_rate;
+	fprintf(f, "# bode_plot v2 %04d-%02d-%02d %02d:%02d:%02d\n",
+		tm.tm_year+1900, tm.tm_mon+1, tm.tm_mday,
+		tm.tm_hour, tm.tm_min, tm.tm_sec);
+	fprintf(f, "# element=%zu inject=%s output=%s amplitude=%G amplitude2=%G\n",
+		data->element,
+		data->inject_mode == BODE_INJECT_ADD ? "add" : "replace",
+		data->output_mode == BODE_OUTPUT_RAW ? "raw" : "diff",
+		data->amplitude, data->amplitude2);
+	fprintf(f, "# n_freqs=%zu cycles=%G (%zu segments x %G cycles) "
+		"n_settle=%zu+%Gcyc\n", data->n_freqs, data->n_cycles,
+		data->n_segments, data->cycles_per_seg,
+		data->n_settle, data->n_settle_cycles);
+	fprintf(f, "# fs_nominal=%G fs_measured=%.2f\n",
+		data->sample_rate, fs_meas);
+	if (data->fit_K != 0.0) {
+		fprintf(f, "# fit K(<=%GHz)=%.4f +/- %.4f  tau_meas_ms=%.4f  "
+			"loop_frames=%.3f (tau*fs_meas + 1 hidden frame)  "
+			"ph_resid_deg=%.2f  mag_flat_rms=%.3f\n",
+			data->k_max_freq, data->fit_K, data->fit_K_err,
+			data->fit_tau_ms, data->fit_frames,
+			data->fit_ph_resid_deg, data->fit_mag_flat_rms);
+	}
+	fprintf(f, "# note: phase EXCLUDES one frame (correlator references "
+		"phi[n-1]); loop_frames above already adds it back\n");
+	if (data->config_note)
+		fprintf(f, "# config %s\n", data->config_note);
+	fprintf(f, "# freq_Hz mag phase_rad mag_sem phase_sem_rad quality%s\n",
+		data->amplitude2 > 0.0 ? " mag2 phase2_rad" : "");
+	for (size_t k = 0; k < data->n_freqs; k++) {
+		fprintf(f, "%g %g %g %g %g %g", data->freqs[k], data->mags[k],
+			data->phases[k], data->mag_sem[k], data->ph_sem[k],
+			data->quality[k]);
+		if (data->amplitude2 > 0.0)
+			fprintf(f, " %g %g", data->mags2[k], data->phases2[k]);
+		fputc('\n', f);
+	}
+	fclose(f);
+	log_info("Bode data saved to %s", path);
+	return 0;
+}
+
 static int generate_plot(struct aylp_bode_plot_data *data)
 {
-	char data_path[] = "/tmp/bode_data_XXXXXX";
-	int fd = mkstemp(data_path);
-	if (fd < 0) {
-		log_error("mkstemp failed: %m");
+	// .dat path: output_file with the extension swapped for .dat
+	const char *out = data->output_file;
+	const char *dot = strrchr(out, '.');
+	size_t base = dot ? (size_t)(dot - out) : strlen(out);
+	char *dat_path = xmalloc(base + 5);
+	memcpy(dat_path, out, base);
+	memcpy(dat_path + base, ".dat", 5);
+	if (write_dat(data, dat_path)) {
+		xfree(dat_path);
 		return -1;
 	}
-	FILE *f = fdopen(fd, "w");
-	if (!f) {
-		log_error("fdopen for bode data failed: %m");
-		close(fd);
-		unlink(data_path);
-		return -1;
-	}
-	for (size_t k = 0; k < data->n_freqs; k++)
-		fprintf(f, "%g %g %g\n", data->freqs[k], data->mags[k], data->phases[k]);
-	fclose(f);
 
 	char script_path[64];
-	snprintf(script_path, sizeof(script_path), "/tmp/bode_plot_%d.py", getpid());
+	snprintf(script_path, sizeof(script_path), "/tmp/bode_plot_%d.py",
+		getpid());
 	FILE *script = fopen(script_path, "w");
 	if (!script) {
 		log_error("fopen for plot script failed: %m");
-		unlink(data_path);
+		xfree(dat_path);
 		return -1;
 	}
 	fputs(PLOT_SCRIPT, script);
 	fclose(script);
 
-	char cmd[512];
-	snprintf(cmd, sizeof(cmd), "python3 %s %s %s", script_path, data_path, data->output_file);
+	char title[256];
+	if (data->fit_K != 0.0)
+		snprintf(title, sizeof title,
+			"K(<=%gHz)=%.4f+/-%.4f  tau=%.4fms => %.3f frames "
+			"(incl 1 hidden)  ph resid %.2fdeg  flat %.1f%%",
+			data->k_max_freq, data->fit_K, data->fit_K_err,
+			data->fit_tau_ms, data->fit_frames,
+			data->fit_ph_resid_deg, 100.0*data->fit_mag_flat_rms);
+	else
+		snprintf(title, sizeof title, "Bode Plot");
+
+	char cmd[1024];
+	snprintf(cmd, sizeof(cmd), "python3 %s %s %s '%s'", script_path,
+		dat_path, data->output_file, title);
 	int ret = system(cmd);
 	int ok = (ret != -1) && WIFEXITED(ret) && (WEXITSTATUS(ret) == 0);
 	if (!ok)
@@ -109,36 +308,9 @@ static int generate_plot(struct aylp_bode_plot_data *data)
 			(ret != -1 && WIFEXITED(ret)) ? WEXITSTATUS(ret) : ret);
 	else
 		log_info("Bode plot saved to %s", data->output_file);
-
-	// save data alongside the PDF for offline fitting
-	{
-		const char *out = data->output_file;
-		const char *dot = strrchr(out, '.');
-		size_t base = dot ? (size_t)(dot - out) : strlen(out);
-		char *dat_path = xmalloc(base + 5);
-		memcpy(dat_path, out, base);
-		memcpy(dat_path + base, ".dat", 5);
-		FILE *fdat = fopen(dat_path, "w");
-		if (fdat) {
-			for (size_t k = 0; k < data->n_freqs; k++)
-				fprintf(fdat, "%g %g %g\n",
-					data->freqs[k], data->mags[k], data->phases[k]);
-			fclose(fdat);
-			log_info("Bode data saved to %s", dat_path);
-		}
-		xfree(dat_path);
-	}
-
-	unlink(data_path);
 	unlink(script_path);
+	xfree(dat_path);
 	return ok ? 0 : -1;
-}
-
-static inline double get_time_seconds(void)
-{
-	struct timespec ts;
-	clock_gettime(CLOCK_MONOTONIC, &ts);
-	return ts.tv_sec + ts.tv_nsec * 1e-9;
 }
 
 // get the scalar of interest from the current pipeline state
@@ -180,18 +352,16 @@ static void write_element(struct aylp_state *state, size_t elem,
 	}
 }
 
-// update n_avg_cur and physical time trackers for freq_idx
+// reset per-frequency measurement state
 static void advance_frequency(struct aylp_bode_plot_data *data)
 {
-	double f = data->freqs[data->freq_idx];
 	double now = get_time_seconds();
-
 	data->start_time = now;
 	data->prev_time  = now;
-	data->total_time = 0.0;
-	
-	size_t n = (size_t)(data->n_cycles * data->sample_rate / f);
-	data->n_avg_cur = (n < 50) ? 50 : n;
+	data->integrating = false;
+	data->seg_idx = 0;
+	data->seg_Yc = data->seg_Ys = data->seg_T = 0.0;
+	data->seg_start_phi = 0.0;
 }
 
 
@@ -208,8 +378,13 @@ int bode_plot_init(struct aylp_device *self)
 	data->freq_end     = 0.0;   // resolved to Nyquist below if unset
 	data->n_freqs      = 30;
 	data->n_settle     = 50;
+	data->n_settle_cycles = 2.0;
 	data->n_cycles     = 10.0;
+	data->n_segments   = 7;
 	data->amplitude    = 0.1;
+	data->amplitude2   = 0.0;
+	data->avoid_df     = 0.75;
+	data->k_max_freq   = 30.0;
 	data->output_mode  = BODE_OUTPUT_RAW;
 	data->element      = 0;
 	data->output_file  = xstrdup("bode_plot.pdf");
@@ -241,12 +416,40 @@ int bode_plot_init(struct aylp_device *self)
 		} else if (!strcmp(key, "n_settle")) {
 			data->n_settle = json_object_get_uint64(val);
 			log_trace("n_settle = %zu", data->n_settle);
+		} else if (!strcmp(key, "n_settle_cycles")) {
+			data->n_settle_cycles = json_object_get_double(val);
+			log_trace("n_settle_cycles = %G", data->n_settle_cycles);
 		} else if (!strcmp(key, "n_cycles")) {
 			data->n_cycles = json_object_get_double(val);
 			log_trace("n_cycles = %G", data->n_cycles);
+		} else if (!strcmp(key, "n_segments")) {
+			data->n_segments = json_object_get_uint64(val);
+			log_trace("n_segments = %zu", data->n_segments);
 		} else if (!strcmp(key, "amplitude")) {
 			data->amplitude = json_object_get_double(val);
 			log_trace("amplitude = %G", data->amplitude);
+		} else if (!strcmp(key, "amplitude2")) {
+			data->amplitude2 = json_object_get_double(val);
+			log_trace("amplitude2 = %G", data->amplitude2);
+		} else if (!strcmp(key, "avoid_freqs")) {
+			if (json_object_is_type(val, json_type_array)) {
+				size_t na = json_object_array_length(val);
+				if (na > BODE_MAX_AVOID) na = BODE_MAX_AVOID;
+				for (size_t i = 0; i < na; i++)
+					data->avoid_freqs[i] =
+						json_object_get_double(
+						json_object_array_get_idx(
+						val, i));
+				data->n_avoid = na;
+			}
+		} else if (!strcmp(key, "avoid_df")) {
+			data->avoid_df = fabs(json_object_get_double(val));
+		} else if (!strcmp(key, "k_max_freq")) {
+			data->k_max_freq = json_object_get_double(val);
+		} else if (!strcmp(key, "config")) {
+			xfree(data->config_note);
+			data->config_note = xstrdup(
+				json_object_get_string(val));
 		} else if (!strcmp(key, "start_delay")) {
 			data->start_delay = json_object_get_double(val);
 			log_trace("start_delay = %G s", data->start_delay);
@@ -313,10 +516,39 @@ int bode_plot_init(struct aylp_device *self)
 		log_error("freq_start must be > 0.");
 		return -1;
 	}
+	if (data->n_segments < 3) {
+		log_warn("n_segments %zu < 3 gives meaningless error bars; "
+			"using 3", data->n_segments);
+		data->n_segments = 3;
+	}
+	if (data->n_segments > BODE_MAX_SEGMENTS)
+		data->n_segments = BODE_MAX_SEGMENTS;
+	// integer cycles per segment: boundaries land on excitation-phase
+	// crossings so each segment integrates whole cycles (no partial-cycle
+	// DC/line leakage), and n_segments phasors give the error bars
+	data->cycles_per_seg = round(data->n_cycles / (double)data->n_segments);
+	if (data->cycles_per_seg < 1.0) data->cycles_per_seg = 1.0;
+	double actual = data->cycles_per_seg * (double)data->n_segments;
+	if (fabs(actual - data->n_cycles) > 0.5)
+		log_info("bode_plot: n_cycles %G rounded to %G (%zu segments "
+			"x %G cycles)", data->n_cycles, actual,
+			data->n_segments, data->cycles_per_seg);
+	data->n_cycles = actual;
+	if (data->fg_port && data->amplitude2 > 0.0) {
+		log_warn("bode_plot: amplitude2 is a software-injection "
+			"feature; hardware FG amplitude is quantized -- "
+			"disabling the linearity pass");
+		data->amplitude2 = 0.0;
+	}
 
-	data->freqs  = xcalloc(data->n_freqs, sizeof(double));
-	data->mags   = xcalloc(data->n_freqs, sizeof(double));
-	data->phases = xcalloc(data->n_freqs, sizeof(double));
+	data->freqs   = xcalloc(data->n_freqs, sizeof(double));
+	data->mags    = xcalloc(data->n_freqs, sizeof(double));
+	data->phases  = xcalloc(data->n_freqs, sizeof(double));
+	data->mag_sem = xcalloc(data->n_freqs, sizeof(double));
+	data->ph_sem  = xcalloc(data->n_freqs, sizeof(double));
+	data->quality = xcalloc(data->n_freqs, sizeof(double));
+	data->mags2   = xcalloc(data->n_freqs, sizeof(double));
+	data->phases2 = xcalloc(data->n_freqs, sizeof(double));
 
 	// frequency points: linear or log spaced
 	for (size_t k = 0; k < data->n_freqs; k++) {
@@ -329,17 +561,36 @@ int bode_plot_init(struct aylp_device *self)
 			data->freqs[k] = pow(10.0, log_start + t * (log_end - log_start));
 		}
 	}
+	// nudge grid points off known disturbance lines: a line inside the
+	// lock-in's leakage skirt biases the point coherently (segments do not
+	// average it out), so move the injection avoid_df away instead
+	for (size_t k = 0; k < data->n_freqs; k++) {
+		for (size_t i = 0; i < data->n_avoid; i++) {
+			double d = data->freqs[k] - data->avoid_freqs[i];
+			if (fabs(d) < data->avoid_df) {
+				double moved = data->avoid_freqs[i]
+					+ (d >= 0.0 ? data->avoid_df
+						: -data->avoid_df);
+				log_info("bode_plot: moved sweep point "
+					"%.2f -> %.2f Hz (%.2f Hz line)",
+					data->freqs[k], moved,
+					data->avoid_freqs[i]);
+				data->freqs[k] = moved;
+			}
+		}
+	}
 
 	data->freq_idx   = 0;
+	data->pass       = 0;
 	data->step_count = 0;
 	data->phase      = 0.0;
 	data->prev_value = 0.0;
-	data->Y_cos      = 0.0;
-	data->Y_sin      = 0.0;
 	advance_frequency(data);
 
-	log_info("Sweeping %zu frequencies from %G to %G Hz (~%g cycles each)",
-		data->n_freqs, data->freq_start, data->freq_end, data->n_cycles);
+	log_info("Sweeping %zu frequencies from %G to %G Hz (%zu segments x "
+		"%G cycles each%s)", data->n_freqs, data->freq_start,
+		data->freq_end, data->n_segments, data->cycles_per_seg,
+		data->amplitude2 > 0.0 ? "; second linearity sweep" : "");
 
 	if (data->fg_port) {
 		data->fg_fd = fg_serial_open(data->fg_port);
@@ -431,7 +682,6 @@ int bode_plot_proc(struct aylp_device *self, struct aylp_state *state)
 		double now = get_time_seconds();
 		data->start_time = now;
 		data->prev_time  = now;
-		data->total_time = 0.0;
 	}
 
 	// 2. read output signal y[n] before modifying state
@@ -449,28 +699,55 @@ int bode_plot_proc(struct aylp_device *self, struct aylp_state *state)
 
 	// 4. Compute phase and injection target
 	double f = data->freqs[data->freq_idx];
+	double A = data->pass ? data->amplitude2 : data->amplitude;
 	double phi = 2.0 * M_PI * f * elapsed;
-	double u   = data->amplitude * sin(phi);
+	double u   = A * sin(phi);
 
-	// 5. Calculate current integrand terms using prev_phi: y[n] is the response
-	// to u[n-1] which was injected at prev_phi, not the current phi.
+	// 5. Correlate against prev_phi: y[n] is the response to u[n-1] which
+	// was injected at prev_phi, not the current phi.
 	double corr_phi = (data->step_count > 0) ? data->prev_phi : phi;
 	double curr_cos_term = y * cos(corr_phi);
 	double curr_sin_term = y * sin(corr_phi);
 
-	// 6. Accumulate using trapezoidal integration to eliminate high-frequency phase shift
-	if (data->step_count >= data->n_settle) {
-		if (data->step_count == data->n_settle) {
-			// First integration sample: establish the historical baseline term
+	// 6. Integrate in integer-cycle segments once settled. Settle is both
+	// sample- and cycle-based: 50 samples is far less than a period at
+	// low frequency, and integrating the switch transient biases the point.
+	bool point_done = false;
+	bool settled = data->step_count >= data->n_settle
+		&& elapsed >= data->n_settle_cycles / f;
+	if (settled) {
+		if (!data->integrating) {
+			data->integrating = true;
+			data->seg_idx = 0;
+			data->seg_Yc = data->seg_Ys = data->seg_T = 0.0;
+			data->seg_start_phi = corr_phi;
 			data->prev_cos_term = curr_cos_term;
 			data->prev_sin_term = curr_sin_term;
 		} else {
-			data->Y_cos      += 0.5 * (data->prev_cos_term + curr_cos_term) * dt;
-			data->Y_sin      += 0.5 * (data->prev_sin_term + curr_sin_term) * dt;
-			data->total_time += dt;
-			
+			data->seg_Yc += 0.5 * (data->prev_cos_term + curr_cos_term) * dt;
+			data->seg_Ys += 0.5 * (data->prev_sin_term + curr_sin_term) * dt;
+			data->seg_T  += dt;
+			data->dt_sum += dt;
+			data->dt_n   += 1;
 			data->prev_cos_term = curr_cos_term;
 			data->prev_sin_term = curr_sin_term;
+			// segment boundary on the integer-cycle phase crossing
+			if (corr_phi - data->seg_start_phi
+					>= data->cycles_per_seg * 2.0*M_PI
+					&& data->seg_T > 0.0) {
+				size_t i = data->seg_idx;
+				data->seg_re[i] = 2.0 * data->seg_Ys
+					/ (A * data->seg_T);
+				data->seg_im[i] = 2.0 * data->seg_Yc
+					/ (A * data->seg_T);
+				data->seg_dur[i] = data->seg_T;
+				data->seg_idx++;
+				data->seg_start_phi += data->cycles_per_seg
+					* 2.0*M_PI;
+				data->seg_Yc = data->seg_Ys = data->seg_T = 0.0;
+				if (data->seg_idx >= data->n_segments)
+					point_done = true;
+			}
 		}
 	}
 
@@ -481,40 +758,78 @@ int bode_plot_proc(struct aylp_device *self, struct aylp_state *state)
 	data->prev_phi = phi;
 	data->step_count++;
 
-	// 8. Evaluate termination condition using strict time thresholds
-	double target_duration = data->n_cycles / f;
-	if (data->step_count < data->n_settle || data->total_time < target_duration) {
-		return 0;
+	if (!point_done) return 0;
+
+	// 8. frequency complete: time-weighted coherent mean of the segment
+	// phasors is the point estimate; segment scatter gives the error bars
+	size_t ns = data->n_segments;
+	double Ttot = 0.0, mre = 0.0, mim = 0.0;
+	for (size_t i = 0; i < ns; i++) Ttot += data->seg_dur[i];
+	for (size_t i = 0; i < ns; i++) {
+		double w = data->seg_dur[i] / Ttot;
+		mre += w * data->seg_re[i];
+		mim += w * data->seg_im[i];
 	}
+	double mag = hypot(mre, mim);
+	double phase = atan2(mim, mre);
+	double mag_var = 0.0, ph_var = 0.0, mag_sum = 0.0;
+	for (size_t i = 0; i < ns; i++) {
+		double mi = hypot(data->seg_re[i], data->seg_im[i]);
+		double pi = atan2(data->seg_im[i], data->seg_re[i]);
+		double dp = pi - phase;
+		while (dp >  M_PI) dp -= 2.0*M_PI;
+		while (dp < -M_PI) dp += 2.0*M_PI;
+		mag_var += (mi - mag) * (mi - mag);
+		ph_var  += dp * dp;
+		mag_sum += mi;
+	}
+	mag_var /= (double)(ns - 1);
+	ph_var  /= (double)(ns - 1);
+	double mag_sem = sqrt(mag_var / (double)ns);
+	double ph_sem  = sqrt(ph_var / (double)ns);
+	double qual = mag_sum > 0.0 ? mag / (mag_sum / (double)ns) : 0.0;
 
-	// 9. frequency complete: compute H(f) using total actual elapsed time
-	double T = data->total_time;
-	double A = data->amplitude;
-	
-	double mag = (T > 0.0) ? 2.0 * sqrt(data->Y_cos*data->Y_cos + data->Y_sin*data->Y_sin) / (A * T) : 0.0;
-	double phase = atan2(data->Y_cos, data->Y_sin);
+	size_t k = data->freq_idx;
+	if (data->pass == 0) {
+		data->mags[k] = mag;
+		data->phases[k] = phase;
+		data->mag_sem[k] = mag_sem;
+		data->ph_sem[k] = ph_sem;
+		data->quality[k] = qual;
+	} else {
+		data->mags2[k] = mag;
+		data->phases2[k] = phase;
+	}
+	log_info("%sf=%7.2f Hz  |H|=%8.4f +/- %.4f (%6.1f dB)  ph=%6.1f "
+		"+/- %.1f deg  q=%.3f",
+		data->pass ? "[amp2] " : "", f, mag, mag_sem,
+		20.0*log10(mag + 1e-300), phase * 180.0 / M_PI,
+		ph_sem * 180.0 / M_PI, qual);
+	if (qual < 0.9)
+		log_warn("bode_plot: LOW QUALITY point at %.2f Hz (q=%.3f) "
+			"-- disturbance line or drift inside the window; "
+			"treat with suspicion", f, qual);
 
-	data->mags[data->freq_idx]   = mag;
-	data->phases[data->freq_idx] = phase;
-	log_info("f=%7.2f Hz  |H|=%8.4f (%6.1f dB)  ph=%6.1f deg",
-		data->freqs[data->freq_idx],
-		mag, 20.0*log10(mag + 1e-300),
-		phase * 180.0 / M_PI);
-
-	// 10. advance to next frequency step
+	// 9. advance to next frequency / pass
 	data->freq_idx++;
 	data->step_count = 0;
-	data->phase    = 0.0;
+	data->phase = 0.0;
 	data->prev_phi = 0.0;
-	data->Y_cos    = 0.0;
-	data->Y_sin    = 0.0;
-
 	if (data->freq_idx < data->n_freqs) {
 		advance_frequency(data);
 		return 0;
 	}
+	if (data->pass == 0 && data->amplitude2 > 0.0) {
+		data->pass = 1;
+		data->freq_idx = 0;
+		advance_frequency(data);
+		log_info("bode_plot: main sweep done; starting linearity "
+			"sweep at amplitude %G", data->amplitude2);
+		return 0;
+	}
 
-	// 11. End of sweep: plot results
+	// 10. End of sweep: fit, save, plot
+	bode_fit(data);
 	int ret = generate_plot(data);
 	state->header.status |= AYLP_DONE;
 	return ret;
@@ -532,9 +847,15 @@ int bode_plot_fini(struct aylp_device *self)
 		close(data->fg_fd);
 	}
 	xfree(data->fg_port);
+	xfree(data->config_note);
 	xfree(data->freqs);
 	xfree(data->mags);
 	xfree(data->phases);
+	xfree(data->mag_sem);
+	xfree(data->ph_sem);
+	xfree(data->quality);
+	xfree(data->mags2);
+	xfree(data->phases2);
 	xfree(data->output_file);
 	xfree(data);
 	return 0;

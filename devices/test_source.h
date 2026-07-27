@@ -6,7 +6,7 @@
 struct aylp_test_source_data {
 	// one of ["vector", "matrix", "matrix_uchar"]
 	aylp_type type;
-	// one of ["constant", "sine"]
+	// one of ["constant", "sine", "noise"]
 	unsigned kind;
 	// size of vector or height of matrix
 	size_t size1;
@@ -15,10 +15,20 @@ struct aylp_test_source_data {
 	// frequency of sine oscillation, if applicable; units are radians per
 	// proc() call
 	double frequency;
+	// optional MULTITONE for kind "sine": if nfreqs>0, the output is the sum
+	// of nfreqs equal-amplitude sines at freqs[] (radians per proc() call),
+	// each scaled by amplitude/nfreqs. Lets one in-loop run integrate every
+	// tone over the whole record (max SNR per frequency) so a phase-vs-freq
+	// slope gives the transport delay. "frequency" is ignored when nfreqs>0.
+	size_t nfreqs;
+	double *freqs;
 	// amplitude of sine wave, if applicable
 	double amplitude;
 	// offset of sine wave or value of constant
 	double offset;
+	// PRNG seed for kind "noise" (fixed default so the white-noise stimulus
+	// is reproducible; the emitted sequence is recorded anyway)
+	unsigned seed;
 	// to put in pipeline
 	union {
 		gsl_vector *vector;

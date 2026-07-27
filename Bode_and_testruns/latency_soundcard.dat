@@ -1,0 +1,35 @@
+# ===== latency_test run 2026-07-22T17:14:50 label sc_L =====
+# index_cmd 0 index_err 0 low -1 high 1 period 0.15 warmup 35 cal_cycles 3 n_steps 40 settle_frac 0.4
+# columns: edge direction departure_ms half_ms (-1 = not detected)
+# calibrated: settled_low 0 settled_high 0 step 0 sigma 0 step/sigma inf gain 0
+# FATAL: test aborted before completion (see log)
+# ===== latency_test run 2026-07-22T17:18:15 label sc_L =====
+# index_cmd 0 index_err 0 low -1 high 1 period 0.15 warmup 35 cal_cycles 3 n_steps 40 settle_frac 0.4
+# columns: edge direction departure_ms half_ms (-1 = not detected)
+# ===== latency_test run 2026-07-22T17:20:04 label sc_L =====
+# index_cmd 0 index_err 0 low -1 high 1 period 0.15 warmup 35 cal_cycles 3 n_steps 40 settle_frac 0.4
+# columns: edge direction departure_ms half_ms (-1 = not detected)
+# calibrated: settled_low 0.03087 settled_high 0.0283131 step -0.00167719 sigma 0.0325129 step/sigma 0.1 gain -0.000838593
+# FATAL: test aborted before completion (see log)
+# ===== latency_test run 2026-07-22T17:26:55 label sc_L =====
+# index_cmd 0 index_err 0 low -1 high 1 period 0.15 warmup 35 cal_cycles 3 n_steps 40 settle_frac 0.4
+# columns: edge direction departure_ms half_ms (-1 = not detected)
+# calibrated: settled_low 0.0641974 settled_high 0.0610678 step 0.00324439 sigma 0.0340296 step/sigma 0.1 gain 0.00162219
+# FATAL: test aborted before completion (see log)
+# ===== latency_test run 2026-07-22T17:27:42 label sc_R =====
+# index_cmd 1 index_err 0 low -1 high 1 period 0.15 warmup 35 cal_cycles 3 n_steps 40 settle_frac 0.4
+# columns: edge direction departure_ms half_ms (-1 = not detected)
+# calibrated: settled_low 0.0521614 settled_high 0.0495314 step -0.0023913 sigma 0.0304101 step/sigma 0.1 gain -0.00119565
+# FATAL: test aborted before completion (see log)
+# ===== latency_test run 2026-07-22T17:30:08 label sc_L =====
+# index_cmd 0 index_err 0 low -1 high 1 period 0.02 warmup 10 cal_cycles 8 n_steps 60 settle_frac 0.4
+# columns: edge direction departure_ms half_ms (-1 = not detected)
+# ===== latency_test run 2026-07-22T17:32:47 label sc_L =====
+# index_cmd 0 index_err 0 low -1 high 1 period 0.02 warmup 10 cal_cycles 8 n_steps 60 settle_frac 0.4
+# columns: edge direction departure_ms half_ms (-1 = not detected)
+# ===== latency_test run 2026-07-22T17:32:50 label sc_R =====
+# index_cmd 1 index_err 0 low -1 high 1 period 0.02 warmup 10 cal_cycles 8 n_steps 60 settle_frac 0.4
+# columns: edge direction departure_ms half_ms (-1 = not detected)
+# ===== latency_test run 2026-07-22T17:33:14 label sc_L =====
+# index_cmd 0 index_err 0 low -1 high 1 period 0.02 warmup 10 cal_cycles 8 n_steps 60 settle_frac 0.4
+# columns: edge direction departure_ms half_ms (-1 = not detected)
