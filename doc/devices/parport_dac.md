@@ -151,7 +151,16 @@ DAC output voltage could plausibly have been talking to a device that never
 left device-wide power-down. In the `spi` link, init now writes `SPICONFIG`
 (device active, and `FSDO=1` for `verify`'s benefit — see below), `GENCONFIG`
 (reference on), `DACRANGE` (the configured ranges) and `DACPWDWN` (channels
-on), then parks every channel at its `offset` before the loop starts.
+on), then parks every channel at its `offset` before the loop starts. When
+`verify` is set, all four of those init writes are confirmed over SDO/ACK the
+same way the per-channel writes are (`dac_write_checked()`), each logging its
+own confirmation once (`SPICONFIG write confirmed by SDO/ACK readback: ...`,
+etc.) — so a clean startup rules out the *whole* digital chain up front, not
+just whatever channel write happens to run first. `TRIGGER`'s soft-reset is
+deliberately excluded: its fields are momentary actions (SLASEH2A table 8-17
+types them all "W", reset `0000h`), so reading `SOFT-RESET` back afterward
+isn't expected to still show the `1010b` that was sent — a "mismatch" there
+would be a false alarm, not a real one.
 
 **Register safety.** SLASEH2A 8.6: "All register addresses not listed
 should be considered as reserved locations and the register contents
@@ -221,19 +230,33 @@ Parameters
       latency alone already exceeds the DAC's setup requirement; raise this
       only for long or unterminated wiring.
   - `verify` (boolean) (optional, `spi` link only)
-    - After every write, read the register back over SDO (DB25 pin 10 →
+    - After every write — including the one-shot init sequence
+      (`SPICONFIG`/`GENCONFIG`/`DACRANGE`/`DACPWDWN`), not just the
+      per-channel writes — read the register back over SDO (DB25 pin 10 →
       EVM `DAC_SDO`, only meaningful if that wire is connected) and warn if
-      it doesn't match what was sent (default false). The first time a given
-      channel's readback confirms what was sent, it logs once at `info`
-      level (`channel N write confirmed by SDO/ACK readback: code 0x.... (V
-      V)`); after that it stays quiet on success and only logs again on a
-      problem, so a clean run isn't spammed once per write. Costs two extra
-      24-bit frames per write: a read-command for the address just written,
+      it doesn't match what was sent (default false). Each init write logs
+      its own confirmation once, since it only happens once; the first time
+      a given channel's readback confirms what was sent, it likewise logs
+      once at `info` level (`channel N write confirmed by SDO/ACK
+      readback: code 0x.... (V V)`), then stays quiet on success and only
+      logs again on a problem, so a clean run isn't spammed once per write.
+      Costs two extra 24-bit frames per write: a read-command for the
+      address just written,
       then a NOP frame to shift the answer out — TI's readback convention
       echoes the *previous* cycle's R/W+address alongside the data, so it
-      always trails by one frame. This device cross-checks that echo before
-      trusting the data, and logs (without failing) if the echo itself looks
-      wrong. **Confidence note, updated 2026-07-28 against a local copy of
+      always trails by one frame. **This is meaningfully slower than the
+      unverified path, not just "two more frames" slower**: only the last
+      of the three frames' answer is ever used, but reading it back means a
+      non-posted PCIe status read per bit — unlike every write in this
+      file, which is posted (fire-and-forget), a read has to wait for an
+      actual completion round-trip. Measured 2026-07-28: verified writes
+      run roughly 0.1–0.3 ms, against ~6 µs unverified — call it two orders
+      of magnitude, not a small tax. Treat `verify` as a bring-up/diagnostic
+      tool you turn on to confirm the hardware, not something to leave
+      enabled across a real closed loop. This device cross-checks the echo
+      before trusting the data, and logs (without failing) if the echo
+      itself looks wrong. **Confidence note, updated 2026-07-28 against a
+      local copy of
       SLASEH2A (`dac81404.pdf`):** the frame format, R/W convention, 24-bit
       no-CRC framing, and the read-command-then-second-cycle readback
       protocol above are now confirmed from the datasheet text directly
@@ -254,6 +277,27 @@ Parameters
   - `ack_status_bit` (integer) (optional)
     - Status-register bit carrying SDO (default 6, the standard SPP `/ACK`
       bit position). See the confidence note under `verify`.
+  - `crc` (boolean) (optional, `spi` link only)
+    - Use 32-bit frames with an appended CRC-8 instead of plain 24-bit
+      ones, and turn on `SPICONFIG.CRC-EN` so the device itself rejects
+      (rather than silently accepting) any write whose CRC doesn't check
+      out (default false). Independent of `verify` — protects *every*
+      write, not just ones being read back, so a marginal connection can't
+      quietly land a corrupted voltage. Requires `reset_at_init` (default
+      true): the frame that turns CRC on has to be sent in the old, plain
+      format the device is still expecting, which is only guaranteed if
+      the soft-reset just put the device back to its `CRC-EN=0` default.
+      **Confidence note:** SLASEH2A 8.5.3 gives the polynomial
+      (`x8+x2+x+1`, i.e. `0x07`) and nothing else — no worked example, no
+      stated initial remainder, bit order, or final XOR. The implementation
+      (`crc8_atm()`) uses the standard textbook parameters for that
+      polynomial (initial remainder `0x00`, MSB first, no reflection, no
+      XOR-out); those are assumed to match the device, not confirmed
+      against it. When `verify` is also on, the readback path additionally
+      recomputes the CRC over the echoed content and compares it to what
+      the chip sent — an independent cross-check on top of the existing
+      address-echo check, since matching both by coincidence is far less
+      likely than matching just one.
 
 ### Outputs
 

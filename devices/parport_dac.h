@@ -72,6 +72,12 @@ struct aylp_parport_dac_data {
 	bool verify_confirmed[4];	// per DAC channel: logged its first OK yet?
 	long diag_verify_fail;		// confirmed-wrong writes
 	long diag_verify_unconfirmed;	// echo sanity check failed
+	// frame error checking (SLASEH2A 8.5.3): `crc` is the user's request;
+	// `crc_active` is the runtime state actually governing frame width --
+	// stays false until the SPICONFIG write that turns CRC-EN on has
+	// itself gone out in the old (non-CRC) format, see dac_configure()
+	bool crc;
+	bool crc_active;
 
 	// ------------------------------------------------------------------
 	// outputs -- one stage can drive all four DAC channels
