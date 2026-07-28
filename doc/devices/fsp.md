@@ -35,6 +35,14 @@ Kulcsár 2006, Petit 2008, Meimon 2010, Correia 2010:
    actuator-space correction is passed through the matched stable inverse:
    `u = H^-1(z)*(-phi_hat/K)`. Requiring both `H` and `H^-1` to be stable keeps
    this causal and prevents the fit from hiding an unstable plant inversion.
+4. **Optional drift/transient split.** With `drift_tau > 0`, a slow EWMA state
+   carries DC/random-walk pointing drift and the modal/FIR predictor sees only
+   the remaining vibration. With `transient_sigma > 0`, an unexpectedly large
+   prediction innovation freezes learning and cross-fades from predictive
+   cancellation to a bounded proportional recentering servo. After the
+   innovation remains quiet for `transient_hold`, the predictor is blended
+   back over `transient_ramp`. This gives bumps a direct feedback path without
+   permanently placing a second controller around the predictive loop.
 
 This is the one in-loop mechanism that beats the delay-limited crossover on the
 **predictable** (modal) part of the disturbance. It does nothing for the
@@ -82,6 +90,14 @@ Parameters
   modal-only controller. Attenuation12 uses order 128 and `broad_mu=0.005`;
   attenuation11 showed that 512 taps at 0.03 preserved more high-frequency
   coefficient noise than the additional prediction accuracy justified.
+- `wiener_file`: optional offline initialization for the full-band predictor.
+  The UTF-8 text file must contain exactly `broad_order` non-comment rows,
+  indexed from zero, with columns
+  `index y_w y_w_next x_w x_w_next`. Blank lines and lines beginning with `#`
+  are ignored. The offline solve must use the same `broad_order`, per-axis
+  horizon, `drift_tau`, and `broad_lp` preprocessing as the runtime. After
+  loading, `broad_freeze_closed` and `broad_mu` determine whether the solution
+  stays fixed or continues adapting.
 - `broad_lp`: observer band-limit (odd boxcar taps on the NLMS input; 0 = off).
   The full-band observer is otherwise sensitive out to Nyquist, and any K/delay
   model error leaks command echo into its input as a *predictable* HF signal
@@ -95,6 +111,43 @@ Parameters
   in-band cancellation timing is unchanged (11 taps at 3788 Hz: null 344 Hz,
   <1 % droop at 30 Hz). This removes at the root what the burst guard only
   reacts to; verified 180 s with zero ring vs. a latched limit cycle without it.
+- `drift_tau`: slow-drift EWMA time constant in seconds. `<= 0` preserves the
+  original compound predictor. When enabled, the drift estimate is cancelled
+  separately as constant over the command horizon and is subtracted before
+  the boxcar/modal/FIR vibration observers. Start around 1--5 s: shorter values
+  transfer more low-frequency motion out of the predictor, while longer values
+  leave more of it in the learned vibration model.
+- `transient_sigma`, `transient_floor`: enable large-event recovery and set its
+  innovation threshold to
+  `max(transient_sigma * quiet_innovation_rms, transient_floor)`, in normalized
+  error units. `transient_sigma <= 0` disables the path. The quiet variance is
+  learned with time constant `transient_tau` and is not updated during events.
+- `transient_kp`: proportional gain for the fallback command
+  `u = -(drift_hat + transient_kp * error) / K`; it must satisfy
+  `0 < transient_kp < 1`. Preserving `drift_hat` prevents a bump from releasing
+  the existing slow pointing correction. Keeping the feedback gain below one
+  makes the scalar fixed-delay fallback stable while the clamp bounds command.
+- `transient_tau`, `transient_hold`, `transient_ramp`: quiet innovation-variance
+  time constant, required quiet time after the most recent threshold crossing,
+  and bumpless cross-fade time back to predictive cancellation. NLMS and modal
+  adaptation statistics are frozen throughout the event and return ramp.
+
+A conservative first hardware trial (all values remain opt-in unless included):
+
+```
+"drift_tau":       2.0,
+"transient_sigma": 6.0,
+"transient_floor": 0.03,
+"transient_kp":    0.25,
+"transient_tau":   5.0,
+"transient_hold":  0.10,
+"transient_ramp":  0.25
+```
+
+Set `transient_floor` from a stable run rather than blindly keeping the example:
+it should sit above ordinary single-frame centroid scatter but below the event
+size that needs direct recovery. Count/logged activations should be rare.
+
 - `broad_freeze_closed`: freeze full-band identification when the startup hold
   ends (default true). This is required for safe feedback operation: identify
   while command is known to be zero, then apply a fixed observer. Continuous

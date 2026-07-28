@@ -69,10 +69,13 @@
 // up as a ~3x waterbed at 120-400 Hz in the fsp_sim.py study. A 2nd-order
 // low-pass at cmd_fc rolls that authority off. A plain filter would also lag
 // the in-band line cancellation, so each mode is PRE-COMPENSATED at its
-// center frequency: mode i's AR state is rolled forward n_i EXTRA samples,
-// n_i = round(-arg H(f_i) / omega_i), so the filter's phase lag at that line
-// nets out to ~0, and its contribution is boosted by min(1/|H(f_i)|, 3) to
-// undo the gain droop. (Do NOT "fix" this back to a quadrature rotation of
+// center frequency: mode i's AR state is rolled forward to the real-valued
+// horizon delay + delay_frac + n_i, n_i = -arg H(f_i) / omega_i, so the
+// filter's phase lag at that line nets out to ~0 (the fractional remainder
+// is blended between the two adjacent integer steps, same as the plain
+// delay_frac case, rather than rounding n_i away), and its contribution is
+// boosted by min(1/|H(f_i)|, 3) to undo the gain droop. (Do NOT "fix" this
+// back to a quadrature rotation of
 // the state: extracting the quadrature divides by sin(omega_i), which
 // amplifies the white part of the Kalman state ~1/sin(omega_i) -- ~65x for a
 // 5.6 Hz mode at 2310 Hz -- straight into the command; the fsp_sim.py study
@@ -182,6 +185,15 @@ struct aylp_fsp_axis {
 	double xhat[AYLP_FSP_MAX_DIM];
 	// stationary Kalman gain (column, length dim)
 	double L[AYLP_FSP_MAX_DIM];
+	// Posterior (filtered) variance of each mode's position state,
+	// post_var[i] = P[2i][2i] - L[2i]*PCt[2i] from the converged Riccati
+	// solve (not to be confused with the "Pf" filtered-covariance scratch
+	// matrix local to fsp_solve_gain_iterate). xhat[2i] alone is a biased
+	// estimator of the state's second moment (E[x^2] = Var(xhat) +
+	// post_var, not Var(xhat) alone); the adaptation's energy tracker
+	// adds this back so q doesn't drift low whenever the posterior
+	// variance isn't already negligible.
+	double post_var[AYLP_FSP_MAX_MODES];
 	// Amortized re-identification solve state. The Riccati gain solve is
 	// spread a few iterations per frame (fsp_proc) instead of run in one
 	// burst -- the burst stalled frame delivery ~7 ms every adapt_period and
@@ -205,13 +217,18 @@ struct aylp_fsp_axis {
 	double demod_ph[AYLP_FSP_MAX_MODES];	// running reference phase (rad)
 	double r_ewma;				// EWMA innovation variance floor
 	// command robustness filter: per-mode pre-compensation at the mode
-	// center -- extra prediction steps n_i = round(-arg H(f_i)/omega_i)
-	// cancelling the filter's phase lag, and a capped gain boost
-	// min(1/|H(f_i)|, 3) cancelling its droop -- plus the biquad state
+	// center -- a real-valued extra prediction horizon delay + delay_frac
+	// + n_i, n_i = -arg H(f_i)/omega_i cancelling the filter's phase lag,
+	// plus a capped gain boost min(1/|H(f_i)|, 3) cancelling its droop.
+	// comp_n[i]/comp_frac[i] are that horizon's floor/fractional part
+	// (comp_n[i] = target integer step, comp_frac[i] = blend weight for
+	// comp_n[i]+1), unified with the delay_frac blend so a fractional n_i
+	// is not rounded away when cmd_fc is enabled -- plus the biquad state
 	// (direct form II transposed)
 	size_t comp_n[AYLP_FSP_MAX_MODES];
+	double comp_frac[AYLP_FSP_MAX_MODES];
 	double comp_g[AYLP_FSP_MAX_MODES];
-	size_t max_steps;	// = ax->delay + max_i comp_n[i]
+	size_t max_steps;	// = max_i (comp_n[i] + (comp_frac[i] > 0))
 	double lp_z1, lp_z2;
 	// Optional full-band disturbance observer. This is the scalar FIR
 	// realization of the delayed Wiener/Kalman predictor: it learns the
@@ -222,10 +239,28 @@ struct aylp_fsp_axis {
 	double *broad_w;
 	double *broad_w_next;
 	double *broad_xbuf;
+	// second scratch regressor: the delay+1 predictor's tap window is the
+	// delay predictor's window shifted by one sample (they share broad_
+	// order - 1 taps), so one ring walk fills both xbuf (delay) and
+	// xbuf2 (delay+1) instead of walking the history twice
+	double *broad_xbuf2;
 	// observer prefilter ring: the last broad_lp raw phi samples (see
 	// broad_lp in aylp_fsp_data)
 	double *broad_lpbuf;
 	size_t broad_lphead;
+	// Explicit slow-disturbance state.  When drift_tau > 0 the broadband
+	// and modal predictors see phi - drift_hat, while drift_hat is cancelled
+	// separately as a constant-over-the-horizon component.  This keeps a
+	// large DC/random-walk component from consuming FIR dynamic range.
+	double drift_hat;
+	// Large-innovation recovery path.  The normal predictor is cross-faded
+	// to a bounded delayed proportional servo while transient_active is set;
+	// learning is frozen until the recovery ramp completes.
+	double transient_var;
+	bool transient_active;
+	bool transient_recovering;
+	double transient_t_event;
+	size_t transient_events;
 	// First-order Thiran all-pass state for the fractional command delay:
 	// y(k) = a*u(k) + u(k-1) - a*y(k-1).
 	double frac_x1, frac_y1;
@@ -246,6 +281,13 @@ struct aylp_fsp_axis {
 	double gd_z1, gd_z2;
 	double gd_env;			// fast EWMA of bp^2
 	double gd_base;			// slow EWMA of bp^2 (quiet frames only)
+	// sustained-energy debounce: consecutive over-threshold samples so
+	// long as they persist without the requirement below, a broadband
+	// low-frequency transient's leakage through the band-pass skirts (a
+	// single envelope spike, not a sustained tone) cannot latch a trip
+	size_t gd_over_count;
+	size_t gd_min_samples;		// required consecutive over-threshold
+					// samples before guard_active latches
 	bool guard_active;
 	bool guard_ramping;		// recovery ramp has begun since the trip
 	double guard_t_trip;		// time of the latest trigger (s)
@@ -291,6 +333,20 @@ struct aylp_fsp_data {
 	double adapt_df_max;
 	// EWMA time constant for the adaptation statistics (s)
 	double adapt_tau;
+	// EWMA weight for the per-mode frequency-demodulator phasor. Derived
+	// at init from adapt_df_max (not adapt_tau): the demodulator behaves
+	// like a first-order PLL whose capture range is ~1/(2*pi*time
+	// constant), so sizing it off the (typically much longer) adapt_tau
+	// left it able to reliably track only a small fraction of the
+	// adapt_df_max/update it was nominally allowed -- a big, sudden
+	// frequency shift (e.g. right after a bias move) would read out a
+	// near-arbitrary correction instead of chasing it in. A dedicated,
+	// faster time constant widens the capture range to match the cap.
+	double demod_beta;
+	double demod_tau;	// the time constant demod_beta was derived from;
+				// the angle-to-df conversion (fsp_adapt) must
+				// use the SAME tau the phasor was accumulated
+				// with, not adapt_tau
 	// command robustness low-pass cutoff (Hz); 0 disables. See the header
 	// comment: rolls off command authority where prediction is worthless,
 	// with per-mode phase/gain pre-compensation so the lines still cancel.
@@ -301,6 +357,9 @@ struct aylp_fsp_data {
 	// is not added again (which would double-count the same disturbance).
 	size_t broad_order;
 	double broad_mu;
+	// Optional offline Wiener initialization.  The text file has one row per
+	// tap: index y_w y_w_next x_w x_w_next.  It must contain broad_order rows.
+	char *wiener_file;
 	// Observer band-limit (broad_lp > 0, odd): boxcar prefilter length on the
 	// reconstructed disturbance feeding the full-band observer. The NLMS is
 	// otherwise broadband to Nyquist, and any K/delay model error leaks the
@@ -316,6 +375,22 @@ struct aylp_fsp_data {
 	// (passband droop at 30 Hz is <1%). 0 disables (raw broadband observer).
 	size_t broad_lp;
 	size_t broad_gd;	// = (broad_lp-1)/2, derived at init
+	// Separate slow drift from the vibration predictor. <= 0 preserves the
+	// original compound-disturbance predictor.
+	double drift_tau;
+	double drift_beta;	// derived from drift_tau and fs
+	// Innovation-triggered transient/reacquisition path. transient_sigma <= 0
+	// disables it.  During an event, a stable bounded P servo
+	// u=-(drift_hat+transient_kp*e)/K replaces vibration prediction without
+	// releasing the slow correction, then cross-fades back after
+	// transient_hold quiet seconds over transient_ramp seconds.
+	double transient_sigma;
+	double transient_floor;
+	double transient_kp;
+	double transient_tau;
+	double transient_beta;	// quiet innovation-variance EWMA weight
+	double transient_hold;
+	double transient_ramp;
 	// Identification is safest under a known zero command. When true, NLMS
 	// weights freeze as soon as the startup hold ends.
 	bool broad_freeze_closed;
@@ -338,6 +413,13 @@ struct aylp_fsp_data {
 	double guard_tick;	// s between ticker lines; 0 silences the ticker
 	double guard_beta_fast;	// EWMA weights derived at init
 	double guard_beta_slow;
+	// Sustained-energy requirement (cycles at this axis's gd_f0) the
+	// envelope must stay over threshold before a trip latches, so a
+	// single-envelope-window transient (measured cause of a past false
+	// trip: low-frequency pointing content leaking through the band-pass
+	// skirts) can't fire the guard the way a genuine sustained
+	// regeneration ring does. <= 0 keeps the old single-sample trigger.
+	double guard_min_cycles;
 	double t_tick;		// last ticker print (s)
 	size_t guard_events;	// total activations, both axes
 	// Stall-gap handling (see header comment). Patch histories when the

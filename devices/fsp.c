@@ -1,5 +1,6 @@
 #include <time.h>
 #include <math.h>
+#include <stdio.h>
 #include <string.h>
 #include <errno.h>
 #include <sys/mman.h>
@@ -132,7 +133,11 @@ static int fsp_solve_gain_iterate(struct aylp_fsp_axis *ax, size_t niter)
 	return 0;
 }
 
-// final gain L = P C^T / (C P C^T + r) from the converged covariance.
+// final gain L = P C^T / (C P C^T + r) from the converged covariance, plus
+// each mode's posterior (filtered) position-state variance post_var_i =
+// P_ii - L_i * PCt_i (P is symmetric, so C P's column i equals PCt[i]).
+// post_var debiases the adaptation's state-energy estimator: xhat[2i] alone
+// systematically understates E[x_i^2] by exactly this posterior variance.
 static int fsp_solve_gain_finalize(struct aylp_fsp_axis *ax)
 {
 	size_t D = ax->dim;
@@ -147,6 +152,10 @@ static int fsp_solve_gain_finalize(struct aylp_fsp_axis *ax)
 	for (size_t i = 0; i < ax->n_modes; i++) S += PCt[2*i];
 	if (!isfinite(S) || S <= 0.0) return -1;
 	for (size_t rI = 0; rI < D; rI++) ax->L[rI] = PCt[rI] / S;
+	for (size_t i = 0; i < ax->n_modes; i++) {
+		double pv = P[(2*i)*D + (2*i)] - ax->L[2*i] * PCt[2*i];
+		ax->post_var[i] = pv > 0.0 ? pv : 0.0;
+	}
 	return 0;
 }
 
@@ -189,9 +198,15 @@ static void fsp_build_modes(struct aylp_fsp_axis *ax, double fs)
 // design one axis's burst-guard band-pass (RBJ constant-peak band-pass) at
 // the parasitic-loop regeneration frequency fs/(2*(delay+delay_frac)), the
 // frequency where any plant-model mismatch rings (~310-340 Hz on this bench).
-// Q = 1.5 spans the measured 250-450 Hz hump.
-static void fsp_build_guard(struct aylp_fsp_axis *ax, double fs)
+// Q = 1.5 spans the measured 250-450 Hz hump. Also derives the sustained-
+// energy debounce (guard_min_cycles periods of this axis's f0) below which a
+// momentary envelope spike -- e.g. low-frequency pointing content leaking
+// through the band-pass skirts, a false trip observed in practice -- cannot
+// latch a trip the way a genuinely sustained regeneration ring does.
+static void fsp_build_guard(struct aylp_fsp_axis *ax,
+	const struct aylp_fsp_data *data)
 {
+	double fs = data->fs;
 	double f0 = fs / (2.0 * ((double)ax->delay + ax->delay_frac));
 	if (f0 > 0.45 * fs) f0 = 0.45 * fs;
 	ax->gd_f0 = f0;
@@ -202,6 +217,10 @@ static void fsp_build_guard(struct aylp_fsp_axis *ax, double fs)
 	ax->gd_b2 = -alpha / a0;
 	ax->gd_a1 = -2.0 * cos(w0) / a0;
 	ax->gd_a2 = (1.0 - alpha) / a0;
+	size_t min_samples = 0;
+	if (data->guard_min_cycles > 0.0 && f0 > 0.0)
+		min_samples = (size_t)(data->guard_min_cycles * fs / f0 + 0.5);
+	ax->gd_min_samples = min_samples;
 }
 
 // design the shared command-filter biquad (RBJ cookbook low-pass, Q=1/sqrt2)
@@ -220,43 +239,53 @@ static void fsp_build_cmdlp(struct aylp_fsp_data *data)
 }
 
 // (re)compute one axis's per-mode pre-compensation for the command filter:
-// evaluate H(e^{j2pi f_i/fs}) at each mode center and store the extra
-// prediction steps n_i = round(-arg H / omega_i) that cancel the filter's
+// evaluate H(e^{j2pi f_i/fs}) at each mode center to get the real-valued
+// extra prediction horizon n_i = -arg H / omega_i that cancels the filter's
 // phase lag at that line, plus the capped gain boost min(1/|H|, 3) that
 // cancels its droop. Called at init and on every adaptation tick (f_i wander
 // moves the compensation point). See fsp.h for why this is a roll-forward
 // and NOT a quadrature rotation.
+//
+// The mode's full real-valued forward horizon is delay + delay_frac + n_i;
+// comp_n[i]/comp_frac[i] store its floor/fractional part so the per-sample
+// prediction loop can blend the same way the plain delay_frac case already
+// did, rather than rounding n_i to the nearest integer step and discarding
+// a fractional phase advance whenever cmd_fc is enabled. With cmd_fc <= 0,
+// n_i = 0 for every mode and this reduces exactly to the old delay_frac-only
+// blend (comp_n[i] = delay, comp_frac[i] = delay_frac).
 static void fsp_build_comp(struct aylp_fsp_axis *ax,
 	const struct aylp_fsp_data *data)
 {
-	ax->max_steps = ax->delay;
+	ax->max_steps = ax->delay + (ax->delay_frac > 0.0);
 	for (size_t i = 0; i < ax->n_modes; i++) {
-		if (data->cmd_fc <= 0.0) {
-			ax->comp_n[i] = 0;
-			ax->comp_g[i] = 1.0;
-			continue;
+		double n = 0.0, g = 1.0;
+		if (data->cmd_fc > 0.0) {
+			double w = 2.0 * M_PI * ax->f[i] / data->fs;
+			// H(z) at z = e^{jw}: (b0 + b1 z^-1 + b2 z^-2)/(1 + a1
+			// z^-1 + a2 z^-2), evaluated with real/imag parts
+			double c1 = cos(w), s1 = -sin(w);	// z^-1
+			double c2 = cos(2*w), s2 = -sin(2*w);	// z^-2
+			double nr = data->lp_b0 + data->lp_b1*c1 + data->lp_b2*c2;
+			double ni = data->lp_b1*s1 + data->lp_b2*s2;
+			double dr = 1.0 + data->lp_a1*c1 + data->lp_a2*c2;
+			double di = data->lp_a1*s1 + data->lp_a2*s2;
+			double dd = dr*dr + di*di;
+			double hr = (nr*dr + ni*di) / dd;
+			double hi = (ni*dr - nr*di) / dd;
+			double mag = hypot(hr, hi);
+			g = mag > 1e-9 ? 1.0/mag : 3.0;
+			if (g > 3.0) g = 3.0;
+			double th = -atan2(hi, hr);	// phase advance (rad, >= 0)
+			n = th / w;
 		}
-		double w = 2.0 * M_PI * ax->f[i] / data->fs;
-		// H(z) at z = e^{jw}: (b0 + b1 z^-1 + b2 z^-2)/(1 + a1 z^-1
-		// + a2 z^-2), evaluated with real/imag parts
-		double c1 = cos(w), s1 = -sin(w);		// z^-1
-		double c2 = cos(2*w), s2 = -sin(2*w);		// z^-2
-		double nr = data->lp_b0 + data->lp_b1*c1 + data->lp_b2*c2;
-		double ni = data->lp_b1*s1 + data->lp_b2*s2;
-		double dr = 1.0 + data->lp_a1*c1 + data->lp_a2*c2;
-		double di = data->lp_a1*s1 + data->lp_a2*s2;
-		double dd = dr*dr + di*di;
-		double hr = (nr*dr + ni*di) / dd;
-		double hi = (ni*dr - nr*di) / dd;
-		double mag = hypot(hr, hi);
-		double g = mag > 1e-9 ? 1.0/mag : 3.0;
-		if (g > 3.0) g = 3.0;
-		double th = -atan2(hi, hr);	// phase advance (rad, >= 0)
-		size_t n = (size_t)(th/w + 0.5);
-		ax->comp_n[i] = n;
+		double horizon = (double)ax->delay + ax->delay_frac + n;
+		size_t ti = (size_t)horizon;
+		double tf = horizon - (double)ti;
+		ax->comp_n[i] = ti;
+		ax->comp_frac[i] = tf;
 		ax->comp_g[i] = g;
-		if (ax->delay + n > ax->max_steps)
-			ax->max_steps = ax->delay + n;
+		size_t steps = ti + (tf > 0.0);
+		if (steps > ax->max_steps) ax->max_steps = steps;
 	}
 }
 
@@ -275,6 +304,120 @@ static size_t fsp_get_darray(struct json_object *val, double *dst, size_t max)
 		);
 	return n;
 }
+
+// Load a deterministic offline Wiener solution. The text format is one row
+// per tap: index y_w y_w_next x_w x_w_next. Blank lines and # comments are
+// ignored. Exact contiguous indices prevent silent order/file mismatches.
+static int fsp_load_wiener(struct aylp_fsp_data *data)
+{
+	if (!data->wiener_file) return 0;
+	if (!data->broad_order) {
+		log_error("fsp: wiener_file requires broad_order > 0.");
+		return -1;
+	}
+	FILE *fp = fopen(data->wiener_file, "r");
+	if (!fp) {
+		log_error("fsp: could not open Wiener weights \"%s\": %s",
+			data->wiener_file, strerror(errno));
+		return -1;
+	}
+	char line[4096];
+	size_t row = 0, lineno = 0;
+	int ret = 0;
+	while (fgets(line, sizeof line, fp)) {
+		lineno++;
+		char *p = line;
+		while (*p == ' ' || *p == '\t') p++;
+		if (!*p || *p == '\n' || *p == '#') continue;
+		size_t idx;
+		double yw, ywn, xw, xwn;
+		char extra;
+		int n = sscanf(p, "%zu %lf %lf %lf %lf %c",
+			&idx, &yw, &ywn, &xw, &xwn, &extra);
+		if (n != 5 || idx != row || row >= data->broad_order
+				|| !isfinite(yw) || !isfinite(ywn)
+				|| !isfinite(xw) || !isfinite(xwn)) {
+			log_error("fsp: invalid Wiener row at %s:%zu (expected "
+				"contiguous index %zu and four finite weights)",
+				data->wiener_file, lineno, row);
+			ret = -1;
+			break;
+		}
+		data->axis[0].broad_w[row] = yw;
+		data->axis[0].broad_w_next[row] = ywn;
+		data->axis[1].broad_w[row] = xw;
+		data->axis[1].broad_w_next[row] = xwn;
+		row++;
+	}
+	if (!ret && ferror(fp)) {
+		log_error("fsp: error reading Wiener weights \"%s\"",
+			data->wiener_file);
+		ret = -1;
+	}
+	fclose(fp);
+	if (!ret && row != data->broad_order) {
+		log_error("fsp: Wiener file \"%s\" has %zu rows; broad_order "
+			"requires exactly %zu", data->wiener_file, row,
+			data->broad_order);
+		ret = -1;
+	}
+	if (!ret)
+		log_info("fsp: initialized y/x %zu-tap predictors from offline "
+			"Wiener solution %s", row, data->wiener_file);
+	return ret;
+}
+
+
+// Update the innovation-triggered recovery state and return the fraction of
+// transient P control to use (0 = normal predictor, 1 = transient servo).
+static double fsp_transient_update(struct aylp_fsp_axis *ax,
+	const struct aylp_fsp_data *data, double resid, double authority,
+	double now, size_t axis)
+{
+	if (data->transient_sigma <= 0.0 || !isfinite(resid)) return 0.0;
+	double sigma = sqrt(fmax(ax->transient_var, 0.0));
+	double threshold = data->transient_sigma * sigma;
+	if (threshold < data->transient_floor)
+		threshold = data->transient_floor;
+	bool event = authority > 0.0 && fabs(resid) > threshold;
+
+	if (!ax->transient_active && event) {
+		ax->transient_active = true;
+		ax->transient_recovering = false;
+		ax->transient_t_event = now;
+		ax->transient_events++;
+		log_warn("fsp: transient recovery on %s axis (event %zu): "
+			"|innovation| %.4G > %.4G; using Kp=%G fallback",
+			axis == 0 ? "y" : "x", ax->transient_events,
+			fabs(resid), threshold, data->transient_kp);
+	} else if (ax->transient_active && event) {
+		ax->transient_t_event = now;
+		ax->transient_recovering = false;
+	} else if (!ax->transient_active) {
+		ax->transient_var += data->transient_beta
+			* (resid * resid - ax->transient_var);
+	}
+
+	if (!ax->transient_active) return 0.0;
+	double quiet = now - ax->transient_t_event;
+	if (quiet <= data->transient_hold) return 1.0;
+	if (!ax->transient_recovering) {
+		ax->transient_recovering = true;
+		log_info("fsp: %s transient quiet; cross-fading back to the "
+			"predictor over %G s", axis == 0 ? "y" : "x",
+			data->transient_ramp);
+	}
+	double ramp = data->transient_ramp > 0.0
+		? data->transient_ramp : 1e-9;
+	double mix = 1.0 - (quiet - data->transient_hold) / ramp;
+	if (mix <= 0.0) {
+		ax->transient_active = false;
+		ax->transient_recovering = false;
+		return 0.0;
+	}
+	return mix;
+}
+
 
 // Jury stability test for z^2 + c1*z + c2.  The same test is applied to
 // plant_a (forward filter poles) and plant_b/b0 (inverse-filter poles), making
@@ -444,6 +587,13 @@ int fsp_init(struct aylp_device *self)
 	data->broad_mu = 0.03;
 	data->broad_lp = 0;		// raw broadband observer unless asked
 	data->broad_freeze_closed = true;
+	data->drift_tau = 0.0;		// compound predictor unless asked
+	data->transient_sigma = 0.0;	// transient fallback is opt-in
+	data->transient_floor = 0.02;
+	data->transient_kp = 0.25;
+	data->transient_tau = 5.0;
+	data->transient_hold = 0.10;
+	data->transient_ramp = 0.25;
 	data->trip_frames = 8;
 	// burst guard defaults: on. Quiet-bench 250-450 Hz envelope is ~0.003
 	// normalized; the floor keeps the bar at 4 * 0.008 = 0.032 (~0.5 px),
@@ -453,6 +603,9 @@ int fsp_init(struct aylp_device *self)
 	data->guard_hold = 0.25;
 	data->guard_ramp = 1.0;
 	data->guard_tick = 10.0;
+	// require ~3 cycles of sustained envelope before latching a trip;
+	// <= 0 reverts to the old single-sample trigger
+	data->guard_min_cycles = 3.0;
 	// stall-gap patch default: on. The response is proportional to the
 	// frames missed (pad + continue, no authority change), so the trigger
 	// can sit just above normal cadence jitter: 2 ms is ~7 frames at
@@ -500,8 +653,29 @@ int fsp_init(struct aylp_device *self)
 			data->broad_order = json_object_get_uint64(val);
 		} else if (!strcmp(key, "broad_mu")) {
 			data->broad_mu = json_object_get_double(val);
+		} else if (!strcmp(key, "wiener_file")) {
+			xfree(data->wiener_file);
+			data->wiener_file =
+				xstrdup(json_object_get_string(val));
 		} else if (!strcmp(key, "broad_lp")) {
 			data->broad_lp = json_object_get_uint64(val);
+		} else if (!strcmp(key, "drift_tau")) {
+			data->drift_tau = json_object_get_double(val);
+		} else if (!strcmp(key, "transient_sigma")) {
+			data->transient_sigma = json_object_get_double(val);
+		} else if (!strcmp(key, "transient_floor")) {
+			data->transient_floor =
+				fabs(json_object_get_double(val));
+		} else if (!strcmp(key, "transient_kp")) {
+			data->transient_kp = json_object_get_double(val);
+		} else if (!strcmp(key, "transient_tau")) {
+			data->transient_tau = json_object_get_double(val);
+		} else if (!strcmp(key, "transient_hold")) {
+			data->transient_hold =
+				fabs(json_object_get_double(val));
+		} else if (!strcmp(key, "transient_ramp")) {
+			data->transient_ramp =
+				fabs(json_object_get_double(val));
 		} else if (!strcmp(key, "broad_freeze_closed")) {
 			data->broad_freeze_closed = json_object_get_boolean(val);
 		} else if (!strcmp(key, "trip_error")) {
@@ -520,6 +694,8 @@ int fsp_init(struct aylp_device *self)
 			data->guard_ramp = fabs(json_object_get_double(val));
 		} else if (!strcmp(key, "guard_tick")) {
 			data->guard_tick = fabs(json_object_get_double(val));
+		} else if (!strcmp(key, "guard_min_cycles")) {
+			data->guard_min_cycles = json_object_get_double(val);
 		} else if (!strcmp(key, "gap_trip")) {
 			data->gap_trip = json_object_get_double(val);
 		} else if (!strcmp(key, "y") || !strcmp(key, "axis_y")) {
@@ -554,6 +730,14 @@ int fsp_init(struct aylp_device *self)
 	if (data->broad_order && (data->broad_mu <= 0.0
 			|| data->broad_mu >= 2.0)) {
 		log_error("fsp: broad_mu must satisfy 0 < broad_mu < 2.");
+		return -1;
+	}
+	if (data->transient_sigma > 0.0
+			&& (data->transient_kp <= 0.0
+				|| data->transient_kp >= 1.0
+				|| data->transient_tau <= 0.0)) {
+		log_error("fsp: enabled transient recovery requires "
+			"0 < transient_kp < 1 and transient_tau > 0.");
 		return -1;
 	}
 	if (data->broad_lp) {
@@ -614,12 +798,32 @@ int fsp_init(struct aylp_device *self)
 	// stall-gap DC pad: ~0.5 s EWMA -- slow enough to average the
 	// vibration lines out, fast enough to track intra-run drift
 	data->gap_dc_beta = 1.0 - exp(-1.0 / (0.5 * data->fs));
+	// frequency-demodulator time constant: sized to adapt_df_max (a
+	// first-order PLL's capture range is ~1/(2*pi*tau)), not to
+	// adapt_tau, so a large sudden line shift is actually within the
+	// range the correction cap was meant to chase, instead of reading
+	// out a near-arbitrary phase once adapt_tau makes the capture range
+	// far narrower than adapt_df_max advertises.
+	data->demod_tau = data->adapt_df_max > 0.0
+		? 1.0 / (2.0 * M_PI * data->adapt_df_max)
+		: (data->adapt_tau > 0.0 ? data->adapt_tau : 5.0);
+	data->demod_beta = 1.0 - exp(-1.0 / (data->demod_tau * data->fs));
+	if (data->adapt_period > 0.0 && data->adapt_df_max > 0.0)
+		log_info("fsp: frequency-demod time constant %.3G s (capture "
+			"range ~%.3G Hz, cap %G Hz/update)", data->demod_tau,
+			1.0 / (2.0 * M_PI * data->demod_tau), data->adapt_df_max);
+	if (data->drift_tau > 0.0)
+		data->drift_beta =
+			1.0 - exp(-1.0 / (data->drift_tau * data->fs));
+	if (data->transient_sigma > 0.0)
+		data->transient_beta =
+			1.0 - exp(-1.0 / (data->transient_tau * data->fs));
 
 	for (int a = 0; a < 2; a++) {
 		struct aylp_fsp_axis *ax = &data->axis[a];
 		fsp_build_modes(ax, data->fs);
 		fsp_build_comp(ax, data);
-		if (data->guard_ratio > 0.0) fsp_build_guard(ax, data->fs);
+		if (data->guard_ratio > 0.0) fsp_build_guard(ax, data);
 		if (fsp_solve_gain(ax)) {
 			log_error("fsp: Riccati solve failed on %s axis; check "
 				"q/r and mode params.", a == 0 ? "y" : "x");
@@ -636,11 +840,14 @@ int fsp_init(struct aylp_device *self)
 			ax->broad_w_next = xcalloc(data->broad_order,
 				sizeof(double));
 			ax->broad_xbuf = xcalloc(data->broad_order, sizeof(double));
+			ax->broad_xbuf2 = xcalloc(data->broad_order, sizeof(double));
 			if (data->broad_lp)
 				ax->broad_lpbuf = xcalloc(data->broad_lp,
 					sizeof(double));
 		}
 		ax->r_ewma = ax->r;
+		ax->transient_var =
+			data->transient_floor * data->transient_floor;
 		for (size_t i = 0; i < ax->n_modes; i++) {
 			// q_ewma tracks the mode's STATE energy; seed it at the
 			// stationary energy implied by the configured drive q
@@ -659,6 +866,7 @@ int fsp_init(struct aylp_device *self)
 				ax->plant_b[0], ax->plant_b[1], ax->plant_b[2],
 				ax->plant_a[1], ax->plant_a[2]);
 	}
+	if (fsp_load_wiener(data)) return -1;
 	if (data->broad_order)
 		log_info("fsp: full-band %zu-state disturbance predictor, horizon "
 			"y %zu+%.3G / x %zu+%.3G frames, NLMS mu %G",
@@ -675,16 +883,27 @@ int fsp_init(struct aylp_device *self)
 		log_warn("fsp: observer band-limit DISABLED (broad_lp = 0): the "
 			"NLMS can learn/chase HF command echo from K/delay "
 			"mismatch (see the 2026-07-22 380 Hz ring)");
+	if (data->drift_tau > 0.0)
+		log_info("fsp: slow drift separated from vibration prediction "
+			"with %G s EWMA", data->drift_tau);
+	if (data->transient_sigma > 0.0)
+		log_info("fsp: transient path on: trigger %G sigma (floor %G), "
+			"Kp %G, quiet hold %G s, return ramp %G s",
+			data->transient_sigma, data->transient_floor,
+			data->transient_kp, data->transient_hold,
+			data->transient_ramp);
 	if (data->trip_error > 0.0 || data->trip_command > 0.0)
 		log_info("fsp: latched safety trip: error=%G command=%G for %zu "
 			"frames", data->trip_error, data->trip_command,
 			data->trip_frames);
 	if (data->guard_ratio > 0.0)
 		log_info("fsp: burst guard on: y %.0f Hz / x %.0f Hz detectors, "
-			"trigger %Gx over max(baseline, %G), hold %G s + ramp "
-			"%G s, ticker every %G s", data->axis[0].gd_f0,
-			data->axis[1].gd_f0, data->guard_ratio,
-			data->guard_floor, data->guard_hold, data->guard_ramp,
+			"trigger %Gx over max(baseline, %G) sustained %zu/%zu "
+			"samples (%G cycles), hold %G s + ramp %G s, ticker "
+			"every %G s", data->axis[0].gd_f0, data->axis[1].gd_f0,
+			data->guard_ratio, data->guard_floor,
+			data->axis[0].gd_min_samples, data->axis[1].gd_min_samples,
+			data->guard_min_cycles, data->guard_hold, data->guard_ramp,
 			data->guard_tick);
 	else
 		log_warn("fsp: burst guard DISABLED (guard_ratio <= 0)");
@@ -757,9 +976,15 @@ static void fsp_adapt(struct aylp_fsp_data *data)
 					double ang = atan2(ax->demod_im[i],
 						ax->demod_re[i]);
 					// ang is the residual phase over the
-					// window; convert to a small df, capped
+					// window; convert to a small df, capped.
+					// Must divide by the SAME time constant
+					// the phasor was accumulated with
+					// (demod_tau, sized to adapt_df_max),
+					// not adapt_tau -- otherwise the readout
+					// and the conversion disagree on what
+					// window "ang" was measured over.
 					double df = ang / (2.0 * M_PI)
-						* (1.0 / data->adapt_tau);
+						* (1.0 / data->demod_tau);
 					if (df > data->adapt_df_max)
 						df = data->adapt_df_max;
 					if (df < -data->adapt_df_max)
@@ -888,26 +1113,25 @@ int fsp_proc(struct aylp_device *self, struct aylp_state *state)
 					ax->xhat[2*i] = p0;
 				}
 			}
-			// Pad the NLMS history with the slow DC estimate of
-			// the disturbance: phases across the hole are
-			// unknowable, but this keeps the prediction carrying
-			// the DC correction straight through (no release), and
-			// real frames refill the tap window in ~H/fs.
+			// Pad the vibration history with the estimated AC residual.
+			// The separately tracked drift state carries the DC correction
+			// through the gap; phases across the hole are unknowable.
 			if (data->broad_order) {
 				size_t H = ax->broad_hist_len;
 				size_t nh = miss < H ? miss : H;
+				double phi_pad = ax->phi_dc - ax->drift_hat;
 				for (size_t k = 0; k < nh; k++) {
 					ax->broad_head = (ax->broad_head + 1)
 						% H;
 					ax->broad_hist[ax->broad_head] =
-						ax->phi_dc;
+						phi_pad;
 				}
 				// pad the observer prefilter ring the same way
 				size_t nl = miss < data->broad_lp
 					? miss : data->broad_lp;
 				for (size_t k = 0; k < nl; k++) {
 					ax->broad_lpbuf[ax->broad_lphead] =
-						ax->phi_dc;
+						phi_pad;
 					ax->broad_lphead = (ax->broad_lphead
 						+ 1) % data->broad_lp;
 				}
@@ -979,25 +1203,42 @@ int fsp_proc(struct aylp_device *self, struct aylp_state *state)
 				* base;
 			over = ax->gd_env > thr;
 			if (!ax->guard_active && frac > 0.0 && over) {
-				ax->guard_active = true;
-				ax->guard_ramping = false;
-				ax->guard_t_trip = now;
-				ax->guard_events++;
-				data->guard_events++;
-				if (now - ax->guard_t_log > 2.0) {
-					ax->guard_t_log = now;
-					log_warn("fsp: burst guard tripped on "
-						"%s axis (event %zu): %.0f Hz "
-						"envelope %.3G > %.3G; holding "
-						"authority at 0 for %G s, then "
-						"ramping back over %G s",
-						j == 0 ? "y" : "x",
-						ax->guard_events, ax->gd_f0,
-						sqrt(ax->gd_env), sqrt(thr),
-						data->guard_hold,
-						data->guard_ramp);
+				// sustained-energy debounce: require the
+				// envelope to stay over threshold for
+				// gd_min_samples consecutive samples before
+				// latching. A genuine regeneration ring stays
+				// over for many cycles; a single spike from
+				// low-frequency content leaking through the
+				// band-pass skirts (the observed false-trip
+				// mode) does not.
+				ax->gd_over_count++;
+				size_t need = ax->gd_min_samples > 0
+					? ax->gd_min_samples : 1;
+				if (ax->gd_over_count >= need) {
+					ax->guard_active = true;
+					ax->guard_ramping = false;
+					ax->gd_over_count = 0;
+					ax->guard_t_trip = now;
+					ax->guard_events++;
+					data->guard_events++;
+					if (now - ax->guard_t_log > 2.0) {
+						ax->guard_t_log = now;
+						log_warn("fsp: burst guard tripped on "
+							"%s axis (event %zu): %.0f Hz "
+							"envelope %.3G > %.3G sustained "
+							"%zu samples; holding authority "
+							"at 0 for %G s, then ramping "
+							"back over %G s",
+							j == 0 ? "y" : "x",
+							ax->guard_events, ax->gd_f0,
+							sqrt(ax->gd_env), sqrt(thr),
+							ax->gd_over_count,
+							data->guard_hold,
+							data->guard_ramp);
+					}
 				}
 			} else if (!ax->guard_active && frac > 0.0 && !over) {
+				ax->gd_over_count = 0;
 				// learn the quiet baseline only outside bursts
 				ax->gd_base += data->guard_beta_slow
 					* (ax->gd_env - ax->gd_base);
@@ -1064,6 +1305,12 @@ int fsp_proc(struct aylp_device *self, struct aylp_state *state)
 		// slow DC estimate of the reconstructed disturbance, used to
 		// pad the NLMS history across a stall gap
 		ax->phi_dc += data->gap_dc_beta * (phi_meas - ax->phi_dc);
+		// Optional two-timescale model: cancel drift as a separate state and
+		// train the vibration predictor only on the zero-mean residual.
+		if (data->drift_tau > 0.0)
+			ax->drift_hat += data->drift_beta
+				* (phi_meas - ax->drift_hat);
+		double phi_vib = phi_meas - ax->drift_hat;
 
 		// Full compound-disturbance observer (Kulcsar/Petit/Meimon):
 		// identify the delay-step conditional mean of the reconstructed
@@ -1071,15 +1318,16 @@ int fsp_proc(struct aylp_device *self, struct aylp_state *state)
 		// is an FIR state-space realization; NLMS tracks slow spectrum drift
 		// without a large online covariance matrix.
 		double broad_hat = 0.0;
+		double transient_mix = 0.0;
 		if (data->broad_order) {
 			size_t P = data->broad_order, H = ax->broad_hist_len;
 			// Observer band-limit (see fsp.h): boxcar the raw phi so
 			// the NLMS never sees (nor learns to chase) the HF command
 			// echo; its exact integer group delay broad_gd is added to
 			// the prediction horizon below, so in-band timing holds.
-			double phi_bl = phi_meas;
+			double phi_bl = phi_vib;
 			if (data->broad_lp) {
-				ax->broad_lpbuf[ax->broad_lphead] = phi_meas;
+				ax->broad_lpbuf[ax->broad_lphead] = phi_vib;
 				ax->broad_lphead = (ax->broad_lphead + 1)
 					% data->broad_lp;
 				double sum = 0.0;
@@ -1090,20 +1338,43 @@ int fsp_proc(struct aylp_device *self, struct aylp_state *state)
 			size_t bd = delay + data->broad_gd;
 			ax->broad_hist[ax->broad_head] = phi_bl;
 			if (ax->broad_seen >= H) {
+				// The delay-tap and (delay+1)-tap regressors are the
+				// same P-sample window shifted by one, sharing P-1
+				// taps: read the union (P+1 samples) once instead of
+				// walking the ring twice. xbuf/pred1/energy1 belong to
+				// the delay predictor (broad_w); xbuf2/pred2/energy2 to
+				// the delay+1 predictor (broad_w_next).
 				size_t idx = (ax->broad_head + H - bd) % H;
-				double pred = 0.0, energy = 1e-12;
-				for (size_t i = 0; i < P; i++) {
-					double v = ax->broad_hist[idx];
+				double pred1 = 0.0, energy1 = 1e-12;
+				double pred2 = 0.0, energy2 = 1e-12;
+				double v = ax->broad_hist[idx];	// walk1-only tap
+				ax->broad_xbuf[0] = v;
+				pred1 += ax->broad_w[0] * v;
+				energy1 += v * v;
+				idx = idx ? idx - 1 : H - 1;
+				for (size_t i = 1; i < P; i++) {
+					v = ax->broad_hist[idx];
 					ax->broad_xbuf[i] = v;
-					pred += ax->broad_w[i] * v;
-					energy += v * v;
+					pred1 += ax->broad_w[i] * v;
+					energy1 += v * v;
+					ax->broad_xbuf2[i - 1] = v;
+					pred2 += ax->broad_w_next[i - 1] * v;
+					energy2 += v * v;
 					idx = idx ? idx - 1 : H - 1;
 				}
-				double pe = phi_bl - pred;
+				v = ax->broad_hist[idx];		// walk2-only tap
+				ax->broad_xbuf2[P - 1] = v;
+				pred2 += ax->broad_w_next[P - 1] * v;
+				energy2 += v * v;
+
+				double pe = phi_bl - pred1;
+				transient_mix = fsp_transient_update(ax, data, pe,
+					frac * g_gain, now, j);
+				if (ax->transient_active) suppress = true;
 				bool train = (!data->broad_freeze_closed
 					|| in_hold) && !suppress;
 				if (train && isfinite(pe)) {
-					double step = data->broad_mu * pe / energy;
+					double step = data->broad_mu * pe / energy1;
 					for (size_t i = 0; i < P; i++)
 						ax->broad_w[i] += step * ax->broad_xbuf[i];
 				} else if (!isfinite(pe)) {
@@ -1112,22 +1383,13 @@ int fsp_proc(struct aylp_device *self, struct aylp_state *state)
 				// Identify the adjacent delay+1 predictor. Their weighted
 				// combination is the conditional mean at the fractional
 				// Bode-fit horizon.
-				idx = (ax->broad_head + H - bd - 1) % H;
-				pred = 0.0; energy = 1e-12;
-				for (size_t i = 0; i < P; i++) {
-					double v = ax->broad_hist[idx];
-					ax->broad_xbuf[i] = v;
-					pred += ax->broad_w_next[i] * v;
-					energy += v * v;
-					idx = idx ? idx - 1 : H - 1;
-				}
-				pe = phi_bl - pred;
-				if (train && isfinite(pe)) {
-					double step = data->broad_mu * pe / energy;
+				double pe2 = phi_bl - pred2;
+				if (train && isfinite(pe2)) {
+					double step = data->broad_mu * pe2 / energy2;
 					for (size_t i = 0; i < P; i++)
 						ax->broad_w_next[i] += step
-							* ax->broad_xbuf[i];
-				} else if (!isfinite(pe)) {
+							* ax->broad_xbuf2[i];
+				} else if (!isfinite(pe2)) {
 					memset(ax->broad_w_next, 0, P * sizeof(double));
 				}
 				idx = ax->broad_head;
@@ -1157,7 +1419,7 @@ int fsp_proc(struct aylp_device *self, struct aylp_state *state)
 			xpred[2*i+1] = p1;
 			Cxpred += p0;
 		}
-		double innov = phi_meas - Cxpred;
+		double innov = phi_vib - Cxpred;
 		if (!isfinite(innov)) {
 			// bad sample: reset the estimate, output 0; still advance
 			// this axis's command ring to keep the delay line in step
@@ -1170,6 +1432,11 @@ int fsp_proc(struct aylp_device *self, struct aylp_state *state)
 		}
 		for (size_t d = 0; d < ax->dim; d++)
 			ax->xhat[d] = xpred[d] + ax->L[d] * innov;
+		if (!data->broad_order) {
+			transient_mix = fsp_transient_update(ax, data, innov,
+				frac * g_gain, now, j);
+			if (ax->transient_active) suppress = true;
+		}
 
 		// --- adaptation statistics (cheap, per sample); frozen while
 		// the burst guard is active so the ringing never contaminates
@@ -1177,26 +1444,41 @@ int fsp_proc(struct aylp_device *self, struct aylp_state *state)
 		if (beta > 0.0 && !suppress) {
 			ax->r_ewma += beta * (innov*innov - ax->r_ewma);
 			for (size_t i = 0; i < ax->n_modes; i++) {
-				double amp = ax->xhat[2*i]*ax->xhat[2*i];
+				// E[x_i^2] = Var(xhat_i) + post_var_i, not
+				// xhat_i^2 alone -- omitting post_var
+				// understates true modal energy whenever the
+				// posterior variance isn't already negligible,
+				// biasing q low and, via the Riccati solve, the
+				// gain low right along with it (see post_var's
+				// definition in fsp.h).
+				double amp = ax->xhat[2*i]*ax->xhat[2*i]
+					+ ax->post_var[i];
 				ax->q_ewma[i] += beta * (amp - ax->q_ewma[i]);
 				// quadrature demod of the reconstructed
 				// disturbance at the nominal line, to sense
-				// frequency drift
+				// frequency drift. Uses demod_beta, not beta:
+				// the demodulator is a first-order PLL whose
+				// capture range is ~1/(2*pi*time constant), so
+				// it needs a time constant sized to
+				// adapt_df_max (see demod_beta in fsp.h), not
+				// to the (typically much slower) adapt_tau
+				// used for r_ewma/q_ewma above.
 				ax->demod_ph[i] += 2.0*M_PI*ax->f[i]/data->fs;
 				if (ax->demod_ph[i] > M_PI)
 					ax->demod_ph[i] -= 2.0*M_PI;
-				ax->demod_re[i] += beta * (phi_meas
+				ax->demod_re[i] += data->demod_beta * (phi_vib
 					* cos(ax->demod_ph[i]) - ax->demod_re[i]);
-				ax->demod_im[i] += beta * (phi_meas
+				ax->demod_im[i] += data->demod_beta * (phi_vib
 					* sin(ax->demod_ph[i]) - ax->demod_im[i]);
 			}
 		}
 
 		// --- delay-step prediction: run the AR mean forward, harvesting
-		// mode i's (boosted) contribution at its own step count
-		// delay + comp_n[i], so the command filter's phase lag at that
-		// line nets out to ~0; the minimum-variance command cancels the
-		// predicted sum ---
+		// mode i's (boosted) contribution at its own real-valued
+		// horizon delay + delay_frac + n_i (comp_n[i]/comp_frac[i],
+		// its floor/fractional part -- see fsp_build_comp), so the
+		// command filter's phase lag at that line nets out to ~0; the
+		// minimum-variance command cancels the predicted sum ---
 		double p_now[AYLP_FSP_MAX_DIM];
 		memcpy(p_now, ax->xhat, ax->dim * sizeof(double));
 		double phi_hat = 0.0;
@@ -1206,19 +1488,32 @@ int fsp_proc(struct aylp_device *self, struct aylp_state *state)
 					+ ax->a2[i]*p_now[2*i+1];
 				p_now[2*i+1] = p_now[2*i];
 				p_now[2*i] = p0;
-				if (step == delay + ax->comp_n[i])
-					phi_hat += ax->comp_g[i] * p0;
+				size_t target = ax->comp_n[i];
+				double tf = ax->comp_frac[i];
+				if (step == target)
+					phi_hat += ax->comp_g[i]
+						* (1.0 - tf) * p0;
+				else if (tf > 0.0 && step == target + 1)
+					phi_hat += ax->comp_g[i] * tf * p0;
 			}
 		}
 
 		// The full-band predictor and modal predictor estimate the same
 		// disturbance. Select, do not sum, to avoid double cancellation.
-		double cancel_hat = data->broad_order ? broad_hat : phi_hat;
-		// Ask for the actuator-space correction v=-phi_hat/K (scaled by the
-		// burst guard's authority g_gain), then apply the matched stable
-		// inverse H^-1.  The physical Bode-shaped plant turns this back into
-		// K H H^-1 v = -phi_hat at the transport horizon.
-		double v = -frac * g_gain * cancel_hat / ax->K;
+		double vibration_hat = data->broad_order ? broad_hat : phi_hat;
+		double predictive_hat = ax->drift_hat + vibration_hat;
+		// Normal operation cancels the separately estimated drift plus the
+		// predicted vibration. A large innovation cross-fades to a bounded
+		// delayed P servo on the actual residual error, which reacts to an
+		// unmodeled bump without asking the learned FIR to extrapolate it.
+		double v_predictive = -predictive_hat / ax->K;
+		// Preserve the existing slow pointing correction during recovery;
+		// only the vibration predictor is replaced by direct feedback.
+		double v_transient =
+			-(ax->drift_hat + data->transient_kp * e) / ax->K;
+		double v = frac * g_gain
+			* ((1.0 - transient_mix) * v_predictive
+				+ transient_mix * v_transient);
 		double u = v;
 		if (ax->plant_shaped)
 			u = fsp_biquad(v, ax->plant_ib, ax->plant_ia,
@@ -1342,15 +1637,23 @@ int fsp_fini(struct aylp_device *self)
 		log_warn("fsp: %zu frame gap(s) patched this run (source "
 			"stalled or hiccuped; check asi_source recovery lines)",
 			data->gap_events);
+	if (data->transient_sigma > 0.0)
+		log_info("fsp transient final: %zu activations (y %zu / x %zu)",
+			data->axis[0].transient_events
+				+ data->axis[1].transient_events,
+			data->axis[0].transient_events,
+			data->axis[1].transient_events);
 	for (int a = 0; a < 2; a++) {
 		xfree(data->axis[a].ucmd);
 		xfree(data->axis[a].broad_hist);
 		xfree(data->axis[a].broad_w);
 		xfree(data->axis[a].broad_w_next);
 		xfree(data->axis[a].broad_xbuf);
+		xfree(data->axis[a].broad_xbuf2);
 		xfree(data->axis[a].broad_lpbuf);
 	}
 	if (data->res_v) xfree_type(gsl_vector, data->res_v);
+	xfree(data->wiener_file);
 	xfree(data);
 	return 0;
 }
