@@ -21,6 +21,7 @@
 #include "devices/udp_source.h"
 #include "devices/vonkarman_stream.h"
 #include "devices/piplate_bridge.h"
+#include "devices/parport_dac.h"
 #include "devices/bode_plot.h"
 #include "devices/latency_test.h"
 #include "devices/attenuation_test.h"
@@ -49,6 +50,7 @@ static const struct {
 	{ "anyloop:udp_source", udp_source_init },
 	{ "anyloop:vonkarman_stream", vonkarman_stream_init },
 	{ "anyloop:piplate_bridge", piplate_bridge_init },
+	{ "anyloop:parport_dac", parport_dac_init },
 	{ "anyloop:bode_plot", bode_plot_init },
 	{ "anyloop:latency_test", latency_test_init },
 	{ "anyloop:attenuation_test", attenuation_test_init },

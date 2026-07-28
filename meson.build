@@ -45,6 +45,7 @@ project_source_files = [
 	'devices/udp_source.c',
 	'devices/vonkarman_stream.c',
 	'devices/piplate_bridge.c',
+	'devices/parport_dac.c',
 	'devices/bode_plot.c',
 	'devices/latency_test.c',
 	'devices/attenuation_test.c'

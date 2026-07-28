@@ -1,0 +1,77 @@
+{
+ "_comment": {
+  "1": "STANDALONE parport_dac smoke test -- no camera, no FSM. Drives a slow",
+  "2": "0.2 Hz sine into DACA/DACB of the BP-DAC81404EVM over the PEX1P2's DB25",
+  "3": "so you can watch the outputs on a meter or scope. Loop is paced to 200",
+  "4": "Hz by the delay stage. Range is the FSM's +-10 V; scale 2 / offset 0",
+  "5": "sweeps +-2 V, i.e. the same swing per command unit the piplate/DAQC2",
+  "6": "fine channels had (2 V/unit), so the existing pid/fsp gains still apply.",
+  "7": "Raising scale toward 10 multiplies the loop gain and needs a re-bode.",
+  "8": "",
+  "9": "EVM SETUP for a bipolar range: J11 to 1-2 (bipolar), AVSS = -15 V on",
+  "10": "J17 pin 5, AVDD = +15 V on J17 pin 4 (rule: AVDD >= Vmax + 1.5 V, AVSS",
+  "11": "<= Vmin - 1.5 V, AVDD - AVSS <= 42 V), DVDD = 5 V on J17 pin 1 (4.5 V",
+  "12": "minimum -- 3.3 V is NOT enough), IOVDD = 3.3 V via J1 pin 1 or J20.",
+  "13": "",
+  "14": "MUST RUN AS ROOT (mapping a PCI BAR needs CAP_SYS_RAWIO), and it unbinds",
+  "15": "parport_pc from 0000:05:00.2 -- rebind afterwards with:",
+  "16": "  echo 0000:05:00.2 | sudo tee /sys/bus/pci/drivers/parport_pc/bind",
+  "17": "Wiring: DB25 pin 2 = D0 = SCLK -> EVM J1 physical pin 13; pin 3 = D1 =",
+  "18": "SDIN -> J4 pin 12; pin 4 = D2 = SYNC -> J4 pin 18; grounds 18-25 -> J4",
+  "19": "pin 2 and J1 pin 4. Data pins measure 3.3 V (safe); the DB25 CONTROL",
+  "20": "pins measure 4.94 V -- do not connect those to the EVM.",
+  "21": "To check the plumbing without root, set backend to \"ppdev\" (slow).",
+  "22": "To check the plumbing without any DAC attached, leave probe true and",
+  "23": "watch for the 'data register verified' line at init."
+ },
+ "pipeline": [
+  {
+   "uri": "anyloop:test_source",
+   "params": {
+    "type": "vector",
+    "kind": "sine",
+    "size1": 2,
+    "frequency": 0.2,
+    "amplitude": 1.0,
+    "offset": 0.0
+   }
+  },
+  {
+   "uri": "anyloop:parport_dac",
+   "params": {
+    "backend": "mmio",
+    "pci": "0000:05:00.2",
+    "link": "spi",
+    "channel": [
+     0,
+     1
+    ],
+    "index": [
+     0,
+     1
+    ],
+    "range": "+-10",
+    "scale": [
+     2,
+     2
+    ],
+    "offset": [
+     0,
+     0
+    ]
+   }
+  },
+  {
+   "uri": "anyloop:delay",
+   "params": {
+    "ns": 5000000
+   }
+  },
+  {
+   "uri": "anyloop:stop_after_count",
+   "params": {
+    "count": 4000
+   }
+  }
+ ]
+}

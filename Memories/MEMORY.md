@@ -1,0 +1,4 @@
+- [DAQC2 UART-to-analog project](daqc2-uart-dac-project.md) — EFM8 reflash plan, protocol, flashing route, PC sender benchmarks
+- [OptiPlex sushi serial quirks](optiplex-sushi-serial-port-quirks.md) — ttyS0 IRQ permanently dead, direct-register access is the fast path; SB disabled
+- [Parallel card + DAC81404 plan](parallel-card-dac81404-plan.md) — PEX1P2/AX99100 → BP-DAC81404EVM: MMIO bit-bang plan, and restrap-to-hardware-SPI option (restrap now deprioritized)
+- [Pico parallel→SPI DAC bridge](pico-parallel-to-spi-dac-bridge.md) — CHOSEN route: DB25 → RP2350 PIO → SPI → DAC81404; 0.3 ms camera closed loop, 5 V caveat, researched dead ends
