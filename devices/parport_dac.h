@@ -59,12 +59,19 @@ struct aylp_parport_dac_data {
 	// spi link: which data pin (D0-D7) carries each SPI signal
 	int sclk_bit;
 	int sdin_bit;
-	int sync_bit;
+	int sync_bit;		// SYNC: active-low frame bracket (SLASEH2A pin name, no "Z")
 	// pico link: which control line clocks a byte in, and where the
 	// channel number sits
 	int clk_ctrl_bit;
 	int chan_ctrl_shift;
 	long delay_ns;		// extra dwell after each edge (0 = none)
+	// readback (spi link only): confirm each write by reading the
+	// register back over SDO/ACK
+	bool verify;
+	int ack_status_bit;	// status-register bit carrying SDO (default 6)
+	bool verify_confirmed[4];	// per DAC channel: logged its first OK yet?
+	long diag_verify_fail;		// confirmed-wrong writes
+	long diag_verify_unconfirmed;	// echo sanity check failed
 
 	// ------------------------------------------------------------------
 	// outputs -- one stage can drive all four DAC channels

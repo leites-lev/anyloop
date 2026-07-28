@@ -1,0 +1,95 @@
+{
+ "_comment": {
+  "1": "STANDALONE parport_dac 2V test -- no camera, no FSM. Drives a constant",
+  "2": "2.0 V onto DACA (channel 0) of the BP-DAC81404EVM and holds it there so",
+  "3": "you can confirm it on a meter. Uses the \"+-10\" bipolar range to match",
+  "4": "the bench's actual jumpering/supplies (J11 to 1-2, AVSS = -15 V on J17",
+  "5": "pin 5, AVDD = +15 V on J17 pin 4, DVDD = 5 V on J17 pin 1 -- 3.3 V is NOT",
+  "6": "enough for DVDD), same as the sine smoke test, not the unipolar default.",
+  "7": "",
+  "8": "The 2.0 V comes entirely from parport_dac's own \"offset\" param, with",
+  "9": "\"scale\" set to 0 -- so the pipeline's command value is multiplied away",
+  "10": "and the output is exactly offset, every iteration, regardless of what",
+  "11": "test_source sends. That decouples the voltage from any upstream noise",
+  "12": "or clipping, which is what you want for a fixed reference-voltage check.",
+  "13": "",
+  "14": "\"verify\": true reads each write back over SDO/ACK (DB25 pin 10, which",
+  "15": "is wired on this bench) and warns if the DAC doesn't confirm 2.0 V.",
+  "16": "IMPORTANT CAVEAT (2026-07-28, after reading a local copy of the DAC81404",
+  "17": "datasheet, dac81404.pdf): the frame/readback format itself is now",
+  "18": "confirmed from the datasheet text, and parport_dac.c now forces",
+  "19": "SPICONFIG.FSDO=1 so SDO updates on the edges this code samples. What is",
+  "20": "still NOT confirmed is which AX99100 status-register bit ACK physically",
+  "21": "lands on for THIS card (not in the DAC datasheet at all -- only the",
+  "22": "data/control pin levels were bench-measured) and whether the DAC",
+  "23": "preloads its first readback bit before any clock edge. Watch the log",
+  "24": "for 'readback echo mismatch' -- if you see it, ack_status_bit (default",
+  "25": "6) or that alignment assumption is wrong, and a quiet run should not be",
+  "26": "trusted as proof until that's resolved.",
+  "27": "",
+  "28": "ALSO NOTE: parport_dac.c previously never cleared SPICONFIG.DEV-PWDWN,",
+  "29": "a device-wide power-down bit that defaults to 1 at reset -- separate",
+  "30": "from GENCONFIG's reference power-down and DACPWDWN's per-channel bits,",
+  "31": "both of which WERE already being cleared. That means every prior bench",
+  "32": "session that only measured SPI bus timing (frames/s) rather than an",
+  "33": "actual output voltage could have been talking to a device that was",
+  "34": "still device-wide powered down the whole time. This is now fixed (init",
+  "35": "writes SPICONFIG before GENCONFIG), so this file is a genuine first",
+  "36": "test of whether the DAC actually outputs anything at all, not just of",
+  "37": "whether the bus wiring is right.",
+  "38": "",
+  "39": "MUST RUN AS ROOT (mapping a PCI BAR needs CAP_SYS_RAWIO), and it unbinds",
+  "40": "parport_pc from 0000:05:00.2 -- rebind afterwards with:",
+  "41": "  echo 0000:05:00.2 | sudo tee /sys/bus/pci/drivers/parport_pc/bind",
+  "42": "",
+  "43": "Wiring (matches what's already on the bench): DB25 pin 2 = D0 = SCLK,",
+  "44": "pin 3 = D1 = SDIN, pin 4 = D2 = SYNC, pin 10 = ACK = SDO (readback),",
+  "45": "grounds 18-25 -> EVM J4 pin 2 AND J1 pin 4 (both -- SCLK is on J1,",
+  "46": "SDIN/SYNC on J4). LDAC tied low via a grounded wire (same effect as",
+  "47": "the EVM's own J2 1-2 jumper). Pin names here are the DAC81404's own",
+  "48": "(SYNC/LDAC, no \"Z\" -- confirmed against the datasheet); the EVM's own",
+  "49": "schematic net label for the SYNC net happens to be DAC_SYNCZ, which is",
+  "50": "the board's notation, not the chip's pin name.",
+  "51": "",
+  "52": "There is no stop_after_count -- it holds 2 V forever until Ctrl+C. On",
+  "53": "exit, parport_dac_fini() only idles the SPI bus (SCLK/SYNC high); it",
+  "54": "does NOT write a new code to the DAC, so the DAC81404's internal DAC0",
+  "55": "register keeps holding the 2 V code and the output stays at 2 V after",
+  "56": "the process exits, until something else writes that register or resets",
+  "57": "the DAC.",
+  "58": "",
+  "59": "To check the plumbing without root, set backend to \"ppdev\" (slow, ~4 us",
+  "60": "per edge -- fine for a static level like this)."
+ },
+ "pipeline": [
+  {
+   "uri": "anyloop:test_source",
+   "params": {
+    "type": "vector",
+    "kind": "constant",
+    "size1": 1,
+    "offset": 0.0
+   }
+  },
+  {
+   "uri": "anyloop:parport_dac",
+   "params": {
+    "backend": "mmio",
+    "pci": "0000:05:00.2",
+    "link": "spi",
+    "channel": 0,
+    "index": 0,
+    "range": "+-10",
+    "scale": 0.0,
+    "offset": 2.0,
+    "verify": true
+   }
+  },
+  {
+   "uri": "anyloop:delay",
+   "params": {
+    "ns": 100000000
+   }
+  }
+ ]
+}

@@ -16,7 +16,7 @@ Alternative to the DAQC2 reflash (as of July 2026): StarTech PEX1P2 1-port paral
 
 **Plan A (unmodified card): MMIO bit-bang SPI**
 - SCLK/SDIN/SYNC on data pins D0–D2 + GND; optional SDO readback on ACK (DB25 pin 10). ~50 writes per 24-bit frame → est. 60–200 kS/s.
-- Needs: DB25 male breakout (card has no internal header), dupont wires, 33–100 Ω series R on SCLK, leads <20 cm. EVM IOVDD = 3.3 V (AX99100 is 3.3 V logic — verify swing with meter before connecting; 5 V would violate DAC abs-max at 3.3 V IOVDD). LDAC tied low, CLR inactive.
+- Needs: DB25 male breakout (card has no internal header), dupont wires, 33–100 Ω series R on SCLK, leads <20 cm. EVM IOVDD = 3.3 V (AX99100 is 3.3 V logic — verify swing with meter before connecting; 5 V would violate DAC abs-max at 3.3 V IOVDD). LDAC tied low, CLR inactive. (Note added 2026-07-28: the chip's own datasheet names these pins SYNC/LDAC, no "Z" — the EVM schematic's `DAC_SYNCZ` net label is the board's own active-low notation, not the chip pin name.)
 - Software: unbind parport_pc, find BARs via lspci -v, reuse ioperm-era RT recipe (SCHED_FIFO + /dev/cpu_dma_latency) from ~/uart-tests. DAC81404 powers up with outputs off — init must write range-select + power-up registers.
 
 **Plan B (restrap card to hardware SPI, verified in datasheet):**

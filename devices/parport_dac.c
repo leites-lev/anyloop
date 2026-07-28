@@ -9,9 +9,10 @@
 // Two ways to get from the DB25 to the DAC, selected by `link`:
 //
 //   link="spi" (default) -- the DB25 data pins ARE the SPI bus: D0=SCLK,
-//     D1=SDIN, D2=SYNC by default (all configurable), GND on 18-25. We
-//     bit-bang the 24-bit frames ourselves: 2 stores per bit plus the frame
-//     brackets. MEASURED 2026-07-27 over mmio: 156 k frames/s = 6.4 us per
+//     D1=SDIN, D2=SYNC by default (all configurable), GND on 18-25. SYNC and
+//     LDAC are both active-low pins, per TI's own naming (SLASEH2A pin table
+//     -- no "Z" suffix; see the polarity note below). We bit-bang the 24-bit
+//     frames ourselves: 2 stores per bit plus the frame
 //     channel update (~123 ns per store, effective SCLK ~3.75 MHz, far under
 //     the DAC's 50 MHz ceiling). Nothing but wires between the card and the
 //     BP-DAC81404EVM, so this works today.
@@ -37,6 +38,21 @@
 // CONTROL line, not D0. Control lines are pins 1 (STROBE), 14 (AUTOFD), 16
 // (INIT), 17 (SELECT); all but INIT are inverted between register bit and pin,
 // which pp_write_ctrl() folds in so callers work in pin polarity.
+//
+// POLARITY: the DAC's frame-bracket pin is SYNC and its load-strobe pin is
+// LDAC, both active-low -- confirmed 2026-07-28 against a locally saved copy
+// of SLASEH2A (dac81404.pdf, opened with pdftotext -- TI's own pin table
+// literally reads "SDO SCLK SDIN SYNC LDAC GND IOVDD CLR", no "Z" anywhere).
+// This file briefly called them SYNCZ/LDACZ, reasoning from the BP-DAC81404
+// EVM's *schematic* net name `DAC_SYNCZ` (SLAU825) -- that's the EVM board
+// designer's own active-low notation for the net, not the chip's pin name,
+// and the datasheet is the authority for what the pin is actually called.
+// The bit-bang logic was never affected either way (SYNC is driven low to
+// open a frame and high to close it, see spi_frame() below); only the name
+// wobbled. LDAC is never driven by this code at all -- it is hardwired low
+// (jumper or a grounded wire), so the DAC updates its output the instant
+// SYNC latches a DACx write; there is nothing for software to get right or
+// wrong about its polarity.
 //
 // ROOT / DRIVER: the mmio backend needs CAP_SYS_RAWIO (run as root) and needs
 // parport_pc off the device, which `unbind` does by default (rebind after with
@@ -75,8 +91,8 @@
 //
 // Params (link):
 //   link      -- "spi" (default) or "pico"
-//   sclk_bit, sdin_bit, sync_bit -- data pins carrying the SPI signals in spi
-//                link (defaults 0, 1, 2 = DB25 pins 2, 3, 4)
+//   sclk_bit, sdin_bit, sync_bit -- data pins carrying the SPI signals in
+//                spi link (defaults 0, 1, 2 = DB25 pins 2, 3, 4)
 //   clk_ctrl_bit -- control line clocking bytes into the bridge in pico link:
 //                0=STROBE(pin 1) 1=AUTOFD(14) 2=INIT(16) 3=SELECT(17)
 //                (default 0)
@@ -85,6 +101,28 @@
 //   delay_ns  -- extra dwell after each edge, nanoseconds (default 0). The
 //                store latency alone is usually enough setup/hold for the
 //                DAC; raise it if the wiring is long or unterminated
+//   verify    -- spi link only; after each write, read the register back
+//                over SDO/ACK (DB25 pin 10 -> status register) and warn if
+//                it does not match what we sent (default false). Costs two
+//                extra 24-bit frames per write. dac_configure() forces
+//                SPICONFIG.FSDO=1 so SDO updates on the same SCLK falling
+//                edges this file already samples on, per SLASEH2A 8.6.4 --
+//                confirmed against a local copy of the datasheet 2026-07-28.
+//                Two things are still NOT confirmed, though: whether the
+//                DAC's shift register preloads its first output bit before
+//                any clock edge (the timing diagram for this is a vector
+//                graphic pdftotext can't read, only the daisy-chain figure
+//                had extractable bit labels), which would shift every
+//                sampled bit by one position; and which AX99100 status
+//                register bit ACK actually lands on for THIS card (that's
+//                not in the DAC's datasheet at all -- it would need the
+//                AX99100 datasheet or a bench measurement). See
+//                dac_write_and_verify()'s echo check, which exists
+//                specifically to catch both failure modes rather than
+//                silently trusting misaligned data.
+//   ack_status_bit -- status-register bit carrying SDO (default 6, the
+//                standard SPP ACK bit position; unverified on this card,
+//                see `verify` above)
 //
 // Params (outputs -- same meaning as piplate_bridge, so configs port over):
 //   channel   -- DAC channel(s), 0=DACA 1=DACB 2=DACC 3=DACD, scalar or array
@@ -105,11 +143,12 @@
 //   reset_at_init -- issue a DAC soft reset before configuring (default true;
 //                spi link only)
 //
-// The DAC81404 wakes up with its reference and all four output amplifiers
-// powered down, so in spi link init writes GENCONFIG (reference on), DACRANGE
-// (the configured ranges) and DACPWDWN (channels on) before parking every
-// channel at its `offset`. Codes are MSB-aligned straight binary across the
-// selected range.
+// The DAC81404 wakes up device-wide powered down (SPICONFIG.DEV-PWDWN) with
+// its reference and all four output amplifiers powered down too, so in spi
+// link init writes SPICONFIG (device active), GENCONFIG (reference on),
+// DACRANGE (the configured ranges) and DACPWDWN (channels on) before parking
+// every channel at its `offset`. Codes are MSB-aligned straight binary
+// across the selected range.
 
 #include <errno.h>
 #include <fcntl.h>
@@ -140,6 +179,11 @@
 #define SPP_DATA_DEFAULT    0x280
 #define SPP_STATUS_DEFAULT  0x284
 #define SPP_CONTROL_DEFAULT 0x288
+// Standard SPP status-register bit for /ACK, direct (not inverted, unlike
+// BUSY). This is a generic ISA-parallel-port convention, NOT something
+// measured on this card's status register the way the data/control pin
+// levels were -- see `verify`'s doc comment.
+#define SPP_STATUS_ACK_DEFAULT 6
 // the ECP ECR lives in the same block, not in the second memory BAR (BAR5
 // holds the AX99100's own configuration registers and does not mirror it)
 #define SPP_ECR_DEFAULT     0x2A8
@@ -156,6 +200,7 @@
 #define DAC_REG_DEVICEID  0x01
 #define DAC_REG_SPICONFIG 0x03
 #define DAC_REG_GENCONFIG 0x04
+#define DAC_REG_BRDCONFIG 0x05
 #define DAC_REG_SYNCCONFIG 0x06
 #define DAC_REG_DACPWDWN  0x09
 #define DAC_REG_DACRANGE  0x0A
@@ -167,8 +212,22 @@
 #define DAC_GENCONFIG_REF_ON 0x0000
 // DACPWDWN bits 3-0 are per-channel power-DOWN flags, set at reset
 #define DAC_PWDWN_ALL_ON 0xFFF0
-// TRIGGER SOFT-RESET[3:0] = 1010b
+// TRIGGER SOFT-RESET[3:0] = 1010b (SLASEH2A table 8-17, "reserved code 1010
+// to reset the device to the default state")
 #define DAC_TRIGGER_SOFT_RESET 0x000A
+// SPICONFIG reset value is 0x0AA4 (SLASEH2A 8.6.4), which has bit 5
+// (DEV-PWDWN) set -- the WHOLE DEVICE, not just the reference or individual
+// channels, wakes up powered down, separately from GENCONFIG.REF-PWDWN and
+// DACPWDWN's per-channel bits. Found 2026-07-28 reading a local copy of the
+// datasheet: nothing in this file was ever clearing it, so every prior
+// bench session that only measured SPI bus timing rather than an actual DAC
+// output voltage could have been driving a device that was still in
+// device-wide power-down the whole time. This value clears DEV-PWDWN (bit 5)
+// and sets FSDO=1 (bit 1, SDO updates on SCLK falling edges -- see
+// spi_frame_rw()'s doc comment for why that matters to `verify`), keeping
+// SDO-EN=1 and CRC-EN=0 at their reset defaults and leaving the alarm-enable
+// bits (11, 9) as-is.
+#define DAC_SPICONFIG_ACTIVE 0x0A86
 
 #define DAC_CODE_MAX 65535
 // seconds between throughput reports
@@ -222,6 +281,22 @@ static double monotonic_s(void)
 	return t.tv_sec + 1e-9 * t.tv_nsec;
 }
 
+/** Round a target voltage to the code the DAC will actually produce. Data are
+* MSB-aligned straight binary across the configured range (SLASEH2A 8.6.12). */
+static int volts_to_code(double volts, double vmin, double vmax)
+{
+	double frac = (volts - vmin) / (vmax - vmin);
+	long c = lround(frac * DAC_CODE_MAX);
+	if (c < 0) c = 0;
+	if (c > DAC_CODE_MAX) c = DAC_CODE_MAX;
+	return (int)c;
+}
+
+static double code_to_volts(int code, double vmin, double vmax)
+{
+	return vmin + (vmax - vmin) * code / DAC_CODE_MAX;
+}
+
 // ---------------------------------------------------------------------------
 // parallel port register access
 
@@ -264,6 +339,18 @@ static inline void pp_write_ctrl(struct aylp_parport_dac_data *data, uint8_t v)
 		ioctl(data->pp_fd, PPWCONTROL, &c);
 	}
 	pp_dwell(data);
+}
+
+/** Read the status register (holds SDO/ACK among other input pins). */
+static inline uint8_t pp_read_status(struct aylp_parport_dac_data *data)
+{
+	if (LIKELY(data->backend == AYLP_PARPORT_MMIO)) {
+		return *data->reg_status;
+	} else {
+		unsigned char c = 0;
+		ioctl(data->pp_fd, PPRSTATUS, &c);
+		return c;
+	}
 }
 
 /** mmap a PCI BAR through sysfs, at least far enough to reach `span`.
@@ -323,22 +410,82 @@ static void unbind_parport_pc(const char *pci)
 // ---------------------------------------------------------------------------
 // links
 
-/** Emit one 24-bit DAC81404 access cycle by bit-banging the DB25 data pins.
+/** Every register this code is allowed to write (SLASEH2A table 8-7),
+* excluding the two read-only entries DEVICEID and STATUS. SLASEH2A 8.6:
+* "All register addresses not listed should be considered as reserved
+* locations and the register contents should not be modified" -- on parts
+* like this, reserved space is commonly factory trim/calibration, so a
+* stray write there can do real, permanent damage, not just nothing.
+* Checked in spi_frame_rw() itself, the single choke point every write goes
+* through, rather than trusted to be true by inspection of the callers. */
+static bool dac_addr_writable(uint8_t addr)
+{
+	switch (addr & 0x3F) {
+	case DAC_REG_NOP:
+	case DAC_REG_SPICONFIG:
+	case DAC_REG_GENCONFIG:
+	case DAC_REG_BRDCONFIG:
+	case DAC_REG_SYNCCONFIG:
+	case DAC_REG_DACPWDWN:
+	case DAC_REG_DACRANGE:
+	case DAC_REG_TRIGGER:
+	case DAC_REG_BRDCAST:
+	case DAC_REG_DAC0 + 0:
+	case DAC_REG_DAC0 + 1:
+	case DAC_REG_DAC0 + 2:
+	case DAC_REG_DAC0 + 3:
+		return true;
+	default:
+		return false;
+	}
+}
+
+/** Emit one 24-bit DAC81404 access cycle by bit-banging the DB25 data pins,
+* optionally reading SDO back over the status register at the same time.
+* Refuses (logs and returns without sending) any write outside
+* dac_addr_writable()'s allow-list.
 *
 * SDIN is sampled on SCLK falling edges and the cycle is bracketed by SYNC
 * going low and back high (SLASEH2A 8.5.1), so each bit costs two stores: one
 * that presents the bit with SCLK high, one that drops SCLK. Idle state is
-* SYNC high, SCLK high. */
-static void spi_frame(struct aylp_parport_dac_data *data, uint8_t addr,
-	uint16_t value)
+* SYNC high, SCLK high.
+*
+* When `data->verify` is set, we also sample the ACK/SDO status bit on each
+* of the 24 falling edges and return the 24 bits shifted in, MSB first.
+* Confirmed 2026-07-28 against a local copy of SLASEH2A (Table 8-2, 8-3):
+* a read needs a read-command cycle followed by a second cycle to shift the
+* answer out on SDO, which carries an echo of the *previous* cycle's
+* R/W+address in its top 8 bits and that cycle's requested data in the
+* bottom 16 -- hence a verified write is 3 calls (write, read-command, NOP
+* to shift the answer out). SPICONFIG.FSDO is forced to 1 in dac_configure()
+* specifically so "SDO updates on SCLK falling edges" (8.6.4) lines up with
+* where this loop samples. Two things remain unconfirmed, on purpose not
+* papered over: whether the DAC preloads its first output bit before any
+* clock edge (would shift every sampled bit by one position -- the timing
+* diagram for this is a vector graphic, not extractable text), and which
+* AX99100 status-register bit ACK physically lands on for this card (not in
+* the DAC datasheet at all). dac_write_and_verify() cross-checks the echoed
+* R/W+address before trusting the data for exactly these reasons. */
+static uint32_t spi_frame_rw(struct aylp_parport_dac_data *data, bool read,
+	uint8_t addr, uint16_t value)
 {
+	if (UNLIKELY(!read && !dac_addr_writable(addr))) {
+		log_error("parport_dac: refusing to write register 0x%02x -- "
+			"not in the SLASEH2A 8.6 register map, so it's a "
+			"reserved/undocumented location; this frame was NOT "
+			"sent", addr & 0x3F);
+		return 0;
+	}
 	uint8_t sclk = (uint8_t)(1u << data->sclk_bit);
 	uint8_t sdin = (uint8_t)(1u << data->sdin_bit);
 	uint8_t sync = (uint8_t)(1u << data->sync_bit);
-	// bit 23 = R/W (0 = write), bit 22 don't care, bits 21-16 = address
-	uint32_t frame = ((uint32_t)(addr & 0x3F) << 16) | value;
+	// bit 23 = R/W (0 = write, 1 = read), bit 22 don't care, bits 21-16
+	// = address, bits 15-0 = data (don't care on a read command)
+	uint32_t frame = ((uint32_t)(read ? 1 : 0) << 23)
+		| ((uint32_t)(addr & 0x3F) << 16) | value;
 	// other data pins keep whatever they were left at
 	uint8_t base = data->data_shadow & (uint8_t)~(sclk | sdin | sync);
+	uint32_t rx = 0;
 
 	pp_write_data(data, base | sync | sclk);	// idle
 	pp_write_data(data, base | sclk);		// SYNC low: cycle start
@@ -346,9 +493,19 @@ static void spi_frame(struct aylp_parport_dac_data *data, uint8_t addr,
 		uint8_t bit = (frame >> i) & 1 ? sdin : 0;
 		pp_write_data(data, base | sclk | bit);
 		pp_write_data(data, base | bit);	// falling edge samples
+		if (UNLIKELY(data->verify))
+			rx = (rx << 1) | ((uint32_t)(pp_read_status(data)
+				>> data->ack_status_bit) & 1u);
 	}
 	pp_write_data(data, base | sclk);
 	pp_write_data(data, base | sync | sclk);	// SYNC high: cycle end
+	return rx;
+}
+
+static inline void spi_frame(struct aylp_parport_dac_data *data, uint8_t addr,
+	uint16_t value)
+{
+	spi_frame_rw(data, false, addr, value);
 }
 
 /** Hand one sample to the RP2040/RP2350 bridge: low byte, clock high, high
@@ -365,34 +522,73 @@ static void pico_frame(struct aylp_parport_dac_data *data, int channel,
 	pp_write_ctrl(data, chan);
 }
 
+/** Write a DACx register and read it straight back over SDO/ACK to confirm
+* the frame landed. Costs 3 frames total: the write, a read-command for the
+* same address, and a NOP frame to shift the answer out (see spi_frame_rw()'s
+* doc comment for why it takes a third frame). Logs and returns false on a
+* mismatch; also logs (but does not fail on) an echo mismatch, which means
+* the readback itself could not be trusted rather than that the write was
+* wrong -- see the big caveat on the `verify` param. */
+static bool dac_write_and_verify(struct aylp_parport_dac_data *data,
+	int channel, uint16_t code)
+{
+	uint8_t addr = (uint8_t)(DAC_REG_DAC0 + channel);
+	spi_frame_rw(data, false, addr, code);		// the real write
+	spi_frame_rw(data, true, addr, 0x0000);	// request readback
+	uint32_t rx = spi_frame_rw(data, false, DAC_REG_NOP, 0x0000);
+	data->diag_frames += 2;	// +1 more from dac_write_channel's own
+
+	uint8_t echo_rw = (uint8_t)((rx >> 23) & 1u);
+	uint8_t echo_addr = (uint8_t)((rx >> 16) & 0x3Fu);
+	uint16_t got = (uint16_t)(rx & 0xFFFFu);
+	if (echo_rw != 1 || echo_addr != (addr & 0x3F)) {
+		log_warn("parport_dac: readback echo mismatch on channel %d "
+			"(got rw=%d addr=0x%02x, expected rw=1 addr=0x%02x) -- "
+			"ack_status_bit or frame timing is probably wrong; "
+			"verify is unconfirmed until this is fixed",
+			channel, echo_rw, echo_addr, addr & 0x3F);
+		data->diag_verify_unconfirmed++;
+		return true;
+	}
+	if (got != code) {
+		log_warn("parport_dac: channel %d write not confirmed: wrote "
+			"0x%04x, read back 0x%04x", channel, code, got);
+		data->diag_verify_fail++;
+		return false;
+	}
+	if (!data->verify_confirmed[channel]) {
+		data->verify_confirmed[channel] = true;
+		double volts = NAN;
+		for (size_t i = 0; i < data->n_outputs; i++) {
+			if (data->channels[i] == channel) {
+				volts = code_to_volts(code, data->vmin[i],
+					data->vmax[i]);
+				break;
+			}
+		}
+		log_info("parport_dac: channel %d write confirmed by SDO/ACK "
+			"readback: code 0x%04x (%.4f V)", channel, code, volts);
+	}
+	return true;
+}
+
 /** Send one channel's 16-bit code, whichever link is configured. */
 static void dac_write_channel(struct aylp_parport_dac_data *data, int channel,
 	uint16_t code)
 {
-	if (data->link == AYLP_PARPORT_LINK_SPI)
-		spi_frame(data, (uint8_t)(DAC_REG_DAC0 + channel), code);
-	else
+	if (data->link == AYLP_PARPORT_LINK_SPI) {
+		if (UNLIKELY(data->verify))
+			dac_write_and_verify(data, channel, code);
+		else
+			spi_frame(data, (uint8_t)(DAC_REG_DAC0 + channel),
+				code);
+	} else {
 		pico_frame(data, channel, code);
+	}
 	data->diag_frames++;
 }
 
 // ---------------------------------------------------------------------------
-
-/** Round a target voltage to the code the DAC will actually produce. Data are
-* MSB-aligned straight binary across the configured range (SLASEH2A 8.6.12). */
-static int volts_to_code(double volts, double vmin, double vmax)
-{
-	double frac = (volts - vmin) / (vmax - vmin);
-	long c = lround(frac * DAC_CODE_MAX);
-	if (c < 0) c = 0;
-	if (c > DAC_CODE_MAX) c = DAC_CODE_MAX;
-	return (int)c;
-}
-
-static double code_to_volts(int code, double vmin, double vmax)
-{
-	return vmin + (vmax - vmin) * code / DAC_CODE_MAX;
-}
 
 // helpers for a param that may be a scalar (broadcast to every channel) or an
 // array (one value per channel), as in piplate_bridge
@@ -533,6 +729,9 @@ static void dac_configure(struct aylp_parport_dac_data *data)
 		struct timespec ts = {0, 5000000};	// 5 ms
 		nanosleep(&ts, NULL);
 	}
+	// clears SPICONFIG.DEV-PWDWN (device-wide power-down, separate from
+	// GENCONFIG/DACPWDWN below and set at reset) -- see DAC_SPICONFIG_ACTIVE
+	spi_frame(data, DAC_REG_SPICONFIG, DAC_SPICONFIG_ACTIVE);
 	spi_frame(data, DAC_REG_GENCONFIG, DAC_GENCONFIG_REF_ON);
 	// DACRANGE holds all four channels' nibbles; channels this stage does
 	// not drive keep the reset value (0 = 0 to 5 V)
@@ -571,6 +770,8 @@ int parport_dac_init(struct aylp_device *self)
 	data->clk_ctrl_bit = 0;
 	data->chan_ctrl_shift = 1;
 	data->reset_at_init = true;
+	data->verify = false;
+	data->ack_status_bit = SPP_STATUS_ACK_DEFAULT;
 
 	struct json_object *ch_val = NULL, *idx_val = NULL;
 	struct json_object *scale_val = NULL, *offset_val = NULL;
@@ -634,6 +835,11 @@ int parport_dac_init(struct aylp_device *self)
 				data->sdin_bit = (int)json_object_get_int64(val);
 			} else if (!strcmp(key, "sync_bit")) {
 				data->sync_bit = (int)json_object_get_int64(val);
+			} else if (!strcmp(key, "verify")) {
+				data->verify = json_object_get_boolean(val);
+			} else if (!strcmp(key, "ack_status_bit")) {
+				data->ack_status_bit =
+					(int)json_object_get_int64(val);
 			} else if (!strcmp(key, "clk_ctrl_bit")) {
 				data->clk_ctrl_bit = (int)json_object_get_int64(val);
 			} else if (!strcmp(key, "chan_ctrl_shift")) {
@@ -743,6 +949,16 @@ int parport_dac_init(struct aylp_device *self)
 				return -1;
 			}
 		}
+		if (data->verify
+		&& (data->ack_status_bit < 0 || data->ack_status_bit > 7)) {
+			log_error("parport_dac: ack_status_bit must be 0-7");
+			return -1;
+		}
+	} else if (data->verify) {
+		log_error("parport_dac: verify is only meaningful on the spi "
+			"link -- the pico link never speaks the DAC's register "
+			"protocol from the PC side");
+		return -1;
 	} else {
 		if (data->clk_ctrl_bit < 0 || data->clk_ctrl_bit > 3
 		|| data->chan_ctrl_shift < 0 || data->chan_ctrl_shift > 2) {
@@ -782,11 +998,14 @@ int parport_dac_init(struct aylp_device *self)
 	self->type_out  = AYLP_T_UNCHANGED;
 	self->units_out = AYLP_U_UNCHANGED;
 
-	log_info("parport_dac: %s link over %s, %zu output(s)",
+	log_info("parport_dac: %s link over %s, %zu output(s)%s",
 		data->link == AYLP_PARPORT_LINK_SPI ? "bit-banged SPI"
 			: "pico bridge",
 		data->backend == AYLP_PARPORT_MMIO ? "mmio" : "ppdev",
-		data->n_outputs);
+		data->n_outputs,
+		data->verify ? ", verifying every write over SDO/ACK "
+			"(unconfirmed protocol assumption -- watch for "
+			"echo-mismatch warnings)" : "");
 	for (size_t i = 0; i < data->n_outputs; i++)
 		log_info("parport_dac:   channel=%d (DAC%c) index=%d scale=%g "
 			"offset=%g range=%g..%g V", data->channels[i],
@@ -859,10 +1078,21 @@ int parport_dac_proc(struct aylp_device *self, struct aylp_state *state)
 					data->last_codes[i], data->vmin[i],
 					data->vmax[i]));
 		}
-		log_info("parport_dac: %.0f frames/s | %.0f skips/s |%s",
-			data->diag_frames / dt, data->diag_skips / dt, vbuf);
+		if (data->verify && (data->diag_verify_fail
+		|| data->diag_verify_unconfirmed)) {
+			log_info("parport_dac: %.0f frames/s | %.0f skips/s | "
+				"%ld verify_fail | %ld verify_unconfirmed |%s",
+				data->diag_frames / dt, data->diag_skips / dt,
+				data->diag_verify_fail,
+				data->diag_verify_unconfirmed, vbuf);
+		} else {
+			log_info("parport_dac: %.0f frames/s | %.0f skips/s |%s",
+				data->diag_frames / dt, data->diag_skips / dt,
+				vbuf);
+		}
 		data->diag_t0 = now;
 		data->diag_frames = data->diag_skips = 0;
+		data->diag_verify_fail = data->diag_verify_unconfirmed = 0;
 	}
 
 	return 0;

@@ -25,8 +25,12 @@ through *memory* BARs, so a pin change is a plain store to mapped memory
 Two ways to get from the DB25 to the DAC, chosen with `link`:
 
   - `"spi"` (default): the DB25 data pins *are* the SPI bus — D0 = SCLK,
-    D1 = SDIN, D2 = SYNC by default, GND on pins 18–25. The 24-bit frames are
-    bit-banged here: two stores per bit plus the frame brackets. **Measured
+    D1 = SDIN, D2 = SYNC by default, GND on pins 18–25. SYNC (frame bracket)
+    and LDAC (load strobe, hardwired low — see Jumpers below) are both
+    active-low pins, per the DAC81404's own datasheet naming (no "Z"
+    suffix — see the pinout table's footnote). The 24-bit frames are
+    bit-banged here: two stores per bit plus the frame
+    brackets. **Measured
     2026-07-27: 156 k frames/s = 6.4 µs per channel update** (~123 ns per
     store, effective SCLK ≈ 3.75 MHz, well under the DAC's 50 MHz ceiling), so
     a two-channel update costs ~12.8 µs against the BRIDGEplate's ~0.5–1.4 ms.
@@ -76,9 +80,18 @@ misread:
 |---|---|---|---|---|---|
 | 2 (D0) | SCLK | **J1** | **13** | 7 | `DAC_SCLK` |
 | 3 (D1) | SDIN | **J4** | **12** | 15 | `DAC_SDIN` |
-| 4 (D2) | SYNC | **J4** | **18** | 12 | `DAC_SYNCZ` |
+| 4 (D2) | SYNC | **J4** | **18** | 12 | `DAC_SYNCZ`(1) |
 | 18–25 | GND | **J4** | **2** | 20 | `DGND` |
 | 10 (ACK) | SDO, optional | **J4** | **14** | 14 | `DAC_SDO` |
+
+(1) The "signal" column here is the chip's own pin name, straight from the
+DAC81404 datasheet (SLASEH2A) — confirmed 2026-07-28 against a local copy,
+`dac81404.pdf`: the pin table literally reads "SDO SCLK SDIN SYNC LDAC GND
+IOVDD CLR", no "Z" on SYNC or LDAC anywhere. The "net" column is the
+BP-DAC81404EVM board's *own* schematic net name (SLAU825), which is the EVM
+designer's active-low notation and doesn't have to match the chip's pin
+name — it doesn't, here. Don't take `DAC_SYNCZ` as evidence the pin itself
+is called SYNCZ; the datasheet is the authority for that.
 
 Count physical pins: pin 1 is the square pad, then double-row order (1,2 across
 the top, 3,4 next), odd down one column, even down the other. Check J4 pin 2
@@ -127,11 +140,32 @@ machine: **~4 µs per edge, ~200 µs per 24-bit frame, ~4.9 k frames/s**, so a
 two-channel update costs ~0.4 ms — about what the BRIDGEplate cost. Use it to
 check wiring and frames, not to close a loop.
 
-**DAC power-up.** The DAC81404 comes out of reset with its reference and all
-four output amplifiers powered down (outputs clamped to ground through 10 kΩ).
-In the `spi` link, init writes `GENCONFIG` (reference on), `DACRANGE` (the
-configured ranges) and `DACPWDWN` (channels on), then parks every channel at
-its `offset` before the loop starts.
+**DAC power-up.** The DAC81404 comes out of reset *device-wide* powered down
+(`SPICONFIG.DEV-PWDWN`), separately from its reference and all four output
+amplifiers also being powered down (outputs clamped to ground through 10 kΩ).
+Found 2026-07-28 reading a local copy of the datasheet: nothing here used to
+clear `SPICONFIG.DEV-PWDWN` at all, which is a different, higher-level gate
+than the reference/channel power bits below it — so every earlier bench
+session that only measured SPI *bus* timing (frames/s) rather than an actual
+DAC output voltage could plausibly have been talking to a device that never
+left device-wide power-down. In the `spi` link, init now writes `SPICONFIG`
+(device active, and `FSDO=1` for `verify`'s benefit — see below), `GENCONFIG`
+(reference on), `DACRANGE` (the configured ranges) and `DACPWDWN` (channels
+on), then parks every channel at its `offset` before the loop starts.
+
+**Register safety.** SLASEH2A 8.6: "All register addresses not listed
+should be considered as reserved locations and the register contents
+should not be modified" — on parts like this, reserved space is commonly
+factory trim/calibration, so a stray write there can do real, permanent
+damage. Every write in this file funnels through one function
+(`spi_frame_rw()`), which checks the target address against an allow-list
+built from Table 8-7 (`dac_addr_writable()`) before anything is sent, and
+refuses (logging an error, no frame transmitted) if it isn't one of NOP,
+SPICONFIG, GENCONFIG, BRDCONFIG, SYNCCONFIG, DACPWDWN, DACRANGE, TRIGGER,
+BRDCAST, or DACA–D. This is enforced in code, not just true by inspection of
+the current callers — the only runtime-variable register address this file
+ever constructs is `DACx = DAC0 + channel`, and `channel` is itself bounds
+checked to 0–3 at init, so it can't drift outside 0x10–0x13 either.
 
 Parameters
 ----------
@@ -186,6 +220,40 @@ Parameters
     - Extra dwell after each edge, in nanoseconds (default 0). The store
       latency alone already exceeds the DAC's setup requirement; raise this
       only for long or unterminated wiring.
+  - `verify` (boolean) (optional, `spi` link only)
+    - After every write, read the register back over SDO (DB25 pin 10 →
+      EVM `DAC_SDO`, only meaningful if that wire is connected) and warn if
+      it doesn't match what was sent (default false). The first time a given
+      channel's readback confirms what was sent, it logs once at `info`
+      level (`channel N write confirmed by SDO/ACK readback: code 0x.... (V
+      V)`); after that it stays quiet on success and only logs again on a
+      problem, so a clean run isn't spammed once per write. Costs two extra
+      24-bit frames per write: a read-command for the address just written,
+      then a NOP frame to shift the answer out — TI's readback convention
+      echoes the *previous* cycle's R/W+address alongside the data, so it
+      always trails by one frame. This device cross-checks that echo before
+      trusting the data, and logs (without failing) if the echo itself looks
+      wrong. **Confidence note, updated 2026-07-28 against a local copy of
+      SLASEH2A (`dac81404.pdf`):** the frame format, R/W convention, 24-bit
+      no-CRC framing, and the read-command-then-second-cycle readback
+      protocol above are now confirmed from the datasheet text directly
+      (Table 8-2/8-3), not just corroborated secondhand. `init` also now
+      forces `SPICONFIG.FSDO=1` so SDO updates on the same SCLK falling
+      edges this device already samples on (8.6.4), removing one whole axis
+      of uncertainty. Two things are still open: whether the DAC preloads
+      its first output bit before any clock edge, which would shift every
+      sampled bit by one position (the timing diagram for this is a vector
+      graphic that didn't survive text extraction, unlike the daisy-chain
+      figure); and the *exact* status-register bit SDO/ACK lands on for this
+      specific AX99100 card, which was never independently measured the way
+      the data/control pin levels were, and isn't in the DAC's datasheet at
+      all — `ack_status_bit`'s default is the generic SPP convention, not a
+      bench-confirmed one. Run with `verify: true` and watch the log for
+      `readback echo mismatch` before trusting a quiet run as proof anything
+      is actually being checked.
+  - `ack_status_bit` (integer) (optional)
+    - Status-register bit carrying SDO (default 6, the standard SPP `/ACK`
+      bit position). See the confidence note under `verify`.
 
 ### Outputs
 
