@@ -158,6 +158,14 @@ struct aylp_fsp_axis {
 	// inherit the global ones. Resolved at init (0 / <0 = inherit).
 	size_t delay;
 	double delay_frac;
+	// Per-axis output bounds, u held to [clamp_lo, clamp_hi]. Needed
+	// separately from the global pair because the axes can have OPPOSITE
+	// command->voltage signs (a steering pair typically does: +1 V/unit on
+	// one, -1 V/unit on the other). An asymmetric window is mirrored by a
+	// negative scale, so one global window cannot express the same VOLTAGE
+	// limit on both axes -- [-12.5, +7.5] means -10..+10 V through a +1
+	// scale and +15..-5 V through a -1 scale. NAN = inherit the global.
+	double clamp_lo, clamp_hi;
 	// per-axis command ring and full-band observer bookkeeping -- lengths
 	// depend on the axis delay so they cannot be shared
 	size_t uhead;			// ring write index into ucmd
@@ -319,8 +327,22 @@ struct aylp_fsp_data {
 	// sample rate (Hz) used to turn f/zeta into AR coefficients; should
 	// match the loop rate
 	double fs;
-	// output magnitude limit (command units)
+	// output magnitude limit (command units); the symmetric shorthand that
+	// sets clamp_lo/clamp_hi to -clamp/+clamp
 	double clamp;
+	// Actual output bounds, u is held to [clamp_lo, clamp_hi]. Separated
+	// from `clamp` so an ASYMMETRIC limit is possible: when the actuator's
+	// reachable range is not centred on the command origin (e.g. a mirror
+	// spanning -10..+10 V driven from a +2.5 V bias, which is -12.5..+7.5
+	// in command units), a symmetric limit either gives up part of the
+	// range or lets the loop ask for a voltage the hardware cannot produce.
+	// The latter matters here specifically because the clamped command is
+	// ALSO what enters the delay ring below -- if something downstream cut
+	// it further, this device's plant model would diverge from what the
+	// actuator actually received, which is the command-echo mismatch that
+	// drives regeneration. Keeping the limit here keeps the two identical.
+	// NAN before config resolution means "not explicitly set".
+	double clamp_lo, clamp_hi;
 	// seconds to hold the command at 0 (loop open) at startup while the
 	// Kalman filter converges on the clean open-loop disturbance
 	double start_delay;

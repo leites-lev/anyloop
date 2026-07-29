@@ -92,7 +92,7 @@
 		{
 			"_note": "PARPORT DAC. TWO channels only -- there is no coarse stage: ch0 = y/tip (DACA), ch1 = x/tilt (DACB). Here y is driven and x is parked (scale 0).",
 			"_range": "0-5 (unipolar, DACRANGE code 0x0), biased at mid-range 2.5 V so the command has 2.5 V of headroom both ways without a bipolar range. 76 uV/LSB -- 2x finer than +-5, since all 16 bits now cover 5 V instead of 10.",
-			"_avss_note": "GROUND AVSS for this unipolar range (EVM J17 pin 5). SLASEH2A 7.5 specifies the unipolar accuracy figures at AVSS = 0 V; the -21.5 V <= AVSS < 0 conditions are the bipolar ones. Negative AVSS with a unipolar range is legal per 7.3 but uncharacterized, and doubles analog dissipation. The 1.25-1.5 V footroom that would argue for it is conditioned on +-10/+-15 mA of load current -- unloaded, zero code sits ~7.5 mV off ground. See conf_bode_par_x.json for the full reasoning.",
+			"_avss_note": "AVSS MUST BE -12 V (NOT grounded): the supply is shared with the steering configs, which auto-range to +-10 for negative drive. So this 0-5 sweep runs with a negative AVSS -- legal per SLASEH2A 7.3 but outside the AVSS = 0 V condition the unipolar accuracy figures are given at. See conf_bode_par_x.json for the full reasoning.",
 			"_scale_sign": "y keeps the POSITIVE sign the piplate config used (was +2, now +1.0), and x keeps its negative sign in the steering configs. The sign is a property of the optical/mechanical path, not the converter, so it carries over even though the magnitude does not.",
 			"uri": "anyloop:parport_dac",
 			"params": {
@@ -104,7 +104,7 @@
 				"scale": [1.0, 0],
 				"offset": [2.5, 2.5],
 				"range": "0-5",
-				"_no_range_max": "auto-ranging deliberately NOT enabled for a sweep: a mid-sweep range change would glitch the output for a frame and step the quantization, both of which land in the lock-in as a bogus point. The sweep never leaves 100..300 mV anyway.",
+				"_no_range_max": "auto-ranging deliberately NOT enabled for a sweep: a mid-sweep range change would glitch the output for a frame and step the quantization, both of which land in the lock-in as a bogus point. The sweep never leaves 2.4..2.6 V anyway, deep inside 0-5. Note the STEERING configs DO auto-range (range_max +-10) -- the bode measures the plant at a fixed 0-5 range and fixed 76 uV/LSB on purpose, so K and tau are not entangled with a range change.",
 				"_verify": "off in a swept/timed run: verify turns each write into 3 frames plus a non-posted status read per bit.",
 				"verify": false,
 				"skip_unchanged": true,

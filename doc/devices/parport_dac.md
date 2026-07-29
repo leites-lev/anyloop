@@ -530,13 +530,27 @@ Parameters
       wrong. SLASEH2A 7.13: unipolar needs `AVDD ≥ VMAX + 1.5 V`, bipolar also
       `AVSS ≤ VMIN − 1.5 V`. On ±12 V rails that permits 0-5, 0-6, 0-10, ±5,
       ±6 and ±10 — with the 10 V ones leaving only 0.5 V of margin.
-    - **`AVSS` should be grounded for a unipolar range**, not run negative.
-      SLASEH2A 7.5 gives the unipolar accuracy figures (TUE ±0.07 %FSR, offset
-      error, zero-code error 0.15 %FSR) at `AVSS = 0 V`; the
-      `−21.5 V ≤ AVSS < 0` conditions belong to the *bipolar* rows. Unipolar
-      on a negative `AVSS` is inside Recommended Operating Conditions but is
-      not a characterized combination, and it doubles analog dissipation
-      (~192 mW vs ~96 mW on ±12 V, `AIDD`/`AISS` 8 mA typ).
+    - **`AVSS` and a unipolar base range: an unavoidable trade.** SLASEH2A 7.5
+      gives the unipolar accuracy figures (TUE ±0.07 %FSR, offset error,
+      zero-code error 0.15 %FSR) at `AVSS = 0 V`; the `−21.5 V ≤ AVSS < 0`
+      conditions belong to the *bipolar* rows. There is no specified
+      unipolar-plus-negative-`AVSS` combination.
+      - If the ladder never needs a bipolar range, **ground `AVSS`** — that is
+        the characterized condition, and it halves analog dissipation
+        (~96 mW vs ~192 mW on ±12 V, `AIDD`/`AISS` 8 mA typ).
+      - If a bipolar range is in the ladder (`range_max: "+-10"` for a
+        mirror that must be driven negative), `AVSS` **must** be negative, and
+        the unipolar base range then runs outside its characterized condition.
+        Grounding `AVSS` would make the bipolar rungs physically unreachable,
+        so there is no way to have both. In mitigation, the bipolar TUE at
+        negative `AVSS` is spec'd *tighter* (±0.05 %FSR), which suggests the
+        part is comfortable with footroom below ground — but it is not
+        guaranteed, and belongs in the run notes.
+    - Reaching ±10 V needs `AVSS ≤ −11.25 V` (at ≤10 mA) or `≤ −11.5 V` (at
+      ≤15 mA), from the footroom spec below. A −12 V rail leaves only
+      0.5–0.75 V of margin, and a nominal 12 V rail at −5 % (11.4 V) **fails**
+      the 15 mA case — meter the rails under load rather than trusting the
+      label.
     - The 1.25–1.5 V output headroom/footroom figure is **not** a floor on the
       output: 7.5 conditions it on `−10 mA ≤ load ≤ 10 mA` (1.25 V) or ±15 mA
       (1.5 V). Unloaded — the EC table's own condition — zero code sits within

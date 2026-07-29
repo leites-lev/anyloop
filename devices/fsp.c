@@ -448,6 +448,8 @@ static int fsp_parse_axis(struct aylp_fsp_axis *ax, struct json_object *obj)
 	bool have_plant_b = false, have_plant_a = false;
 	// sentinels: inherit the global delay/delay_frac unless the axis sets them
 	ax->delay = 0;
+	ax->clamp_lo = NAN;		// NAN = inherit the global bound
+	ax->clamp_hi = NAN;
 	ax->delay_frac = -1.0;
 	ax->plant_b[0] = ax->plant_a[0] = 1.0;
 	json_object_object_foreach(obj, key, val) {
@@ -458,6 +460,10 @@ static int fsp_parse_axis(struct aylp_fsp_axis *ax, struct json_object *obj)
 			ax->delay = json_object_get_uint64(val);
 		} else if (!strcmp(key, "delay_frac")) {
 			ax->delay_frac = json_object_get_double(val);
+		} else if (!strcmp(key, "clamp_min")) {
+			ax->clamp_lo = json_object_get_double(val);
+		} else if (!strcmp(key, "clamp_max")) {
+			ax->clamp_hi = json_object_get_double(val);
 		} else if (!strcmp(key, "plant_b")) {
 			have_plant_b = true;
 			if (json_object_is_type(val, json_type_array)) {
@@ -577,6 +583,9 @@ int fsp_init(struct aylp_device *self)
 	data->delay_frac = 0.0;
 	data->fs = 2310.0;
 	data->clamp = 1.0;
+	// NAN = not explicitly configured; resolved from `clamp` after parsing
+	data->clamp_lo = NAN;
+	data->clamp_hi = NAN;
 	data->start_delay = 0.0;
 	data->ramp = 10.0;
 	data->adapt_period = 0.0;	// fixed FSP unless asked
@@ -635,6 +644,10 @@ int fsp_init(struct aylp_device *self)
 			data->fs = json_object_get_double(val);
 		} else if (!strcmp(key, "clamp")) {
 			data->clamp = fabs(json_object_get_double(val));
+		} else if (!strcmp(key, "clamp_min")) {
+			data->clamp_lo = json_object_get_double(val);
+		} else if (!strcmp(key, "clamp_max")) {
+			data->clamp_hi = json_object_get_double(val);
 		} else if (!strcmp(key, "start_delay")) {
 			data->start_delay = json_object_get_double(val);
 			if (data->start_delay < 0) data->start_delay = 0;
@@ -711,6 +724,32 @@ int fsp_init(struct aylp_device *self)
 		log_error("fsp: type must be \"vector\".");
 		return -1;
 	}
+	// Resolve the output bounds: clamp_min/clamp_max win over the symmetric
+	// `clamp` shorthand, whichever order they appeared in the config.
+	if (isnan(data->clamp_lo)) data->clamp_lo = -data->clamp;
+	if (isnan(data->clamp_hi)) data->clamp_hi = data->clamp;
+	if (!isfinite(data->clamp_lo) || !isfinite(data->clamp_hi)
+	|| data->clamp_lo >= data->clamp_hi) {
+		log_error("fsp: clamp bounds must be finite with clamp_min < "
+			"clamp_max (got %G, %G).",
+			data->clamp_lo, data->clamp_hi);
+		return -1;
+	}
+	// Zero must be reachable: the start_delay hold parks the command at 0,
+	// `ramp` blends 0 -> full authority, and the burst guard and the
+	// non-finite fallback both force u = 0. A window excluding 0 would make
+	// all four of those unrepresentable.
+	if (data->clamp_lo > 0.0 || data->clamp_hi < 0.0) {
+		log_error("fsp: clamp window [%G, %G] must contain 0 -- the "
+			"startup hold, ramp and burst guard all drive the "
+			"command to zero.", data->clamp_lo, data->clamp_hi);
+		return -1;
+	}
+	if (data->clamp_lo != -data->clamp_hi)
+		log_info("fsp: asymmetric command limit [%G, %G] -- use this "
+			"when the actuator's reachable range is not centred "
+			"on the command origin", data->clamp_lo,
+			data->clamp_hi);
 	if (data->delay < 1) {
 		log_error("fsp: delay must be >= 1 sample.");
 		return -1;
@@ -768,10 +807,30 @@ int fsp_init(struct aylp_device *self)
 	if (fsp_parse_axis(&data->axis[0], axy)) return -1;
 	if (fsp_parse_axis(&data->axis[1], axx)) return -1;
 
-	// resolve per-axis delays: unset values inherit the global ones
+	// resolve per-axis delays and clamp bounds: unset values inherit global
 	for (int a = 0; a < 2; a++) {
 		struct aylp_fsp_axis *ax = &data->axis[a];
 		if (!ax->delay) ax->delay = data->delay;
+		if (isnan(ax->clamp_lo)) ax->clamp_lo = data->clamp_lo;
+		if (isnan(ax->clamp_hi)) ax->clamp_hi = data->clamp_hi;
+		if (!isfinite(ax->clamp_lo) || !isfinite(ax->clamp_hi)
+		|| ax->clamp_lo >= ax->clamp_hi) {
+			log_error("fsp: %s axis clamp bounds must be finite "
+				"with clamp_min < clamp_max (got %G, %G).",
+				a == 0 ? "y" : "x", ax->clamp_lo, ax->clamp_hi);
+			return -1;
+		}
+		if (ax->clamp_lo > 0.0 || ax->clamp_hi < 0.0) {
+			log_error("fsp: %s axis clamp window [%G, %G] must "
+				"contain 0 -- the startup hold, ramp and burst "
+				"guard all drive the command to zero.",
+				a == 0 ? "y" : "x", ax->clamp_lo, ax->clamp_hi);
+			return -1;
+		}
+		if (ax->clamp_lo != -ax->clamp_hi)
+			log_info("fsp: %s axis asymmetric command limit "
+				"[%G, %G]", a == 0 ? "y" : "x",
+				ax->clamp_lo, ax->clamp_hi);
 		if (ax->delay_frac < 0.0) ax->delay_frac = data->delay_frac;
 		if (ax->delay_frac >= 1.0) {
 			log_error("fsp: %s axis delay_frac must satisfy "
@@ -1556,8 +1615,15 @@ int fsp_proc(struct aylp_device *self, struct aylp_state *state)
 			ax->lp_z1 = ax->lp_z2 = 0.0;
 			ax->plant_iz1 = ax->plant_iz2 = 0.0;
 		}
-		if (u > data->clamp) u = data->clamp;
-		if (u < -data->clamp) u = -data->clamp;
+		// Per-axis, asymmetric-capable output limit. This clamped value
+		// is BOTH what leaves the device and what enters the delay ring
+		// below, so the plant model and the actuator see the same
+		// command -- which is why the limit belongs here rather than in
+		// a downstream clamp stage. Per-axis because the two axes can
+		// have opposite command->voltage signs, which mirrors an
+		// asymmetric window (see aylp_fsp_axis).
+		if (u > ax->clamp_hi) u = ax->clamp_hi;
+		if (u < ax->clamp_lo) u = ax->clamp_lo;
 
 		// Apply the fractional part of the plant delay before the integer
 		// command ring. H(z)=(a+z^-1)/(1+a*z^-1), with DC group delay f.

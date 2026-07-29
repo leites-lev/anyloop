@@ -70,7 +70,26 @@ Parameters
   adjacent horizon predictions. Per-axis override allowed as with `delay`.
 - `fs`: loop rate (Hz); must match, so AR coefficients land on the right digital
   frequencies.
-- `clamp`: command magnitude limit.
+- `clamp`: command magnitude limit — the symmetric shorthand for
+  `[-clamp, +clamp]`. Default 1.0.
+- `clamp_min`, `clamp_max`: the actual output bounds, for an **asymmetric**
+  limit. Either one overrides the corresponding side of `clamp`, in any config
+  order. Use these when the actuator's reachable range is not centred on the
+  command origin: a mirror spanning −10…+10 V driven from a +2.5 V bias at
+  1 V/command-unit is `clamp_min: -12.5, clamp_max: 7.5`. A symmetric limit
+  there would either give up half the negative range or let the loop request a
+  voltage the hardware cannot produce.
+  - The window must contain 0 (init fails otherwise): the `start_delay` hold,
+    the `ramp` blend, the burst guard and the non-finite fallback all drive the
+    command to zero, so a window excluding it would make those unrepresentable.
+    Zero exactly on a boundary is allowed.
+  - **Put the limit here, not in a downstream `anyloop:clamp` stage.** The
+    clamped command is also what enters the fractional-delay filter and command
+    ring, so bounding it here keeps this device's plant model identical to what
+    the actuator received. A clamp *after* `fsp` would cut the command without
+    `fsp` knowing, and that divergence is the command-echo mismatch that drives
+    regeneration. A downstream `clamp` stage matched exactly to these bounds is
+    fine as a backstop — just never tighter.
 - `start_delay`, `ramp`: hold the command at 0 for `start_delay` s (Kalman
   converges on the clean open-loop error), then blend to full authority over
   `ramp` s.
