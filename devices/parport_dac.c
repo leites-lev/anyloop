@@ -18,7 +18,9 @@
 //     IOVDD 2.7-5.5 V (SLASEH2A 7.7), but only 35 MHz for reads with FSDO=1
 //     and 20 MHz with FSDO=0 (7.10, 7.11) -- worth knowing because `verify`
 //     reads. Nothing but wires between the card and the BP-DAC81404EVM, so
-//     this works today.
+//     this works today -- CONFIRMED 2026-07-29: the DAC drives real voltage
+//     out of DAC_VOUT_A, tracking the commanded value (see DAC POWER-UP
+//     below; contrib/conf_parport_dac_2v.json parks channel 0 at `offset`).
 //
 //   link="pico" -- the DB25 carries a byte-parallel handshake to an
 //     RP2040/RP2350 whose PIO does the SPI at 50 MHz. Four stores per sample
@@ -41,6 +43,11 @@
 // CONTROL line, not D0. Control lines are pins 1 (STROBE), 14 (AUTOFD), 16
 // (INIT), 17 (SELECT); all but INIT are inverted between register bit and pin,
 // which pp_write_ctrl() folds in so callers work in pin polarity.
+// As built: D0=SCLK, D1=SDIN, D2=SYNC -- i.e. the pin_sclk/pin_sdin/pin_sync
+// defaults of 0/1/2, so no pin overrides belong in the config. The breakout's
+// screw terminals wear plastic covers; pull one to land or meter a wire and
+// put it back, since the 4.94 V control pins sit right beside the 3.3 V data
+// pins that run to the DAC.
 //
 // POLARITY: the DAC's frame-bracket pin is SYNC and its load-strobe pin is
 // LDAC, both active-low -- confirmed 2026-07-28 against a locally saved copy
@@ -54,23 +61,46 @@
 // open a frame and high to close it, see spi_frame() below); only the name
 // wobbled.
 //
-// LDAC is never driven by this code at all, and it is not what makes the
-// outputs move. What does is SYNCCONFIG: with every DACx-SYNC-EN bit clear
-// the channel is in ASYNCHRONOUS mode, where "a DAC data register write
-// results in an immediate update of the DAC active register and DAC output
-// on a SYNC rising edge" (SLASEH2A 8.3.3.1.2) and LDAC is simply ignored.
-// That is the reset default, but dac_configure() writes it explicitly rather
-// than assume it -- in synchronous mode every DACx write would be accepted
-// and no output would ever move, which is a miserable thing to debug.
+// The LDAC PIN is never driven by this code at all (it isn't even wired --
+// see UNUSED PINS below). What decides when an output moves is SYNCCONFIG:
 //
-// UNUSED PINS: LDAC (13), CLR (16) and RST (32) are driven by nothing here.
-// Tie all three to IOVDD. SLASEH2A's pin table says so outright for LDAC and
-// CLR ("Connect to IOVDD if unused"); it says nothing of the sort for RST,
-// but all three are active-low inputs with no documented internal pull-up, so
-// leaving one open is not the same as holding it inactive. Each fails
-// differently:
+//   DACx-SYNC-EN clear = ASYNCHRONOUS (default). "A DAC data register write
+//     results in an immediate update of the DAC active register and DAC
+//     output on a SYNC rising edge" (SLASEH2A 8.3.3.1.2). Channels written
+//     in the same iteration therefore step one frame apart, ~6.4 us on the
+//     spi link.
+//   DACx-SYNC-EN set = SYNCHRONOUS, selected by `sync_update`. The DACx
+//     write only loads the channel's buffer register; the output moves on a
+//     trigger, "generated either through the SOFT-LDAC bit or by the LDAC
+//     pin" (8.3.3.1.1). Since the pin is unwired we use the bit: proc()
+//     loads every channel, then issues ONE TRIGGER write with SOFT-LDAC
+//     (bit 4, table 8-17), and all of them step together on that frame's
+//     SYNC rising edge.
+//
+// dac_configure() writes SYNCCONFIG explicitly either way rather than trust
+// the reset default -- with reset_at_init=false against a device a previous
+// process left in the other mode, that write is the only thing standing
+// between you and outputs that accept every write and never move, which is a
+// miserable thing to debug from the outside.
+//
+// UNUSED PINS: LDAC (13), CLR (16) and RST (32) are driven by nothing here,
+// and AS BUILT (2026-07-29) nothing from the DB25 is wired to them at all --
+// the EVM holds all three at 3.3 V through its own 10k pull-ups, with J2
+// REMOVED so LDAC is not pulled to ground. (EVM net names LDACZ/CLRZ/RSTZ;
+// the chip pin names drop the "Z", see POLARITY above.) That is the wanted
+// state: SLASEH2A's pin table asks for it outright for LDAC and CLR
+// ("Connect to IOVDD if unused") and says nothing of the sort for RST, but
+// all three are active-low inputs with no documented INTERNAL pull-up, so
+// those external 10k are what makes "unused" mean "inactive" rather than
+// "floating". Each fails differently if one is dragged low:
 //   LDAC -- grounding it (the EVM's J2 1-2 default) is harmless only as long
-//     as every channel stays in asynchronous mode.
+//     as every channel stays in asynchronous mode. J2 stays off, and with
+//     `sync_update` that is a REQUIREMENT, not a preference: channels in
+//     synchronous mode "are updated simultaneously when the LDAC pin is low"
+//     (pin table), so a grounded LDAC holds the transfer permanently open
+//     and every buffer write reaches the output the moment it lands --
+//     silently turning synchronous mode back into asynchronous, with the
+//     simultaneity you asked for quietly gone.
 //   CLR  -- a low "forces all DAC channels to clear the contents of their
 //     buffer and active registers to the clear code regardless of their
 //     synchronization setting" (8.3.3.3): zero code unipolar, midscale
@@ -85,7 +115,9 @@
 //     anyway: reset_at_init issues a SOFT-RESET through TRIGGER, which 8.3.5
 //     defines as the same POR event. 11.1 backs the tie-off up -- "the RST
 //     and FAULT signals are static lines".
-// Meter all three at ~IOVDD before wiring the DB25.
+// Meter all three at ~IOVDD (3.3 V) against ground after any rework that
+// disturbs J2/J3 or the pull-up network. On the current build they read there
+// with no jumpers fitted and no wires attached.
 //
 // ROOT / DRIVER: the mmio backend needs CAP_SYS_RAWIO (run as root) and needs
 // parport_pc off the device, which `unbind` does by default (rebind after with
@@ -211,6 +243,17 @@
 //                (default false). The DAC holds its register, so this is safe
 //                here -- unlike the BRIDGEplate there is no droop argument --
 //                but it costs nothing to leave off
+//   sync_update -- put every driven channel in synchronous mode so they all
+//                step together (default false, i.e. asynchronous). Each DACx
+//                write only loads that channel's buffer register, and one
+//                SOFT-LDAC per iteration moves all of them at once. Costs one
+//                extra frame per iteration (~6.4 us on the spi link) and
+//                delays the first channel's motion until the last one has
+//                been written; in exchange the channels stop stepping ~6.4 us
+//                apart. Worth it when two channels drive one physical axis
+//                (an X/Y mirror, a coarse/fine pair) and the skew between
+//                them is a real disturbance; pointless for one channel, and
+//                rejected on the pico link. spi link only
 //   reset_at_init -- issue a DAC soft reset before configuring (default true;
 //                spi link only)
 //
@@ -290,13 +333,17 @@
 
 // GENCONFIG with REF-PWDWN (bit 14) cleared: internal reference on
 #define DAC_GENCONFIG_REF_ON 0x0000
-// SYNCCONFIG with every DACx-SYNC-EN bit clear: asynchronous update, i.e.
-// "a DAC data register write results in an immediate update of the DAC active
-// register and DAC output on a SYNC rising edge" (SLASEH2A 8.3.3.1.2). This is
-// the reset default, but this file depends on it (it never issues a SOFT-LDAC
-// and never pulses the LDAC pin), so write it rather than assume it: with
-// reset_at_init=false, a device left in synchronous mode by a previous process
-// would accept every DACx write and never move its outputs.
+// SYNCCONFIG bits 3-0 are DACA/B/C/D-SYNC-EN, i.e. bit N selects channel N's
+// update mode (SLASEH2A 8.6.7, table 8-14); bits 15-4 are read-only reserved.
+// Clear = asynchronous, "a DAC data register write results in an immediate
+// update of the DAC active register and DAC output on a SYNC rising edge"
+// (8.3.3.1.2). Set = synchronous, where the write only loads the buffer
+// register and the output moves on an LDAC trigger (8.3.3.1.1) -- see
+// `sync_update`. All-clear is the reset default, but this file's behaviour
+// depends on the mode either way, so dac_configure() writes it explicitly
+// rather than assume it: with reset_at_init=false, a device left in
+// synchronous mode by a previous process would accept every DACx write and
+// never move its outputs.
 #define DAC_SYNCCONFIG_ASYNC 0x0000
 // DACPWDWN bits 3-0 are per-channel power-DOWN flags, set at reset; bits 15-4
 // are read-only reserved and read back as FFFh (SLASEH2A table 8-15), so start
@@ -305,6 +352,12 @@
 // TRIGGER SOFT-RESET[3:0] = 1010b (SLASEH2A table 8-17, "reserved code 1010
 // to reset the device to the default state")
 #define DAC_TRIGGER_SOFT_RESET 0x000A
+// TRIGGER SOFT-LDAC is bit 4 (SLASEH2A 8.6.10 figure 8-14, table 8-17): "Set
+// this bit to 1 to synchronously load the DACs that have been set in
+// synchronous mode in the SYNCCONFIG register." This is the software half of
+// the LDAC trigger 8.3.3.1.1 describes -- the other half is the LDAC pin,
+// which nothing here drives and which is not even wired on this build.
+#define DAC_TRIGGER_SOFT_LDAC 0x0010
 // SPICONFIG reset value is 0x0AA4 (SLASEH2A 8.6.4), which has bit 5
 // (DEV-PWDWN) set -- the WHOLE DEVICE, not just the reference or individual
 // channels, wakes up powered down, separately from GENCONFIG.REF-PWDWN and
@@ -376,6 +429,59 @@ unipolar:
 		if (!strcmp(dac_ranges[i].name, name))
 			return &dac_ranges[i];
 	return NULL;
+}
+
+/** Index of a range in dac_ranges[], or -1. */
+static int find_range_index(const char *name)
+{
+	const struct dac_range *r = find_range(name);
+	if (!r) return -1;
+	return (int)(r - dac_ranges);
+}
+
+/** True if range `outer` fully contains range `inner`. */
+static bool range_contains(int outer, int inner)
+{
+	return dac_ranges[outer].vmin <= dac_ranges[inner].vmin
+		&& dac_ranges[outer].vmax >= dac_ranges[inner].vmax;
+}
+
+static double range_span(int i)
+{
+	return dac_ranges[i].vmax - dac_ranges[i].vmin;
+}
+
+/** Pick the range to use for `volts` on channel `i`: the NARROWEST range that
+* both contains the voltage and is inside the [base, max] window the config
+* allows. Returns the current range unchanged when nothing better applies.
+*
+* Widening happens immediately -- the alternative is clipping the command.
+* Narrowing is deliberately reluctant (see dac_autorange): a range change is
+* not free, so it should not chatter at a boundary. */
+static int pick_range(struct aylp_parport_dac_data *data, size_t i,
+	double volts)
+{
+	int best = -1;
+	for (size_t r = 0; r < sizeof dac_ranges / sizeof dac_ranges[0]; r++) {
+		// stay inside the window the user allowed: at least as wide as
+		// `range`, no wider than `range_max`. This is what keeps
+		// auto-ranging from selecting a range the SUPPLY cannot
+		// deliver -- the part would happily accept +-20 on +-12 rails
+		// and simply saturate ~1.5 V short, with the loop none the
+		// wiser (SLASEH2A 7.13: bipolar needs AVSS <= VMIN-1.5 and
+		// AVDD >= VMAX+1.5).
+		if (!range_contains((int)r, data->range_base_idx[i])) continue;
+		if (!range_contains(data->range_max_idx[i], (int)r)) continue;
+		if (volts < dac_ranges[r].vmin || volts > dac_ranges[r].vmax)
+			continue;
+		if (best < 0 || range_span((int)r) < range_span(best))
+			best = (int)r;
+	}
+	// nothing fits: the command is outside even range_max. Stay where we
+	// are and let volts_to_code() clamp, which is the same thing that
+	// would have happened without auto-ranging.
+	if (best < 0) return data->range_max_idx[i];
+	return best;
 }
 
 static double monotonic_s(void)
@@ -911,16 +1017,181 @@ static inline void dac_update_wait(struct aylp_parport_dac_data *data)
 	} while (now - data->last_update_ns < DAC_UPDATE_WAIT_NS);
 }
 
+static void dac_write_channel(struct aylp_parport_dac_data *data, int channel,
+	uint16_t code);
+
+/** How far `v` falls OUTSIDE the closed interval spanned by `a` and `b`.
+* Zero when it lies between them, i.e. when the output moved monotonically
+* from where it was toward where it is going and never left that segment. */
+static double excursion(double v, double a, double b)
+{
+	double lo = a < b ? a : b;
+	double hi = a < b ? b : a;
+	if (v < lo) return lo - v;
+	if (v > hi) return v - hi;
+	return 0.0;
+}
+
+/** Switch channel `i` to range `new_idx`, in place, mid-loop, aiming the
+* output at `v_target`. Returns true if the code for the NEW range is already
+* in the active register, i.e. the caller must not re-send it.
+*
+* THE INTERMEDIATE VALUE, AND WHY IT CANNOT BE ZERO. DACRANGE is a resistor
+* gain network (SLASEH2A 8.3.2): it takes effect the instant the write lands
+* and re-interprets whatever code is already in the active register. There is
+* no atomic range+code update, and the buffered path does not help -- DACRANGE
+* acts on the ACTIVE register and ignores SYNCCONFIG. So between the two
+* writes the output shows one frame (~6.4 us) of something that is neither
+* the old voltage nor the new one.
+*
+* It cannot be made glitch-free, because a single code expresses the same
+* voltage in two ranges only where they intersect: solving
+* vmin_A + span_A*c = vmin_B + span_B*c gives exactly one such voltage (0 V
+* for two bipolar or two unipolar ranges). Away from it there is no bridging
+* code, so SOMETHING moves.
+*
+* What IS controllable is which of the two orders is used, and the two differ
+* a lot:
+*
+*   DACRANGE first: the OLD code is reinterpreted. Widening +-5 -> +-10, a
+*     code meaning 4.9 V becomes 9.8 V -- a 2x OVERSHOOT, and in the same
+*     direction the command was already heading, which is the worst possible
+*     direction to throw a mirror.
+*   code first: the NEW code (written while the OLD range is still active)
+*     reads as v_target scaled DOWN by the range ratio, so the output dips
+*     toward zero and then lands exactly on v_target when DACRANGE follows.
+*     An undershoot, and it costs one frame less because no third write is
+*     needed.
+*
+* Rather than hard-code "code first when widening", both candidate
+* intermediates are evaluated and the order with the smaller excursion()
+* outside [v_current, v_target] is used -- an intermediate that lies BETWEEN
+* the two is not a glitch at all, just an early or late arrival. That also
+* stays correct for a ladder mixing unipolar and bipolar ranges, where the
+* simple widen/narrow rule does not hold.
+*
+* One case forces the old order: with sync_update, a DACx write only loads the
+* buffer register, so it cannot pre-position the ACTIVE register and the
+* code-first trick does nothing. */
+static bool dac_change_range(struct aylp_parport_dac_data *data, size_t i,
+	int new_idx, double v_target)
+{
+	int ch = data->channels[i];
+	int old_idx = data->range_idx[i];
+	// the code that will mean v_target once the new range is live
+	int code_new = volts_to_code(v_target, dac_ranges[new_idx].vmin,
+		dac_ranges[new_idx].vmax);
+	bool code_first = false;
+
+	// last_codes < 0 means nothing known is in the active register (init,
+	// or a previous range change), so there is no intermediate to reason
+	// about -- just switch.
+	if (data->last_codes[i] >= 0 && !data->sync_update) {
+		double v_cur = code_to_volts(data->last_codes[i],
+			dac_ranges[old_idx].vmin, dac_ranges[old_idx].vmax);
+		double v_range_first = code_to_volts(data->last_codes[i],
+			dac_ranges[new_idx].vmin, dac_ranges[new_idx].vmax);
+		double v_code_first = code_to_volts(code_new,
+			dac_ranges[old_idx].vmin, dac_ranges[old_idx].vmax);
+		double e_range = excursion(v_range_first, v_cur, v_target);
+		double e_code = excursion(v_code_first, v_cur, v_target);
+		code_first = e_code <= e_range;
+		log_debug("parport_dac: ch%d range %s->%s at %.4f V -> "
+			"%.4f V: range-first would pass %.4f V (excursion "
+			"%.4f), code-first %.4f V (excursion %.4f); using "
+			"%s", ch, dac_ranges[old_idx].name,
+			dac_ranges[new_idx].name, v_cur, v_target,
+			v_range_first, e_range, v_code_first, e_code,
+			code_first ? "code-first" : "range-first");
+		if (code_first) {
+			// pre-position the active register, still in the old
+			// range; DACRANGE below then lands it on v_target
+			dac_write_channel(data, ch, (uint16_t)code_new);
+		}
+	}
+
+	data->range_idx[i] = new_idx;
+	data->range_codes[i] = dac_ranges[new_idx].code;
+	data->vmin[i] = dac_ranges[new_idx].vmin;
+	data->vmax[i] = dac_ranges[new_idx].vmax;
+	data->dacrange_shadow &= (uint16_t)~(0xFu << (4 * ch));
+	data->dacrange_shadow |= (uint16_t)
+		((dac_ranges[new_idx].code & 0xF) << (4 * ch));
+	// this write moves the output, so it is subject to tDACWAIT like any
+	// other output update
+	dac_update_wait(data);
+	spi_frame(data, DAC_REG_DACRANGE, data->dacrange_shadow);
+	data->diag_frames++;
+	data->diag_range_changes++;
+	data->last_update_ns = monotonic_ns();
+	data->shrink_count[i] = 0;
+	log_info("parport_dac: ch%d range -> %s (%.3f..%.3f V)", ch,
+		dac_ranges[new_idx].name, data->vmin[i], data->vmax[i]);
+
+	if (code_first) {
+		// the active register already holds v_target in the new range
+		data->last_codes[i] = code_new;
+		return true;
+	}
+	// the code still in the active register means something else now, so
+	// skip_unchanged must not be allowed to conclude "unchanged"
+	data->last_codes[i] = -1;
+	return false;
+}
+
+/** Decide whether channel `i` should change range for a commanded `volts`,
+* and do it. Widen at once; narrow only after the command has fitted inside
+* `shrink_frac` of the narrower range for `shrink_dwell` consecutive
+* iterations, so a command sitting on a boundary does not oscillate between
+* two ranges -- each oscillation costing an intermediate frame, see
+* dac_change_range().
+*
+* Returns true if the code for the (possibly new) range is already in the
+* active register and the caller must not re-send it. */
+static bool dac_autorange(struct aylp_parport_dac_data *data, size_t i,
+	double volts)
+{
+	int cur = data->range_idx[i];
+	int want = pick_range(data, i, volts);
+	// widen: needed right now, no hysteresis -- the alternative is
+	// clipping the command this very iteration
+	if (volts < data->vmin[i] || volts > data->vmax[i]) {
+		if (want != cur)
+			return dac_change_range(data, i, want, volts);
+		data->shrink_count[i] = 0;
+		return false;
+	}
+	if (want == cur || range_span(want) >= range_span(cur)) {
+		data->shrink_count[i] = 0;
+		return false;
+	}
+	// narrowing candidate: require a margin, sustained
+	if (volts < dac_ranges[want].vmin * data->shrink_frac
+	|| volts > dac_ranges[want].vmax * data->shrink_frac) {
+		data->shrink_count[i] = 0;
+		return false;
+	}
+	if (++data->shrink_count[i] < data->shrink_dwell) return false;
+	return dac_change_range(data, i, want, volts);
+}
+
 /** Send one channel's 16-bit code, whichever link is configured. */
 static void dac_write_channel(struct aylp_parport_dac_data *data, int channel,
 	uint16_t code)
 {
-	dac_update_wait(data);
+	// In synchronous mode this write only loads the channel's buffer
+	// register -- no output moves until dac_soft_ldac() fires -- so
+	// tDACWAIT is enforced around that trigger instead of here. Spacing
+	// the buffer writes would be dead time protecting nothing, and would
+	// defeat the point of the mode on the pico link, where the whole
+	// reason to batch is that a sample costs ~0.6 us.
+	if (LIKELY(!data->sync_update)) dac_update_wait(data);
 	if (data->link == AYLP_PARPORT_LINK_SPI) {
 		if (UNLIKELY(data->verify)) {
 			// spi_write_verified() already counted its own frames
 			dac_write_and_verify(data, channel, code);
-			data->last_update_ns = monotonic_ns();
+			if (LIKELY(!data->sync_update))
+				data->last_update_ns = monotonic_ns();
 			return;
 		}
 		spi_frame(data, (uint8_t)(DAC_REG_DAC0 + channel), code);
@@ -930,6 +1201,26 @@ static void dac_write_channel(struct aylp_parport_dac_data *data, int channel,
 	data->diag_frames++;
 	// the output updates on the SYNC rising edge that just went out, so
 	// time the next one from here rather than from the start of the frame
+	if (LIKELY(!data->sync_update)) data->last_update_ns = monotonic_ns();
+}
+
+/** Fire the software LDAC, moving every channel set to synchronous mode in
+* SYNCCONFIG to whatever its buffer register was last loaded with -- all of
+* them together, on this one frame's SYNC rising edge. SLASEH2A table 8-17,
+* SOFT-LDAC: "Set this bit to 1 to synchronously load the DACs that have been
+* set in synchronous mode in the SYNCCONFIG register."
+*
+* Deliberately NOT run through dac_write_checked(), for the same reason the
+* soft reset in dac_configure() isn't: every TRIGGER field is typed "W" with
+* reset 0000h (table 8-17), so there is nothing to read back afterwards and a
+* "mismatch" would be a false alarm rather than a finding. */
+static void dac_soft_ldac(struct aylp_parport_dac_data *data)
+{
+	// this is the only thing that moves an output in synchronous mode, so
+	// it is the event tDACWAIT applies to
+	dac_update_wait(data);
+	spi_frame(data, DAC_REG_TRIGGER, DAC_TRIGGER_SOFT_LDAC);
+	data->diag_frames++;
 	data->last_update_ns = monotonic_ns();
 }
 
@@ -1112,17 +1403,29 @@ static void dac_configure(struct aylp_parport_dac_data *data)
 	dac_write_checked(data, DAC_REG_SPICONFIG, spiconfig, "SPICONFIG");
 	dac_write_checked(data, DAC_REG_GENCONFIG, DAC_GENCONFIG_REF_ON,
 		"GENCONFIG");
-	// Asynchronous update for every channel, so a DACx write moves the
-	// output on the frame's own SYNC rising edge. This is the reset
-	// default, but nothing else here would notice if it weren't.
-	dac_write_checked(data, DAC_REG_SYNCCONFIG, DAC_SYNCCONFIG_ASYNC,
-		"SYNCCONFIG");
+	// Update mode, per channel. Asynchronous (bit clear) moves the output
+	// on the DACx write's own SYNC rising edge; synchronous (bit set)
+	// holds it in the buffer register until dac_soft_ldac() fires, so
+	// every driven channel steps together. Only the channels this stage
+	// drives are switched -- the rest keep the reset default. All-clear
+	// IS that default, but nothing else here would notice if the device
+	// came up otherwise, which is exactly the failure reset_at_init=false
+	// leaves open.
+	uint16_t syncconfig = DAC_SYNCCONFIG_ASYNC;
+	if (data->sync_update)
+		for (size_t i = 0; i < data->n_outputs; i++)
+			syncconfig |= (uint16_t)(1u << data->channels[i]);
+	dac_write_checked(data, DAC_REG_SYNCCONFIG, syncconfig, "SYNCCONFIG");
 	// DACRANGE holds all four channels' nibbles; channels this stage does
 	// not drive keep the reset value (0 = 0 to 5 V)
 	uint16_t ranges = 0;
 	for (size_t i = 0; i < data->n_outputs; i++)
 		ranges |= (uint16_t)((data->range_codes[i] & 0xF)
 			<< (4 * data->channels[i]));
+	// DACRANGE is write-only (table 8-7 types it "W"), so keep a mirror:
+	// auto-ranging has to re-send all four nibbles to change one, and
+	// there is nothing to read back to reconstruct the others from.
+	data->dacrange_shadow = ranges;
 	dac_write_checked(data, DAC_REG_DACRANGE, ranges, "DACRANGE");
 	// Power up only the channels this stage drives. The rest keep their
 	// reset PWDWN bit and stay clamped to ground through the internal
@@ -1161,6 +1464,11 @@ int parport_dac_init(struct aylp_device *self)
 	data->clk_ctrl_bit = 0;
 	data->chan_ctrl_shift = 1;
 	data->reset_at_init = true;
+	// auto-range hysteresis: narrow only when the command has fitted
+	// inside 80% of the narrower range for a full second at ~3.8 kHz.
+	// Widening ignores both -- it has to happen the moment it is needed.
+	data->shrink_frac = 0.8;
+	data->shrink_dwell = 4000;
 	data->verify = false;
 	data->ack_status_bit = SPP_STATUS_ACK_DEFAULT;
 	data->crc = false;
@@ -1169,6 +1477,7 @@ int parport_dac_init(struct aylp_device *self)
 	struct json_object *ch_val = NULL, *idx_val = NULL;
 	struct json_object *scale_val = NULL, *offset_val = NULL;
 	struct json_object *delay_val = NULL, *range_val = NULL;
+	struct json_object *range_max_val = NULL;
 
 	if (self->params) {
 		json_object_object_foreach(self->params, key, val) {
@@ -1252,10 +1561,21 @@ int parport_dac_init(struct aylp_device *self)
 				offset_val = val;
 			} else if (!strcmp(key, "range")) {
 				range_val = val;
+			} else if (!strcmp(key, "range_max")) {
+				range_max_val = val;
+			} else if (!strcmp(key, "shrink_frac")) {
+				data->shrink_frac =
+					json_object_get_double(val);
+			} else if (!strcmp(key, "shrink_dwell")) {
+				data->shrink_dwell =
+					(long)json_object_get_int64(val);
 			} else if (!strcmp(key, "start_delay")) {
 				delay_val = val;
 			} else if (!strcmp(key, "skip_unchanged")) {
 				data->skip_unchanged =
+					json_object_get_boolean(val);
+			} else if (!strcmp(key, "sync_update")) {
+				data->sync_update =
 					json_object_get_boolean(val);
 			} else if (!strcmp(key, "reset_at_init")) {
 				data->reset_at_init =
@@ -1288,6 +1608,10 @@ int parport_dac_init(struct aylp_device *self)
 	data->vmax          = xcalloc(n, sizeof *data->vmax);
 	data->range_codes   = xcalloc(n, sizeof *data->range_codes);
 	data->last_codes    = xcalloc(n, sizeof *data->last_codes);
+	data->range_idx     = xcalloc(n, sizeof *data->range_idx);
+	data->range_base_idx = xcalloc(n, sizeof *data->range_base_idx);
+	data->range_max_idx = xcalloc(n, sizeof *data->range_max_idx);
+	data->shrink_count  = xcalloc(n, sizeof *data->shrink_count);
 	for (size_t i = 0; i < n; i++) {
 		data->channels[i] = val_int_at(ch_val, i, 0);
 		if (data->channels[i] < 0 || data->channels[i] > 3) {
@@ -1319,6 +1643,27 @@ int parport_dac_init(struct aylp_device *self)
 		data->range_codes[i] = r->code;
 		data->vmin[i] = r->vmin;
 		data->vmax[i] = r->vmax;
+		data->range_idx[i] = (int)(r - dac_ranges);
+		data->range_base_idx[i] = data->range_idx[i];
+		// range_max defaults to `range` itself, i.e. auto-ranging off
+		const char *rmax = val_str_at(range_max_val, i, rname);
+		int mi = find_range_index(rmax);
+		if (mi < 0) {
+			log_error("parport_dac: unknown range_max \"%s\"",
+				rmax);
+			return -1;
+		}
+		if (!range_contains(mi, data->range_base_idx[i])) {
+			log_error("parport_dac: range_max \"%s\" (%g..%g V) "
+				"does not contain range \"%s\" (%g..%g V) -- "
+				"auto-ranging can only WIDEN a channel, never "
+				"move it to a range that cannot represent the "
+				"configured one", rmax, dac_ranges[mi].vmin,
+				dac_ranges[mi].vmax, rname, r->vmin, r->vmax);
+			return -1;
+		}
+		data->range_max_idx[i] = mi;
+		if (mi != data->range_base_idx[i]) data->auto_range = true;
 		data->last_codes[i] = -1;	// force a write on iteration 0
 	}
 	for (size_t i = 0; i < n; i++) {
@@ -1329,6 +1674,22 @@ int parport_dac_init(struct aylp_device *self)
 			return -1;
 		}
 	}
+	// Synchronous update needs us to own the DAC's registers: we set the
+	// SYNC-EN bits and we issue the SOFT-LDAC. On the pico link the bridge
+	// firmware does the DAC's init and owns LDAC timing, and dac_configure()
+	// is never even called, so honouring this here would be a silent no-op
+	// -- the outputs would simply never move. Fail loudly instead.
+	if (data->sync_update && data->link != AYLP_PARPORT_LINK_SPI) {
+		log_error("parport_dac: sync_update is only supported on the "
+			"spi link; on the pico link the bridge firmware owns "
+			"the DAC's init and LDAC timing");
+		return -1;
+	}
+	if (data->sync_update && data->n_outputs == 1)
+		log_warn("parport_dac: sync_update with a single channel costs "
+			"an extra SOFT-LDAC frame per iteration and buys "
+			"nothing -- it only matters for simultaneous updates "
+			"across two or more channels");
 	if (data->link == AYLP_PARPORT_LINK_SPI) {
 		int bits[] = {data->sclk_bit, data->sdin_bit, data->sync_bit};
 		for (size_t i = 0; i < 3; i++) {
@@ -1395,26 +1756,56 @@ int parport_dac_init(struct aylp_device *self)
 		dac_write_channel(data, data->channels[i], (uint16_t)code);
 		data->last_codes[i] = code;
 	}
+	// in synchronous mode those writes only filled buffer registers; without
+	// this the outputs would sit at their power-up level and the first
+	// in-loop LDAC would step them from there instead of from the bias
+	if (data->sync_update) dac_soft_ldac(data);
 
 	self->type_in   = AYLP_T_VECTOR;
 	self->units_in  = AYLP_U_MINMAX;
 	self->type_out  = AYLP_T_UNCHANGED;
 	self->units_out = AYLP_U_UNCHANGED;
 
-	log_info("parport_dac: %s link over %s, %zu output(s)%s",
+	log_info("parport_dac: %s link over %s, %zu output(s), %s update%s",
 		data->link == AYLP_PARPORT_LINK_SPI ? "bit-banged SPI"
 			: "pico bridge",
 		data->backend == AYLP_PARPORT_MMIO ? "mmio" : "ppdev",
 		data->n_outputs,
+		data->sync_update ? "synchronous (SOFT-LDAC)" : "asynchronous",
 		data->verify ? ", verifying every write over SDO/ACK "
 			"(unconfirmed protocol assumption -- watch for "
 			"echo-mismatch warnings)" : "");
-	for (size_t i = 0; i < data->n_outputs; i++)
+	for (size_t i = 0; i < data->n_outputs; i++) {
 		log_info("parport_dac:   channel=%d (DAC%c) index=%d scale=%g "
 			"offset=%g range=%g..%g V", data->channels[i],
 			'A' + data->channels[i], data->indices[i],
 			data->scales[i], data->offsets[i],
 			data->vmin[i], data->vmax[i]);
+		if (data->range_max_idx[i] != data->range_base_idx[i]) {
+			double lo = data->offsets[i] - fabs(data->scales[i]);
+			double hi = data->offsets[i] + fabs(data->scales[i]);
+			log_info("parport_dac:     auto-range up to %s "
+				"(%g..%g V), narrowing below %g%% sustained "
+				"%ld iters", dac_ranges[data->range_max_idx[i]]
+				.name, dac_ranges[data->range_max_idx[i]].vmin,
+				dac_ranges[data->range_max_idx[i]].vmax,
+				100.0 * data->shrink_frac, data->shrink_dwell);
+			// A command of +-1 is the most an upstream clamp of
+			// 1.0 can ask for. If even that fits the base range,
+			// auto-ranging is dead code in this config and the
+			// user probably expected otherwise.
+			if (lo >= data->vmin[i] && hi <= data->vmax[i])
+				log_warn("parport_dac:     ch%d: a full-scale "
+					"command (+-1) spans only %g..%g V, "
+					"which already fits range %s -- "
+					"auto-ranging can never trigger here. "
+					"Widen `scale` or the upstream clamp "
+					"if you meant it to.",
+					data->channels[i], lo, hi,
+					dac_ranges[data->range_base_idx[i]]
+						.name);
+		}
+	}
 	return 0;
 }
 
@@ -1427,6 +1818,12 @@ int parport_dac_proc(struct aylp_device *self, struct aylp_state *state)
 	// this is when the channels have all reached their bias
 	if (UNLIKELY(!data->t0)) data->t0 = now;
 	double elapsed = now - data->t0;
+
+	// synchronous mode: did anything actually land in a buffer register
+	// this iteration? If every channel was skipped there is nothing new to
+	// load, and firing the trigger anyway would spend a frame re-latching
+	// the values the outputs already hold.
+	bool wrote_any = false;
 
 	for (size_t i = 0; i < data->n_outputs; i++) {
 		int idx = data->indices[i];
@@ -1451,9 +1848,22 @@ int parport_dac_proc(struct aylp_device *self, struct aylp_state *state)
 						data->channels[i], elapsed);
 			}
 		}
-		int code = volts_to_code(
-			data->offsets[i] + cmd * data->scales[i],
-			data->vmin[i], data->vmax[i]);
+		double volts = data->offsets[i] + cmd * data->scales[i];
+		// Range selection happens BEFORE the code is computed, so the
+		// code is always expressed in the range that is about to be
+		// active. Doing it the other way round would send a code
+		// scaled for the old range into the new one.
+		if (UNLIKELY(data->auto_range)
+		&& dac_autorange(data, i, volts)) {
+			// the transition pre-positioned the active register
+			// and DACRANGE landed it on `volts` -- re-sending the
+			// same code here would be a wasted frame
+			wrote_any = true;
+			log_trace("parport_dac: ch%d cmd=%g -> %.4f V via "
+				"range change", data->channels[i], cmd, volts);
+			continue;
+		}
+		int code = volts_to_code(volts, data->vmin[i], data->vmax[i]);
 
 		if (data->skip_unchanged && code == data->last_codes[i]) {
 			// the DAC register already holds this code; a finer
@@ -1463,10 +1873,18 @@ int parport_dac_proc(struct aylp_device *self, struct aylp_state *state)
 		}
 		dac_write_channel(data, data->channels[i], (uint16_t)code);
 		data->last_codes[i] = code;
+		wrote_any = true;
 		log_trace("parport_dac: ch%d cmd=%g -> code %d (%.4f V)",
 			data->channels[i], cmd, code,
 			code_to_volts(code, data->vmin[i], data->vmax[i]));
 	}
+
+	// One trigger for the whole iteration, after every channel's buffer is
+	// loaded: this is the point of the mode, and it is also why the LDAC
+	// goes here rather than inside the loop. Placed after the loop so an
+	// out-of-range index that breaks out early still latches the channels
+	// that did get written, instead of stranding them in their buffers.
+	if (UNLIKELY(data->sync_update) && wrote_any) dac_soft_ldac(data);
 
 	if (UNLIKELY(!data->diag_t0)) data->diag_t0 = now;
 	double dt = now - data->diag_t0;
@@ -1531,6 +1949,10 @@ int parport_dac_fini(struct aylp_device *self)
 	if (data->vmax) xfree(data->vmax);
 	if (data->range_codes) xfree(data->range_codes);
 	if (data->last_codes) xfree(data->last_codes);
+	if (data->range_idx) xfree(data->range_idx);
+	if (data->range_base_idx) xfree(data->range_base_idx);
+	if (data->range_max_idx) xfree(data->range_max_idx);
+	if (data->shrink_count) xfree(data->shrink_count);
 	xfree(data);
 	return 0;
 }

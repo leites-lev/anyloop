@@ -10,6 +10,8 @@ metadata:
 
 Selected approach as of 2026-07-24 for driving the BP-DAC81404EVM from sushi: **PC → PCIe parallel card (DB25) → RP2040/RP2350 PIO → hardware SPI → DAC81404**. Supersedes the restrap-to-SPI idea in [[parallel-card-dac81404-plan]] (that plan's Plan B is deprioritized, not deleted — the DB25 continuity check is still its gate).
 
+**Superseded in practice, 2026-07-29:** the direct MMIO bit-bang (that plan's Plan A) now works end-to-end and puts real voltage on the DAC output at ~6.4 µs per channel update — inside the budget below with no extra hardware or firmware. This bridge is no longer on the critical path; keep it as the option for cutting the PC-side critical section (7.5 µs → ~600 ns) if jitter, not mean latency, ever turns out to be the binding constraint.
+
 **The controlling constraint: this is a closed loop fed by a 0.3 ms latency camera.** PC computes every sample. Loop budget ≈ 300 µs camera + ~7.5 µs DAC write + ~5 µs settling ≈ 312 µs, so the entire DAC side is ~4% and any transport optimization is worth ≤2% end-to-end. This is why every purchase option below was rejected. **Jitter, not mean latency, is the real limit** — constant delay can be compensated with feedforward; the ~32 µs C-state spikes and 6.8 µs SCHED_FIFO jitter (see [[optiplex-sushi-serial-port-quirks]]) dominate everything on the DAC side.
 
 **Wire protocol (4 MMIO writes per 16-bit sample, ~600 ns):**

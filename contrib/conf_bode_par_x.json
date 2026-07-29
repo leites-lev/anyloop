@@ -1,0 +1,126 @@
+{
+	"_comment": {
+		"1": "Open-loop plant Bode of the x/tilt axis: command -> FSM -> camera -> CoM.",
+		"2": "PARPORT-DAC version of conf_bode_x.json -- identical camera/CoM/sweep, with",
+		"3": "anyloop:piplate_bridge swapped for anyloop:parport_dac (DAC81404 over the",
+		"4": "PCIe parallel card). Everything downstream of the command is unchanged, so",
+		"5": "this measures the SAME plant through a FASTER transport.",
+		"6": "WHY THIS SWEEP EXISTS: the delay in steering_fsp.json / attenuation_fsp.json",
+		"7": "was measured with the BRIDGEplate in the loop. The parport DAC replaces a",
+		"8": "~0.5-1.4 ms serial write with a ~12.8 us two-channel bit-bang, so the plant's",
+		"9": "tau is expected to DROP by a meaningful number of frames. Run this (and the",
+		"10": "y twin) BEFORE trusting steering_par_fsp.json's delay -- that file carries",
+		"11": "the piplate-era value on purpose, see its _delay_warning.",
+		"12": "K MUST BE RE-MEASURED -- it does NOT carry over from the piplate era.",
+		"13": "Two independent reasons: (a) the fine channel is DIVIDED downstream, so a",
+		"14": "given DAC volt no longer reaches the FSM as the same volt it used to, and",
+		"15": "(b) scale here is 1.0 V/unit against the piplate config's 2.0, which halves",
+		"16": "the volts per command unit on its own. The <=30 Hz |H| plateau this sweep",
+		"17": "produces IS the new Kx. Expect it well below the old 0.915.",
+		"18": "SOFTWARE injection: bode_plot replaces the x element (1; CoM is [y, x])",
+		"19": "with a sine each iteration, and parport_dac writes offset + sine*scale to",
+		"20": "DAC channel 1 (DACB) every cycle. Range 0-5 V, offset 2.5 V and scale",
+		"21": "-1.0 V/unit, so amplitude 0.1 sweeps 2.4..2.6 V: 2.5 V +/- 100 mV.",
+		"22": "No PID in the loop, so the command IS the sine = open loop. Phase is",
+		"23": "from wall-clock time and includes the full transport delay.",
+		"24": "TWO channels only -- there is no coarse stage. ch0 = y/tip, ch1 = x/tilt.",
+		"25": "y is parked at the 2.5 V bias (scale 0) while x is swept.",
+		"26": "CHECK sample_rate against the achieved loop rate before believing tau: the",
+		"27": "value below is inherited from the piplate era. The camera should still be",
+		"28": "the bottleneck, but the DAC no longer adds to the period."
+	},
+	"pipeline": [
+		{
+			"uri": "file:/home/fsl/anyloop_levfork/anyloop/build/asi_source.so",
+			"params": {
+				"camera_name": "ASI290MM",
+				"width": 32,
+				"height": 32,
+				"start_x": 384,
+				"start_y": 310,
+				"_roi_note": "ROI centred on beam at coarse bias 2/2 (fine 1.5/2.15): probe-verified 2026-07-21, full-sensor CoM (x 919, y 507). Re-derive via contrib/probe_frame.json only on an alignment change.",
+				"exposure": 250,
+				"gain": 100,
+				"bandwidth": 100,
+				"high_speed": 1,
+				"die_on_stall": 0
+			}
+		},
+		{
+			"_comment": "frame -> UDP viewer, so you can watch the beam + tracking (same as steering_fsp)",
+			"uri": "anyloop:udp_sink",
+			"params": { "ip": "127.0.0.1", "port": "64730", "decimation": 64 }
+		},
+		{
+			"uri": "anyloop:center_of_mass",
+			"params": {
+				"_note": "tracked 20x20 window, threshold 22 -- matches conf_bode_x.json exactly so the parport sweep measures the same sensor the piplate sweep did. Initialized on the beam (frame centre) with no acquisition phase: bode_plot injects from the first frame, and the stray reflection at ROI (10,28) must stay out of the sum. Output is image-normalized.",
+				"region_height": 20,
+				"region_width": 20,
+				"threshold": 22,
+				"track": true
+			}
+		},
+		{
+			"_comment": "CoM -> UDP viewer so the tracked centroid can be overlaid on the frame",
+			"uri": "anyloop:udp_sink",
+			"params": { "ip": "127.0.0.1", "port": "64731", "decimation": 64 }
+		},
+		{
+			"_comment": "Replace the x/tilt element (1) with the swept sine; read CoM x as response",
+			"uri": "anyloop:bode_plot",
+			"params": {
+				"sample_rate": 3788.0,
+				"element": 1,
+				"inject": "replace",
+				"output": "raw",
+				"freq_start": 5.0,
+				"freq_end": 300.0,
+				"_tuning": "v2 (2026-07-17): 60 log points x 49 cycles, split into 7 integer-cycle segments per point. The segment scatter gives the per-point error bar + a coherence quality (1=clean; <0.9 flagged as a disturbance line or drift inside the window). Integer-cycle segment boundaries (on excitation-phase crossings) kill the partial-cycle DC/line leakage the old fixed-time cutoff left in. 49 cycles keeps the 5 Hz window ~10 s, resolving it from the 5.64 Hz line.",
+				"n_freqs": 60,
+				"n_settle": 400,
+				"n_settle_cycles": 2.0,
+				"n_cycles": 49.0,
+				"n_segments": 7,
+				"_amplitude": "scale is 1.0 V/unit and offset 2.5 V, so amplitude IS the drive in volts: 0.1 = +/-100 mV about the 2.5 V mid-range bias, i.e. the output sweeps 2.4..2.6 V. Keep scale at 1.0 in every config that shares this K -- amplitude only reads as volts because command units ARE volts.",
+				"amplitude": 0.1,
+				"_amplitude2": "half-amplitude (+/-50 mV, i.e. 2.45..2.55 V) linearity/dead-zone check: if |H| moves between the two, the CoM has left its linear region or the FSM is in its dead-zone, and K is not trustworthy. bode_plot flags >10%. The converter is NOT a candidate cause -- the excursion is ~2600 codes at 76 uV/LSB, sitting at mid-range with 2.4 V of headroom either side.",
+				"amplitude2": 0.05,
+				"k_max_freq": 30.0,
+				"_avoid_freqs": "nudge sweep points off the measured bench lines (a line inside the lock-in skirt biases the point coherently -- segments do not average it out). List from attenuation6/8 memory.",
+				"avoid_freqs": [5.84, 9.07, 12.06, 13.17, 15, 17.49, 19.42, 21.26, 29.63, 35.53, 57.5, 58.08, 83.3, 84.02],
+				"avoid_df": 0.75,
+				"config": "x/tilt open-loop plant through the PARPORT DAC (DAC81404, spi link, mmio, range 0-5 V on a +/-12 V supply), no coarse stage, ch0=y / ch1=x. Drive 2.5 V +/- 100 mV, i.e. 2.4..2.6 V (scale -1.0 V/unit, offset 2.5, amplitude 0.1). 32x32 exp250 gain100 bw100, beam-centred ROI via start_x/start_y, tracked 20x20 thr22. Purpose: derive BOTH Kx and tau for this transport from scratch. tau: expect SHORTER than the piplate-era 5.8 fr, since the ~0.5-1.4 ms serial write is now a ~6.4 us bit-bang. Kx: expect WELL BELOW the old 0.915 -- the fine channel is divided downstream and scale is halved (1.0 vs 2.0 V/unit), so the old value is not a prediction, only an upper bound. K uses <=30 Hz; tau uses the full 5-300 Hz phase slope, so the sweep must run to 300.",
+				"_start_delay": "hold injection at 0 (= the channel parked at 0 V) for 30 s before the sweep starts. There is no coarse stage to settle any more, but the hold is kept: it gives the FSM and the camera AGC a quiet, known starting point, and bode_plot measures its baseline during it.",
+				"start_delay": 30.0,
+				"_output_file": "distinct filename on purpose: do NOT overwrite the piplate-era fsm_bodex_722_full7.pdf -- the whole point is comparing the two transports.",
+				"output_file": "fsm_bodex_par.pdf"
+			}
+		},
+		{
+			"_note": "PARPORT DAC. TWO channels only -- there is no coarse stage: ch0 = y/tip (DACA), ch1 = x/tilt (DACB). Here y is parked (scale 0) and x is driven.",
+			"_range": "0-5 (unipolar, DACRANGE code 0x0), biased at mid-range 2.5 V so the command has 2.5 V of headroom in BOTH directions without needing a bipolar range. 76 uV/LSB over the 5 V span -- 2x finer than +-5 would give, since the whole 16 bits now cover 5 V instead of 10. The 2.4..2.6 V sweep is ~2600 codes, plenty of resolution and nowhere near either rail.",
+			"_avss_note": "GROUND AVSS for this unipolar range (EVM J17 pin 5) -- do not run it at -12 V. SLASEH2A 7.5 specifies the unipolar accuracy figures AT AVSS = 0 V (TUE +-0.07 %FSR, offset error, zero-code error 0.15 %FSR); the -21.5 V <= AVSS < 0 conditions are the BIPOLAR ones. Unipolar on a negative AVSS is inside Recommended Operating Conditions (7.3: AVDD 4.5..41.5 V, AVSS -21.5..0 V, AVDD-AVSS 4.5..43 V) but is not a characterized combination, and it doubles analog dissipation (~192 mW vs ~96 mW, AIDD/AISS 8 mA typ at +/-12 V). AVDD needs VMAX+1.5 = 6.5 V, so +12 V is ample.",
+			"_footroom_note": "The 1.25-1.5 V output headroom/footroom figure does NOT set a floor here: SLASEH2A 7.5 conditions it on -10 mA <= load <= 10 mA (1.25 V) or +-15 mA (1.5 V). Unloaded -- the EC table's own condition, and near enough true when driving an amplifier input -- zero code sits within the 0.15 %FSR zero-code error, about 7.5 mV of ground on a 5 V range. Only if the FSM driver actually pulls ~10 mA AND the output must reach 0 V under that load does a negative AVSS buy anything, and then it costs the characterized condition above.",
+			"_scale_sign": "x keeps the NEGATIVE sign the piplate config used (was -2, now -1.0). That inversion is a property of the optical/mechanical path, not of the converter, so it carries over even though the magnitude does not. It is what made Kx come out sign-positive. If the push test now says otherwise, fix it HERE and re-run -- do not fix it by flipping the sign of K.",
+			"uri": "anyloop:parport_dac",
+			"params": {
+				"pci": "0000:05:00.2",
+				"backend": "mmio",
+				"link": "spi",
+				"channel": [0, 1],
+				"index": [0, 1],
+				"scale": [0, -1.0],
+				"offset": [2.5, 2.5],
+				"range": "0-5",
+				"_no_range_max": "auto-ranging deliberately NOT enabled for a sweep. A mid-sweep range change would glitch the output for a frame and step the quantization, both of which land straight in the lock-in as a bogus data point. The sweep never leaves 100..300 mV anyway.",
+				"_verify": "off in a swept/timed run: verify turns each write into 3 frames (write, read-command, NOP) plus a non-posted status read per bit. Use it in a bench smoke config, not here.",
+				"verify": false,
+				"_skip_unchanged": "still worth having, but expect it to skip far LESS than on the BRIDGEplate: at 153 uV/LSB a swept sine changes the code almost every iteration, where 1 mV codes often repeated. Costs ~6.4 us/frame, against a ~264 us loop period.",
+				"skip_unchanged": true,
+				"_sync_update": "left off. Only ONE channel is driven in this sweep, so there is no inter-channel skew to remove and sync_update would just add a SOFT-LDAC frame per iteration.",
+				"sync_update": false
+			}
+		}
+	]
+}

@@ -89,11 +89,32 @@ struct aylp_parport_dac_data {
 	double *start_delays;	// seconds to hold at `offset` before releasing
 	bool *released;		// has this channel's startup hold expired?
 	bool has_start_delay;
-	double *vmin;		// low end of the channel's configured range
-	double *vmax;		// high end of the channel's configured range
-	int *range_codes;	// DACRANGE nibble per channel
+	double *vmin;		// low end of the channel's ACTIVE range
+	double *vmax;		// high end of the channel's ACTIVE range
+	int *range_codes;	// DACRANGE nibble per channel (active range)
 	int *last_codes;	// last 16-bit code written (-1 = never)
+	// auto-ranging: widen a channel's output range when the commanded
+	// voltage no longer fits, and narrow it again once it comfortably
+	// does. Off unless `range_max` names a range wider than `range`.
+	bool auto_range;
+	int *range_idx;		// active range, index into dac_ranges[]
+	int *range_base_idx;	// the configured `range`: narrowest allowed
+	int *range_max_idx;	// widest range auto-ranging may select
+	// DACRANGE holds all four channels' nibbles in one write-only
+	// register, so changing one channel means re-sending the others --
+	// mirror what we last sent
+	uint16_t dacrange_shadow;
+	double shrink_frac;	// narrow only below this fraction of the
+				// candidate range (hysteresis against chatter)
+	long shrink_dwell;	// ...sustained for this many iterations
+	long *shrink_count;	// consecutive iterations that would fit
+	long diag_range_changes;
 	bool skip_unchanged;	// don't re-send a channel whose code is the same
+	// synchronous update: every driven channel gets its SYNCCONFIG
+	// SYNC-EN bit set, so a DACx write only loads that channel's buffer
+	// register, and all of them move together on the SOFT-LDAC trigger
+	// issued once per iteration (SLASEH2A 8.3.3.1.1)
+	bool sync_update;
 	bool reset_at_init;	// issue a DAC soft reset before configuring
 	bool probe;		// read the data register back to check the BAR
 	double t0;		// CLOCK_MONOTONIC of the first proc (s)

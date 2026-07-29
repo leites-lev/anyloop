@@ -1,0 +1,188 @@
+{
+	"_comment": {
+		"1": "PARPORT-DAC version of attenuation_fsp.json. A/B harness for the adaptive",
+		"2": "FSP: same camera/CoM/fsp/clamp, with anyloop:attenuation_test inserted",
+		"3": "between the CoM sinks and the fsp so open-vs-closed is apples-to-apples,",
+		"4": "and anyloop:piplate_bridge swapped for anyloop:parport_dac.",
+		"5": "PURPOSE: this is how you find out whether the faster transport actually",
+		"6": "buys rejection. The BRIDGEplate's ~0.5-1.4 ms write was a large share of",
+		"7": "the loop delay, and delay is what caps the FSP's bandwidth -- so a shorter",
+		"8": "tau should push the achievable rejection past where the piplate runs sat.",
+		"9": "COMPARE against attenuation_fsp21 / attenuation_fsp15 (run 15: y 0.073 /",
+		"10": "x 0.168 px) on the shared 500/500/4096 grid.",
+		"11": "TWO channels only -- no coarse stage. ch0 = y/tip, ch1 = x/tilt, range",
+		"12": "0-5 V biased at mid-range 2.5 V, on the +/-12 V supply.",
+		"13": "READ _delay_warning AND _K_warning BEFORE RUNNING: BOTH the delay and the K",
+		"14": "values are piplate-era placeholders and must be re-fit from",
+		"15": "conf_bode_par_x.json / conf_bode_par_y.json first. Run with either stale",
+		"16": "and the closed RMS measures the wrong loop, not the new transport.",
+		"17": "AVSS IS GROUNDED for this unipolar range -- see _avss_note on the",
+		"18": "parport_dac stage; it is the condition the unipolar specs are given at.",
+		"19": "attenuation_test runs with pass_open=true so fsp identifies on the REAL",
+		"20": "open-loop error (not zeros) during its own hold; fsp start_delay 600 =",
+		"21": "attenuation_test start_delay 100 + open_time 500, so the hold spans the",
+		"22": "whole recorded open phase and the 10 s ramp lands inside settle_time."
+	},
+	"pipeline": [
+		{
+			"uri": "file:/home/fsl/anyloop_levfork/anyloop/build/asi_source.so",
+			"params": {
+				"camera_name": "ASI290MM",
+				"width": 32,
+				"height": 32,
+				"start_x": 384,
+				"start_y": 310,
+				"_roi_note": "start_x/start_y centre the 32x32 ROI on the beam parked at coarse bias 2/2 (fine 1.5/2.15): probe-verified 2026-07-21, full-sensor CoM (x 919, y 507). Re-derive with contrib/probe_frame.json only if the alignment (not the bias) changes.",
+				"exposure": 250,
+				"gain": 100,
+				"bandwidth": 100,
+				"high_speed": 1,
+				"die_on_stall": 0,
+				"stall_timeout_ms": 50
+			}
+		},
+		{
+			"_comment": "raw frame to watch_steering.jl",
+			"uri": "anyloop:udp_sink",
+			"params": { "ip": "127.0.0.1", "port": "64730", "decimation": 64 }
+		},
+		{
+			"_comment": "tracking window copied from steering_tuned.json",
+			"uri": "anyloop:center_of_mass",
+			"params": {
+				"region_height": 20,
+				"region_width": 20,
+				"threshold": 22,
+				"track": true
+			}
+		},
+		{
+			"_comment": "[y,x] CoM vector to watch_steering.jl",
+			"uri": "anyloop:udp_sink",
+			"params": { "ip": "127.0.0.1", "port": "64731", "decimation": 64 }
+		},
+		{
+			"_comment": "[y,x] CoM vector (full rate) to watch_error_ts.jl",
+			"uri": "anyloop:udp_sink",
+			"params": { "ip": "127.0.0.1", "port": "64732" }
+		},
+		{
+			"_note1": "THE TEST. Sits after the CoM sinks (watchers see the true error) and before the FSP. pass_open=true: open phase feeds the FSP the REAL error (not zeros) so it can identify while its own start_delay hold (600 s) keeps its command at zero -- the DAC still parks at bias throughout, only fsp's internal view of the error changes. settle_time covers FSP/NLMS/adapt re-convergence after closure. pixel_scale 15.5 = (32-1)/2 for the 32x32 ROI. 500/500 @ nfft 4096 matches attenuation_fsp15/21 for a SHARED frequency grid -> directly comparable closed RMS.",
+			"uri": "anyloop:attenuation_test",
+			"params": {
+				"start_delay": 100.0,
+				"open_time": 500.0,
+				"settle_time": 120.0,
+				"closed_time": 500.0,
+				"pass_open": true,
+				"nfft": 4096,
+				"labels": "y,x",
+				"pixel_scale": 15.5,
+				"config": "ATTENUATION PAR-1 -- first closed-loop attenuation run through the PARPORT DAC (TI DAC81404 over the StarTech PEX1P2 / AX99100 PCIe parallel card, spi link, mmio backend), replacing the DAQC2/BRIDGEplate serial path used by every previous attenuation run.\nTRANSPORT: bit-banged 24-bit SPI, ~6.4 us per channel update (~12.8 us for both channels), against the BRIDGEplate's ~0.5-1.4 ms. Range 0-5 V unipolar biased at mid-range 2.5 V (AVDD = +12 V, needs only VMAX+1.5 = 6.5 V; AVSS GROUNDED, which is the condition SLASEH2A 7.5 specifies the unipolar accuracy figures at); 16-bit = 76 uV/LSB, vs the BRIDGEplate's 12-bit 1 mV.\nOUTPUTS: two channels, no coarse stage -- ch0 = y/tip (+1.0 V/unit), ch1 = x/tilt (-1.0 V/unit), offset 2.5 V, command span 1.5..3.5 V. NOTE the fine channel is DIVIDED downstream, and scale is halved vs the piplate config, so this is NOT the same command->FSM voltage mapping as any previous attenuation run: K is not comparable across the transport change and had to be re-measured.\nCamera/CoM: 32x32 ROI start_x 384 / start_y 310, exposure 250, gain 100, bw 100, 20x20 tracked window thr 22.\nFSP: broad_order 512, broad_mu .03, broad_lp 11; adapt_period 8, adapt_tau 5. Guard ON (guard_ratio 4).\nDELAY AND K: BOTH re-fit for this transport from conf_bode_par_x/y.json (+/-100 mV sweep, full-band 5-300 Hz phase slope for tau, <=30 Hz plateau for K). If this string still says otherwise when you read it back, the run used placeholders and the numbers below are not trustworthy -- a shorter tau is the entire reason to expect better rejection here, and a stale K just measures the wrong loop gain.\nCOMPARE against attenuation_fsp21 and attenuation_fsp15 (run 15: y 0.073 / x 0.168 px): report total and per-band closed RMS, 60-400 Hz waterbed, command/clamp behavior, and transient activation count on the shared 500/500/4096 grid. Closed RMS in PIXELS remains comparable across the change; command units do not. refs: Kulcsar 2006 / Petit 2008 / Meimon 2010 / Correia 2010",
+				"output_file": "attenuation_par_fsp1.pdf"
+			}
+		},
+		{
+			"_delay_warning": "THE ONE THING THAT DOES NOT CARRY OVER. delay/delay_frac below (global/x 6+0.0, y override 5+0.828) were fit with the BRIDGEplate in the loop. The parport DAC removes ~0.5-1.4 ms of transport, which at fs 3788 (264 us/frame) is roughly 2-5 frames -- a large fraction of the 6 fr configured here. Left UNCHANGED on purpose rather than guessed at: an over-modeled delay degrades rejection, but UNDER-modeling is the known failure mode (the 2026-07-16 run under-modeled by 1.6-2.3 fr and spiraled at ~310 Hz), so erring long is the less dangerous direction while unmeasured. Re-fit from conf_bode_par_x/y.json and update BOTH the global and the y override before quoting any attenuation number from this harness.",
+			"_note1": "THE CONTROLLER. Delay is measured from the BODE PHASE, not the departure latency: departure latency under-modeled the delay by 1.6-2.3 frames and left a near-unity command-echo residual around 300 Hz. broad_order=512 and broad_mu=.03 match attenuation11.",
+			"_K_warning": "THE K VALUES BELOW ARE PLACEHOLDERS, NOT MEASUREMENTS. Ky=0.645 / Kx=0.803 are the piplate-era numbers and do NOT apply here: (a) the fine channel is DIVIDED downstream, so a DAC volt no longer reaches the FSM as the volt it used to, and (b) scale is 1.0 V/unit against the old 2.0, halving the volts per command unit on its own. Both push the true K DOWN, so these are too LARGE -- the safe direction (u = -phi_hat/K, so an over-large K under-drives). Replace both from the <=30 Hz plateaus of conf_bode_par_x/y.json BEFORE quoting any attenuation number: a stale K makes the closed RMS a measurement of the wrong loop gain, not of the transport.",
+			"_note2": "K is the SIGNED command->error gain (error units per command unit). Its SIGN (y +, x -) belongs to the optical/mechanical path and carries over; only the magnitude is invalid. K is also bias-dependent.",
+			"_note3": "With broad_order>0 the identified full-band observer supplies the command and the AR2 modal estimate is not added, avoiding double cancellation.",
+			"_note4": "zeta ~0.002 = sharp line; ~0.3 = broadband hump. adapt_period>0 turns on Petit/Meimon re-identification every 8 s.",
+			"uri": "anyloop:fsp",
+			"params": {
+				"type": "vector",
+				"units": "minmax",
+				"delay": 6,
+				"delay_frac": 0.0,
+				"_fs": "3788 inherited from the piplate era. The camera should still be the bottleneck, but the DAC no longer adds to the loop period -- confirm the achieved rate and update fs (and the bode_par sample_rate) if it has moved, since delay in FRAMES depends on it.",
+				"fs": 3788,
+				"broad_order": 512,
+				"broad_mu": 0.03,
+				"_broad_lp": "11-tap boxcar prefilter on the NLMS input kills the 300-420 Hz command-echo regeneration at the root; +5 frames folded into the broad horizon, in-band timing unchanged. The regeneration frequency fs/(2*(delay+delay_frac)) MOVES when the delay is re-fit for this transport -- re-check that broad_lp's first null (344 Hz at 11 taps) still sits usefully against the new band.",
+				"broad_lp": 11,
+				"broad_freeze_closed": true,
+				"_broad_freeze_closed": "true (the default): identification happens during the start_delay hold on genuine open-loop data (via attenuation_test's pass_open); freezing on close avoids closed-loop NLMS learning leaked command as disturbance.",
+				"_two_timescale": "slow drift is cancelled by a separate EWMA state; NLMS/modal observers see only the vibration residual. Large prediction innovations temporarily select bounded proportional recovery while preserving the drift command, freeze learning, then cross-fade back.",
+				"drift_tau": 2.0,
+				"transient_sigma": 6.0,
+				"transient_floor": 0.03,
+				"transient_kp": 0.25,
+				"transient_tau": 5.0,
+				"transient_hold": 0.10,
+				"transient_ramp": 0.25,
+				"clamp": 1.0,
+				"start_delay": 600.0,
+				"_start_delay": "= attenuation_test start_delay(100) + open_time(500), so fsp's own hold spans the ENTIRE recorded open phase instead of closing while attenuation_test is still feeding it data it should not act on.",
+				"ramp": 10.0,
+				"_ramp": "10 s starting at t=600 lands the bumpless handover well inside attenuation_test's 120 s settle_time, so full authority is reached long before the closed-loop recording window (t=720-1220) starts.",
+				"adapt_period": 8.0,
+				"adapt_df_max": 0.5,
+				"adapt_tau": 5.0,
+				"_guard": "burst guard ON (guard_ratio 4): per-axis band-pass detector on the raw error at the regeneration freq fs/(2*(delay+delay_frac)); on a burst the axis's authority is cut to 0 for guard_hold s, learning freezes, then authority ramps back over guard_ramp s. Recurring activations = re-measure K/delay at the current bias -- which on this transport most likely means the delay is still the stale piplate-era one.",
+				"guard_ratio": 4.0,
+				"guard_floor": 0.008,
+				"guard_hold": 0.25,
+				"guard_ramp": 1.0,
+				"guard_tick": 10.0,
+				"y": {
+					"_K": "PLACEHOLDER 0.645 (piplate-era). Replace from conf_bode_par_y.json's <=30 Hz plateau -- see _K_warning above. Expect well below 0.645.",
+					"_delay": "5+0.828 = 5.828 fr, PIPLATE-ERA. See _delay_warning -- re-fit from fsm_bodey_par.pdf.",
+					"delay": 5,
+					"delay_frac": 0.828,
+					"K": 0.645,
+					"r": 1.0,
+					"freqs": [5.64, 11.3, 21.1, 29.6, 57.5, 20.0],
+					"zeta": [0.002, 0.002, 0.002, 0.002, 0.003, 0.3],
+					"q": [1.0e-5, 1.5e-5, 1.5e-5, 1.0e-5, 0.5e-5, 1.0e-5]
+				},
+				"x": {
+					"_K": "PLACEHOLDER 0.803 (piplate-era). Replace from conf_bode_par_x.json's <=30 Hz plateau -- see _K_warning above. Expect well below 0.803.",
+					"_delay": "x inherits the global 6+0.0 fr, PIPLATE-ERA. See _delay_warning -- re-fit from fsm_bodex_par.pdf.",
+					"K": 0.803,
+					"r": 1.0,
+					"freqs": [9.8, 12.0, 21.7, 24.9, 57.5, 83.3, 20.0],
+					"zeta": [0.002, 0.002, 0.002, 0.002, 0.003, 0.003, 0.3],
+					"q": [1.0e-5, 1.0e-5, 2.0e-5, 1.5e-5, 0.5e-5, 0.3e-5, 1.0e-5]
+				}
+			}
+		},
+		{
+			"uri": "anyloop:clamp",
+			"params": {
+				"type": "vector",
+				"min": -1.0,
+				"max": 1.0
+			}
+		},
+		{
+			"_note": "PARPORT DAC. TWO channels only -- there is no coarse stage: ch0 = y/tip (DACA, +1.0 V/unit) = index 0, ch1 = x/tilt (DACB, -1.0 V/unit) = index 1. The fsp output is plain [y,x] in command units.",
+			"_range": "0-5 (unipolar, DACRANGE code 0x0), biased at mid-range 2.5 V so the command has 2.5 V of headroom both ways without a bipolar range. 76 uV/LSB -- 2x finer than +-5. Same range, offset and scale as conf_bode_par_x/y.json, which is REQUIRED for the measured K to transfer.",
+			"_avss_note": "GROUND AVSS for this unipolar range (EVM J17 pin 5). SLASEH2A 7.5 specifies the unipolar accuracy figures at AVSS = 0 V; the -21.5 V <= AVSS < 0 conditions are the bipolar ones. Negative AVSS with a unipolar range is legal per 7.3 but uncharacterized, and doubles analog dissipation (~192 mW vs ~96 mW). The 1.25-1.5 V footroom is conditioned on +-10/+-15 mA of load current, so it does not put a floor under this loop's 1.5 V minimum at light load. See steering_par_fsp.json's _avss_note and _footroom_note.",
+			"_authority_check": "clamp +/-1.0 at scale 1.0 V/unit about a 2.5 V bias = a 1.5..3.5 V command span, comfortably inside 0-5 either way. Chosen so command units read as volts, not measured -- see steering_par_fsp.json's _authority_check for how to change it safely.",
+			"_range_max": "AUTO-RANGING, range_max 0-10: widen when the command no longer fits 0-5, narrow again after it has sat inside 80% of the narrower range for shrink_dwell iterations. Steps through the ladder 0-5 -> 0-6 -> 0-10 (narrowest that fits), all legal on the +12 V rail. The ladder stays unipolar by construction; see steering_par_fsp.json's _range_max_polarity if you ever need negative output. See its _range_max_glitch too: a range change still costs one intermediate frame (minimised to an undershoot toward ground, not eliminated), so it is a safety net, not a routine mechanism.",
+			"_range_max_attenuation_warning": "FOR AN A/B ATTENUATION RUN, THINK BEFORE LEAVING THIS ON. If a range change fires mid-run it injects a one-frame transient AND steps the quantization, both of which land in the closed-loop RMS you are trying to measure -- and it would do so only in the closed phase, not the open one, biasing exactly the comparison. As configured it cannot trigger (clamp bounds the request to 1.5..3.5 V, inside 0-5), so this is inert. If you widen the clamp, consider setting range_max back to 0-5 for the measurement run so the number is clean, and re-enable it for operational use.",
+			"_scale_sign": "y positive, x negative -- same signs as the piplate config (+2/-2), halved in magnitude. The sign belongs to the optical/mechanical path, not the converter.",
+			"_sync_update": "left OFF. With two driven channels the async skew is one frame, ~6.4 us -- ~2% of the 264 us loop period and below the platform's own ~6.8 us SCHED_FIFO / ~32 us C-state jitter. Turn it on only if axis cross-coupling appears that tracks scheduling hiccups rather than the command; see doc/devices/parport_dac.md, Update mode.",
+			"uri": "anyloop:parport_dac",
+			"params": {
+				"pci": "0000:05:00.2",
+				"backend": "mmio",
+				"link": "spi",
+				"channel": [0, 1],
+				"index": [0, 1],
+				"scale": [1.0, -1.0],
+				"offset": [2.5, 2.5],
+				"range": "0-5",
+				"range_max": "0-10",
+				"_verify": "off in the closed loop: verify turns each write into 3 frames plus a non-posted status read per bit. Exercise it with conf_parport_dac_smoke.json before the run, not during it.",
+				"verify": false,
+				"_skip_unchanged": "kept, but expect it to skip far LESS than on the BRIDGEplate: at 153 uV/LSB the command changes the code far more often than 1 mV codes did. Fine at ~6.4 us/frame against a ~264 us period, but the DAC sees more traffic than the piplate config did.",
+				"skip_unchanged": true,
+				"sync_update": false,
+				"start_delay": [2.0, 2.0],
+				"reset_at_init": true
+			}
+		}
+	]
+}

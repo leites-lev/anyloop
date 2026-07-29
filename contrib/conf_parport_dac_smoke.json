@@ -50,14 +50,15 @@
      0,
      1
     ],
-    "range": "+-10",
+    "_range": "0-5 with a 2.5 V mid-range bias, matching the steering/bode par configs. The sine was previously +-2 V about 0 V on a +-10 range; recentred to 0.5..4.5 V about 2.5 V so it fits a unipolar range. Same peak-to-peak, 4x finer codes (76 uV/LSB vs 305 uV).",
+    "range": "0-5",
     "scale": [
      2,
      2
     ],
     "offset": [
-     0,
-     0
+     2.5,
+     2.5
     ]
    }
   },

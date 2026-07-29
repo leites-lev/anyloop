@@ -1,0 +1,116 @@
+{
+	"_comment": {
+		"1": "Open-loop plant Bode of the y/tip axis: command -> FSM -> camera -> CoM.",
+		"2": "PARPORT-DAC version of conf_bode_y.json -- identical camera/CoM/sweep, with",
+		"3": "anyloop:piplate_bridge swapped for anyloop:parport_dac (DAC81404 over the",
+		"4": "PCIe parallel card). See conf_bode_par_x.json for the full rationale.",
+		"5": "SOFTWARE injection: bode_plot replaces the y element (0; CoM is [y, x])",
+		"6": "with a sine each iteration, and parport_dac writes offset + sine*scale to",
+		"7": "DAC channel 0 (DACA) every cycle. Range 0-5 V, offset 2.5 V and scale",
+		"8": "1.0 V/unit, so amplitude 0.1 sweeps 2.4..2.6 V: 2.5 V +/- 100 mV.",
+		"9": "TWO channels only -- there is no coarse stage. ch0 = y/tip, ch1 = x/tilt.",
+		"10": "x is parked at the 2.5 V bias (scale 0) while y is swept.",
+		"11": "AMPLITUDE NOTE: the piplate-era y sweep ran at 0.06 where x ran at 0.2,",
+		"12": "because y sat near the FSM stiction/dead-zone at low drive. Both axes are",
+		"13": "now at the +/-100 mV asked for. If y comes back with a small |H| or a",
+		"14": "NONLINEAR flag, raise BOTH amplitudes here rather than trusting Ky -- and",
+		"15": "if you do, re-run x at the matching drive so the two stay comparable.",
+		"16": "K MUST BE RE-MEASURED (divided fine channel + scale 1.0 vs the old 2.0);",
+		"17": "see conf_bode_par_x.json's comment block for the full reasoning.",
+		"18": "bode_plot takes a single scalar `element`, so x and y CANNOT be swept in one",
+		"19": "run -- this file and conf_bode_par_x.json are the pair.",
+		"20": "Run BOTH before trusting steering_par_fsp.json's delay or K values."
+	},
+	"pipeline": [
+		{
+			"uri": "file:/home/fsl/anyloop_levfork/anyloop/build/asi_source.so",
+			"params": {
+				"camera_name": "ASI290MM",
+				"width": 32,
+				"height": 32,
+				"start_x": 384,
+				"start_y": 310,
+				"_roi_note": "ROI centred on beam at coarse bias 2/2 (fine 1.5/2.15): probe-verified 2026-07-21, full-sensor CoM (x 919, y 507). Re-derive via contrib/probe_frame.json only on an alignment change.",
+				"exposure": 250,
+				"gain": 100,
+				"bandwidth": 100,
+				"high_speed": 1,
+				"die_on_stall": 0
+			}
+		},
+		{
+			"_comment": "frame -> UDP viewer, so you can watch the beam + tracking (same as steering_fsp)",
+			"uri": "anyloop:udp_sink",
+			"params": { "ip": "127.0.0.1", "port": "64730", "decimation": 64 }
+		},
+		{
+			"uri": "anyloop:center_of_mass",
+			"params": {
+				"_note": "tracked 20x20 window, threshold 22 -- matches conf_bode_y.json exactly so the parport sweep measures the same sensor the piplate sweep did.",
+				"region_height": 20,
+				"region_width": 20,
+				"threshold": 22,
+				"track": true
+			}
+		},
+		{
+			"_comment": "CoM -> UDP viewer so the tracked centroid can be overlaid on the frame",
+			"uri": "anyloop:udp_sink",
+			"params": { "ip": "127.0.0.1", "port": "64731", "decimation": 64 }
+		},
+		{
+			"_comment": "Replace the y/tip element (0) with the swept sine; read CoM y as response",
+			"uri": "anyloop:bode_plot",
+			"params": {
+				"sample_rate": 3788.0,
+				"element": 0,
+				"inject": "replace",
+				"output": "raw",
+				"freq_start": 5.0,
+				"freq_end": 300.0,
+				"_tuning": "v2 (2026-07-17): 60 log points x 49 cycles, 7 integer-cycle segments per point for per-point error bars + coherence quality (<0.9 flagged). Integer-cycle segment boundaries remove the partial-cycle DC/line leakage of the old fixed-time cutoff. freq_start 5 Hz (was 1): the flat+delay plant is fully pinned by the 5-30 Hz K band and 49 cycles at 1 Hz would cost ~50 s/point.",
+				"n_freqs": 60,
+				"n_settle": 400,
+				"n_settle_cycles": 2.0,
+				"n_cycles": 49.0,
+				"n_segments": 7,
+				"_amplitude": "scale is 1.0 V/unit and offset 2.5 V, so amplitude IS the drive in volts: 0.1 sweeps 2.4..2.6 V, i.e. 2.5 V +/- 100 mV, matching the x sweep.",
+				"amplitude": 0.1,
+				"_amplitude2": "half-amplitude (+/-50 mV, i.e. 2.45..2.55 V) linearity/dead-zone check; bode_plot flags a >10% |H| change between amplitudes. y is the axis that previously sat near the FSM stiction/dead-zone at low drive -- if mag2 comes back < mag by ~15% and NONLINEAR is flagged, raise both amplitudes rather than trusting Ky. The converter is NOT a candidate cause: ~2600 codes at 76 uV/LSB, sitting at mid-range.",
+				"amplitude2": 0.05,
+				"k_max_freq": 30.0,
+				"_avoid_freqs": "nudge sweep points off the measured bench lines (a line inside the lock-in skirt biases the point coherently -- segments do not average it out).",
+				"avoid_freqs": [5.84, 9.73, 12.06, 17.5, 19.42, 21.26, 28.16, 29.63, 35.53, 57.5, 58.08, 84.02],
+				"avoid_df": 0.75,
+				"config": "y/tip open-loop plant through the PARPORT DAC (DAC81404, spi link, mmio, range 0-5 V on a +/-12 V supply), no coarse stage, ch0=y / ch1=x. Drive 2.5 V +/- 100 mV, i.e. 2.4..2.6 V (scale 1.0 V/unit, offset 2.5, amplitude 0.1). 32x32 exp250 gain100 bw100, beam-centred ROI via start_x/start_y, tracked 20x20 thr22. Purpose: derive BOTH Ky and tau for this transport from scratch. tau: expect SHORTER than the piplate-era 5.6 fr. Ky: expect WELL BELOW the old 0.66 -- the fine channel is divided downstream and scale is halved (1.0 vs 2.0 V/unit), so the old value is an upper bound, not a prediction. K uses <=30 Hz, tau uses the full 5-300 Hz slope.",
+				"_start_delay": "hold injection at 0 (= the channel parked at 0 V) for 30 s before the sweep starts. No coarse stage to settle any more, but the hold gives the FSM and camera AGC a quiet, known starting point and lets bode_plot measure its baseline.",
+				"start_delay": 30.0,
+				"_output_file": "distinct filename on purpose: do NOT overwrite the piplate-era fsm_bodey_722_full4.pdf.",
+				"output_file": "fsm_bodey_par.pdf"
+			}
+		},
+		{
+			"_note": "PARPORT DAC. TWO channels only -- there is no coarse stage: ch0 = y/tip (DACA), ch1 = x/tilt (DACB). Here y is driven and x is parked (scale 0).",
+			"_range": "0-5 (unipolar, DACRANGE code 0x0), biased at mid-range 2.5 V so the command has 2.5 V of headroom both ways without a bipolar range. 76 uV/LSB -- 2x finer than +-5, since all 16 bits now cover 5 V instead of 10.",
+			"_avss_note": "GROUND AVSS for this unipolar range (EVM J17 pin 5). SLASEH2A 7.5 specifies the unipolar accuracy figures at AVSS = 0 V; the -21.5 V <= AVSS < 0 conditions are the bipolar ones. Negative AVSS with a unipolar range is legal per 7.3 but uncharacterized, and doubles analog dissipation. The 1.25-1.5 V footroom that would argue for it is conditioned on +-10/+-15 mA of load current -- unloaded, zero code sits ~7.5 mV off ground. See conf_bode_par_x.json for the full reasoning.",
+			"_scale_sign": "y keeps the POSITIVE sign the piplate config used (was +2, now +1.0), and x keeps its negative sign in the steering configs. The sign is a property of the optical/mechanical path, not the converter, so it carries over even though the magnitude does not.",
+			"uri": "anyloop:parport_dac",
+			"params": {
+				"pci": "0000:05:00.2",
+				"backend": "mmio",
+				"link": "spi",
+				"channel": [0, 1],
+				"index": [0, 1],
+				"scale": [1.0, 0],
+				"offset": [2.5, 2.5],
+				"range": "0-5",
+				"_no_range_max": "auto-ranging deliberately NOT enabled for a sweep: a mid-sweep range change would glitch the output for a frame and step the quantization, both of which land in the lock-in as a bogus point. The sweep never leaves 100..300 mV anyway.",
+				"_verify": "off in a swept/timed run: verify turns each write into 3 frames plus a non-posted status read per bit.",
+				"verify": false,
+				"skip_unchanged": true,
+				"_sync_update": "left off: only one channel is driven in this sweep, so there is no inter-channel skew to remove.",
+				"sync_update": false
+			}
+		}
+	]
+}
