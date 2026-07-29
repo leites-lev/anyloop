@@ -26,14 +26,17 @@ Two ways to get from the DB25 to the DAC, chosen with `link`:
 
   - `"spi"` (default): the DB25 data pins *are* the SPI bus — D0 = SCLK,
     D1 = SDIN, D2 = SYNC by default, GND on pins 18–25. SYNC (frame bracket)
-    and LDAC (load strobe, hardwired low — see Jumpers below) are both
+    and LDAC (load strobe, unused here — see Update mode below) are both
     active-low pins, per the DAC81404's own datasheet naming (no "Z"
     suffix — see the pinout table's footnote). The 24-bit frames are
     bit-banged here: two stores per bit plus the frame
     brackets. **Measured
     2026-07-27: 156 k frames/s = 6.4 µs per channel update** (~123 ns per
-    store, effective SCLK ≈ 3.75 MHz, well under the DAC's 50 MHz ceiling), so
-    a two-channel update costs ~12.8 µs against the BRIDGEplate's ~0.5–1.4 ms.
+    store, effective SCLK ≈ 3.75 MHz), so a two-channel update costs ~12.8 µs
+    against the BRIDGEplate's ~0.5–1.4 ms. That is far below every SCLK
+    ceiling the part specifies — 50 MHz for writes at IOVDD 2.7–5.5 V
+    (SLASEH2A 7.7), but only 35 MHz for reads with `FSDO=1` and 20 MHz with
+    `FSDO=0` (7.10, 7.11), which is worth knowing because `verify` reads.
     Needs nothing but wires between the card and the BP-DAC81404EVM.
   - `"pico"`: the DB25 carries a byte-parallel handshake to an RP2040/RP2350
     whose PIO runs the SPI at up to 50 MHz. Four stores per sample (~0.6 µs):
@@ -100,9 +103,57 @@ opposite edge from SDIN/SYNC, take a ground at **each** connector — J4 pin 2
 and J1 pin 4 (`DGND`, BoosterPack 22) — so SCLK's return doesn't have to cross
 the board.
 
-Jumpers: the defaults are already right (J2 1–2 = LDAC low, suiting the
-asynchronous update this device uses; J3 none = CLR inactive; J16 none =
-internal reference, which init powers up; J11 2–3 = unipolar). **J19 is the one
+**LDAC, CLR and RST: tie all three to IOVDD.** This device drives none of them.
+For LDAC and CLR the DAC81404's pin table (SLASEH2A Table 6-1) says it
+outright — *"Connect to IOVDD if unused"* — and all three are active-low
+inputs with no documented internal pull-up, so "not connected" is not the same
+as "inactive": an unterminated input next to a bit-banged bus is an input
+waiting to pick up a transient. Each one fails differently, worst last.
+
+  - **LDAC** (chip pin 13, EVM jumper J2). Grounding it — J2 1–2, the EVM
+    default, and what the earlier bring-up notes here called for — is harmless
+    *today* only because every channel is in asynchronous mode, where LDAC is
+    ignored outright (see Update mode below). It stops being harmless the
+    moment any channel is put in synchronous mode. Prefer IOVDD.
+  - **CLR** (chip pin 16, EVM jumper J3). This one matters more, because a
+    single low glitch is destructive to loop state: "a clear command forces
+    all DAC channels to clear the contents of their buffer **and active**
+    registers to the clear code regardless of their synchronization setting"
+    (SLASEH2A 8.3.3.3) — zero code on a unipolar range, midscale on a bipolar
+    one, on all four channels at once. Worse, with `skip_unchanged: true` this
+    device would not notice: it re-sends a channel only when its computed code
+    *changes*, so the mirror would sit at the clear code until the command
+    happened to move by ≥ 1 LSB. Leaving J3 off does not assert CLR, but it
+    does not deassert it either.
+
+  - **RST** (chip pin 32) — **also to IOVDD**, though for a slightly different
+    reason: the pin table gives no "connect to IOVDD if unused" note for this
+    one, so that instruction is *not* in the datasheet. It doesn't need to be.
+    RST is "an active-low reset input. Logic low on this pin causes the device
+    to issue a power-on-reset event", so holding it high is simply what running
+    the part means. §11.1 confirms TI expects it tied off rather than driven:
+    "the RST and FAULT signals are static lines; therefore these lines can lie
+    on the analog side of the ground plane."
+
+    Of the three, a glitch here is the worst outcome. `tRSTW` is 20 ns, so a
+    very short transient is enough, and a POR "causes all registers to
+    initialize to default values" (§8.3.5) — `DEV-PWDWN` set, reference off,
+    all four channels powered down and clamped to ground, ranges back to
+    0–5 V, `FSDO` back to 0, `CRC-EN` off. This device configures the DAC once
+    in `init` and never re-checks, so from that moment every frame it sends is
+    silently ignored and no output moves again until anyloop is restarted.
+    There is no reason to keep a hardware reset line: `reset_at_init` already
+    issues a `SOFT-RESET` through `TRIGGER`, which §8.3.5 defines as the same
+    POR event. Tie it high (directly, or through a 10 kΩ pull-up if you want a
+    button or testpoint for manual recovery).
+
+The EVM's own jumper wiring is in SLAU825, which is not saved locally, so don't
+take a jumper position here on faith — set them, then confirm with a meter that
+chip pins 13, 16 and 32 all read ≈ IOVDD (3.3 V) against ground before
+connecting the DB25.
+
+Other jumpers: J16 none = internal reference, which init powers up; J11 2–3 =
+unipolar. **J19 is the one
 to think about**: its 2–3 default draws DAC IOVDD from the LaunchPad connector,
 so with no LaunchPad either feed 3.3 V into J1 physical pin 1 (`AEVM_3V3`) or
 move J19 to 1–2 and feed terminal block J20. It must be 3.3 V to match the
@@ -140,6 +191,35 @@ machine: **~4 µs per edge, ~200 µs per 24-bit frame, ~4.9 k frames/s**, so a
 two-channel update costs ~0.4 ms — about what the BRIDGEplate cost. Use it to
 check wiring and frames, not to close a loop.
 
+**Update mode, and what LDAC does (nothing).** The outputs move because every
+channel is in *asynchronous* mode, where "a DAC data register write results in
+an immediate update of the DAC active register and DAC output on a SYNC rising
+edge" (SLASEH2A 8.3.3.1.2) — that is, because every `DACx-SYNC-EN` bit in
+`SYNCCONFIG` is clear. LDAC is ignored entirely in that mode; it is *not* what
+makes a write take effect, and grounding it (EVM jumper J2 1–2) is neither
+necessary nor what the datasheet asks for — see "LDAC and CLR" under Wiring
+above. Because everything here depends on asynchronous mode,
+`dac_configure()` now writes `SYNCCONFIG = 0x0000` explicitly instead of
+trusting the reset default: in synchronous mode every `DACx` write would be
+accepted and acknowledged and no output would ever move, which is a miserable
+thing to debug from the outside. With `reset_at_init: false` against a device
+left in synchronous mode by a previous process, that write is the only thing
+standing between you and exactly that failure.
+
+**Output update rate.** SLASEH2A 8.3.3.1 (and `tDACWAIT` in tables 7-6/7-7)
+requires **at least 2.4 µs between DAC output updates**, in both update modes.
+A bit-banged 24-bit frame takes ~6.4 µs, so the `spi` link clears this on its
+own — but the `pico` link hands a sample over in ~0.6 µs, so two channels in
+one iteration would have been issued about four times too fast. The device now
+enforces the spacing itself rather than leaving it to be true by accident.
+
+**Codes and volts.** SLASEH2A equations 1 and 2 give
+`VOUT = VREFIO × GAIN × CODE / 2^N` (unipolar) and the same minus
+`GAIN × VREFIO / 2` (bipolar) — the range is divided into **2^16 steps, not
+2^16 − 1**, so code `0xFFFF` sits one LSB *below* the nominal top of the range
+(9.99985 V on `0-10`, not 10 V). `range`'s `vmax` is that nominal top, i.e. a
+voltage the part cannot quite reach; asking for it clamps to `0xFFFF`.
+
 **DAC power-up.** The DAC81404 comes out of reset *device-wide* powered down
 (`SPICONFIG.DEV-PWDWN`), separately from its reference and all four output
 amplifiers also being powered down (outputs clamped to ground through 10 kΩ).
@@ -148,19 +228,33 @@ clear `SPICONFIG.DEV-PWDWN` at all, which is a different, higher-level gate
 than the reference/channel power bits below it — so every earlier bench
 session that only measured SPI *bus* timing (frames/s) rather than an actual
 DAC output voltage could plausibly have been talking to a device that never
-left device-wide power-down. In the `spi` link, init now writes `SPICONFIG`
+left device-wide power-down. In the `spi` link, init writes `SPICONFIG`
 (device active, and `FSDO=1` for `verify`'s benefit — see below), `GENCONFIG`
-(reference on), `DACRANGE` (the configured ranges) and `DACPWDWN` (channels
-on), then parks every channel at its `offset` before the loop starts. When
-`verify` is set, all four of those init writes are confirmed over SDO/ACK the
-same way the per-channel writes are (`dac_write_checked()`), each logging its
-own confirmation once (`SPICONFIG write confirmed by SDO/ACK readback: ...`,
-etc.) — so a clean startup rules out the *whole* digital chain up front, not
-just whatever channel write happens to run first. `TRIGGER`'s soft-reset is
-deliberately excluded: its fields are momentary actions (SLASEH2A table 8-17
-types them all "W", reset `0000h`), so reading `SOFT-RESET` back afterward
-isn't expected to still show the `1010b` that was sent — a "mismatch" there
-would be a false alarm, not a real one.
+(reference on), `SYNCCONFIG` (asynchronous update), `DACRANGE` (the configured
+ranges) and `DACPWDWN`, then parks every channel at its `offset` before the
+loop starts. `DACPWDWN` powers up **only the channels this stage drives**; the
+rest keep their reset power-down bit and stay clamped to ground through the
+internal 10 kΩ, rather than being released into a range that was never
+configured for them. When `verify` is set, each of those init writes is
+checked over SDO/ACK the same way the per-channel writes are
+(`dac_write_checked()`), logging once — so a clean startup rules out the
+*whole* digital chain up front, not just whatever channel write happens to run
+first. `TRIGGER`'s soft-reset is deliberately excluded: its fields are
+momentary actions (SLASEH2A table 8-17 types them all "W", reset `0000h`), so
+reading `SOFT-RESET` back afterward isn't expected to still show the `1010b`
+that was sent — a "mismatch" there would be a false alarm, not a real one.
+
+**Which registers can be read back at all.** Half the DAC81404's map is
+write-only, per the TYPE column of SLASEH2A table 8-7: `NOP`, `DACRANGE`,
+`BRDCAST` and `DACA`–`DACD` are typed plain `W`, and `TRIGGER`'s every field
+is `W` in table 8-17. Only `DEVICEID`, `STATUS`, `SPICONFIG`, `GENCONFIG`,
+`BRDCONFIG`, `SYNCCONFIG` and `DACPWDWN` have contents that come back. This
+matters because `verify` used to issue a read command for *every* register it
+wrote, including `DACRANGE` and every per-channel `DACx` write — the two it
+writes most — and then compare the reply against what was sent. There is no
+reply to compare, so that reliably produced a bogus "write not confirmed"
+warning on exactly the writes the feature exists to check. See `verify` below
+for what it does instead.
 
 **Register safety.** SLASEH2A 8.6: "All register addresses not listed
 should be considered as reserved locations and the register contents
@@ -227,50 +321,61 @@ Parameters
       `pico` link (default 1, i.e. AUTOFD + INIT).
   - `delay_ns` (integer) (optional)
     - Extra dwell after each edge, in nanoseconds (default 0). The store
-      latency alone already exceeds the DAC's setup requirement; raise this
-      only for long or unterminated wiring.
+      latency alone (~123 ns) is an order of magnitude past the DAC's
+      `tSDIS`/`tSDIH` of 10 ns at IOVDD 2.7–5.5 V, 20 ns below that
+      (SLASEH2A 7.6, 7.7); raise this only for long or unterminated wiring.
   - `verify` (boolean) (optional, `spi` link only)
     - After every write — including the one-shot init sequence
-      (`SPICONFIG`/`GENCONFIG`/`DACRANGE`/`DACPWDWN`), not just the
-      per-channel writes — read the register back over SDO (DB25 pin 10 →
-      EVM `DAC_SDO`, only meaningful if that wire is connected) and warn if
-      it doesn't match what was sent (default false). Each init write logs
-      its own confirmation once, since it only happens once; the first time
-      a given channel's readback confirms what was sent, it likewise logs
-      once at `info` level (`channel N write confirmed by SDO/ACK
-      readback: code 0x.... (V V)`), then stays quiet on success and only
-      logs again on a problem, so a clean run isn't spammed once per write.
-      Costs two extra 24-bit frames per write: a read-command for the
-      address just written,
-      then a NOP frame to shift the answer out — TI's readback convention
-      echoes the *previous* cycle's R/W+address alongside the data, so it
-      always trails by one frame. **This is meaningfully slower than the
-      unverified path, not just "two more frames" slower**: only the last
-      of the three frames' answer is ever used, but reading it back means a
-      non-posted PCIe status read per bit — unlike every write in this
-      file, which is posted (fire-and-forget), a read has to wait for an
-      actual completion round-trip. Measured 2026-07-28: verified writes
-      run roughly 0.1–0.3 ms, against ~6 µs unverified — call it two orders
-      of magnitude, not a small tax. Treat `verify` as a bring-up/diagnostic
-      tool you turn on to confirm the hardware, not something to leave
-      enabled across a real closed loop. This device cross-checks the echo
-      before trusting the data, and logs (without failing) if the echo
-      itself looks wrong. **Confidence note, updated 2026-07-28 against a
-      local copy of
-      SLASEH2A (`dac81404.pdf`):** the frame format, R/W convention, 24-bit
-      no-CRC framing, and the read-command-then-second-cycle readback
-      protocol above are now confirmed from the datasheet text directly
-      (Table 8-2/8-3), not just corroborated secondhand. `init` also now
-      forces `SPICONFIG.FSDO=1` so SDO updates on the same SCLK falling
-      edges this device already samples on (8.6.4), removing one whole axis
-      of uncertainty. Two things are still open: whether the DAC preloads
-      its first output bit before any clock edge, which would shift every
-      sampled bit by one position (the timing diagram for this is a vector
-      graphic that didn't survive text extraction, unlike the daisy-chain
-      figure); and the *exact* status-register bit SDO/ACK lands on for this
-      specific AX99100 card, which was never independently measured the way
-      the data/control pin levels were, and isn't in the DAC's datasheet at
-      all — `ack_status_bit`'s default is the generic SPP convention, not a
+      (`SPICONFIG`/`GENCONFIG`/`SYNCCONFIG`/`DACRANGE`/`DACPWDWN`), not just
+      the per-channel writes — check over SDO (DB25 pin 10 → EVM `DAC_SDO`,
+      only meaningful if that wire is connected) that it landed, and warn if
+      it didn't (default false).
+
+      *How much* can be checked depends on the register, because half the map
+      is write-only (see "Which registers can be read back at all" above):
+
+      | register | what `verify` does | frames |
+      |---|---|---|
+      | `SPICONFIG`, `GENCONFIG`, `SYNCCONFIG`, `DACPWDWN` (R/W) | reads the value back and compares it | 3 |
+      | `DACRANGE`, `DACA`–`DACD` (W) | checks the R/W+address echo the next cycle carries (Table 8-3) | 2 |
+      | any of the above, with `crc` on | compares the value: a CRC-mode echo carries the previous cycle's *data* too (Table 8-5) | 2–3 |
+
+      The log says which of the two actually happened — `... write confirmed
+      by SDO/ACK readback: ...` versus `... write acknowledged by SDO/ACK
+      (R/W+address echo) ...` — so a quiet run can't be mistaken for more
+      assurance than it gives. Each init write logs once, since it only
+      happens once; the first time a given channel checks out it likewise
+      logs once at `info` level, then stays quiet on success and only logs
+      again on a problem, so a clean run isn't spammed once per write.
+
+      **This is meaningfully slower than the unverified path, not just "an
+      extra frame or two" slower**: only the last frame's answer is ever
+      used, but reading it back means a non-posted PCIe status read per bit —
+      unlike every write in this file, which is posted (fire-and-forget), a
+      read has to wait for an actual completion round-trip. Measured
+      2026-07-28: verified writes run roughly 0.1–0.3 ms, against ~6 µs
+      unverified — call it two orders of magnitude, not a small tax. Treat
+      `verify` as a bring-up/diagnostic tool you turn on to confirm the
+      hardware, not something to leave enabled across a real closed loop.
+
+      **Confidence note, updated 2026-07-28 against a local copy of SLASEH2A
+      (`dac81404.pdf`):** the frame format, R/W convention, 24-bit no-CRC
+      framing, the register TYPE column, and the
+      read-command-then-second-cycle readback protocol are all confirmed from
+      the datasheet text directly (Tables 8-2, 8-3, 8-7). `init` forces
+      `SPICONFIG.FSDO=1`, and that turns out to be *required* rather than
+      merely convenient: SCLK idles high, so the first SCLK edge inside a
+      cycle is a falling one, and only "SDO updates on SCLK falling edges"
+      (8.6.4) lines the 24 samples up one-for-one with the 24 output bits.
+      Under the reset default `FSDO=0` ("SDO updates on SCLK rising edges")
+      the first rising edge doesn't arrive until after the first falling
+      edge, so every sample would sit one bit position early and D0 would
+      never be seen at all — that resolves the bit-alignment question this
+      note used to leave open. One thing is still open: the *exact*
+      status-register bit SDO/ACK lands on for this specific AX99100 card,
+      which was never independently measured the way the data/control pin
+      levels were, and isn't in the DAC's datasheet at all —
+      `ack_status_bit`'s default is the generic SPP convention, not a
       bench-confirmed one. Run with `verify: true` and watch the log for
       `readback echo mismatch` before trusting a quiet run as proof anything
       is actually being checked.
@@ -283,21 +388,35 @@ Parameters
       (rather than silently accepting) any write whose CRC doesn't check
       out (default false). Independent of `verify` — protects *every*
       write, not just ones being read back, so a marginal connection can't
-      quietly land a corrupted voltage. Requires `reset_at_init` (default
-      true): the frame that turns CRC on has to be sent in the old, plain
-      format the device is still expecting, which is only guaranteed if
-      the soft-reset just put the device back to its `CRC-EN=0` default.
+      quietly land a corrupted voltage — and when `verify` *is* on it
+      strictly improves it, since a CRC-mode echo carries the previous
+      cycle's data (Table 8-5), which is the only way to confirm the value
+      written to a write-only register like `DACx`. Requires `reset_at_init`
+      (default true): the frame that turns CRC on has to be sent in the old,
+      plain format the device is still expecting, which is only guaranteed
+      if the soft-reset just put the device back to its `CRC-EN=0` default.
+      Setting `crc` without `reset_at_init` now warns at init rather than
+      failing silently later. That same enabling frame is deliberately sent
+      *unverified*: `CRC-EN` takes effect on its own SYNC rising edge, so a
+      verified write's trailing read-command and NOP frames would still be
+      24 bits long while the device had already started demanding 32 — and
+      the device ignores an access cycle with too few clock edges (8.5.1),
+      producing a spurious "unconfirmed". It is re-issued immediately
+      afterwards in the new format, where it *can* be verified.
       **Confidence note:** SLASEH2A 8.5.3 gives the polynomial
-      (`x8+x2+x+1`, i.e. `0x07`) and nothing else — no worked example, no
-      stated initial remainder, bit order, or final XOR. The implementation
-      (`crc8_atm()`) uses the standard textbook parameters for that
-      polynomial (initial remainder `0x00`, MSB first, no reflection, no
-      XOR-out); those are assumed to match the device, not confirmed
-      against it. When `verify` is also on, the readback path additionally
-      recomputes the CRC over the echoed content and compares it to what
-      the chip sent — an independent cross-check on top of the existing
-      address-echo check, since matching both by coincidence is far less
-      likely than matching just one.
+      (`x8+x2+x+1`, i.e. `0x07`) and no worked example — but it also says
+      "if no error exists, the CRC remainder is zero", which pins down the
+      initial remainder (`0x00`) and rules out a final XOR (textbook
+      CRC-8-ATM/HEC adds `0x55`, which would leave a constant non-zero
+      remainder instead). `crc8_atm()` matches that, verified by
+      recomputation over content-plus-appended-CRC; bit order (MSB first,
+      the natural one for this bus) is the one parameter still taken on
+      faith. When `verify` is also on, the readback path recomputes the CRC
+      over the echoed content and compares it to what the chip sent, *and*
+      checks the `CRC-ERROR` bit the device returns in bit 30 of the
+      following cycle (Tables 8-5, 8-6) — that bit is how the device reports
+      that it rejected a frame, and it was previously masked away and never
+      looked at, so a rejected write went by silently.
 
 ### Outputs
 
@@ -312,8 +431,10 @@ Parameters
   - `range` (string or array) (optional)
     - Output range per channel (default `"0-10"`): `"0-5"`, `"0-6"`,
       `"0-10"`, `"0-12"`, `"0-20"`, `"0-24"`, `"0-40"`, `"+-5"`, `"+-6"`,
-      `"+-10"`, `"+-12"`, `"+-20"`. Codes are MSB-aligned straight binary
-      across the selected range.
+      `"+-10"`, `"+-12"`, `"+-20"` (the full set of valid `DACRANGE` codes,
+      SLASEH2A table 8-16). Codes are MSB-aligned straight binary across the
+      selected range, in 2^16 steps — see "Codes and volts" above for why the
+      top of the range is one LSB out of reach.
   - `start_delay` (number or array) (optional)
     - Seconds to hold a channel at its `offset` before letting the pipeline
       command through (default 0). Same purpose as in `piplate_bridge`: give

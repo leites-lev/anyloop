@@ -97,6 +97,9 @@ struct aylp_parport_dac_data {
 	bool reset_at_init;	// issue a DAC soft reset before configuring
 	bool probe;		// read the data register back to check the BAR
 	double t0;		// CLOCK_MONOTONIC of the first proc (s)
+	// CLOCK_MONOTONIC of the last DAC output update (ns, 0 = never), so
+	// SLASEH2A's 2.4 us tDACWAIT between updates can be enforced
+	int64_t last_update_ns;
 
 	// diagnostics
 	long diag_frames;	// DAC frames actually emitted
