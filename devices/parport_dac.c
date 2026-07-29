@@ -414,9 +414,8 @@ static const struct dac_range dac_ranges[] = {
 
 static const struct dac_range *find_range(const char *name)
 {
-	// accept the obvious spellings of a bipolar range
-	if (!strncmp(name, "±", strlen("±"))) name += strlen("±");
-	else if (name[0] == '+' && name[1] == '-') name += 2;
+	// Accept ASCII spellings of a bipolar range, e.g. "+-10" or "-10".
+	if (name[0] == '+' && name[1] == '-') name += 2;
 	else if (name[0] == '-') name += 1;
 	else goto unipolar;
 	for (size_t i = 0; i < sizeof dac_ranges / sizeof dac_ranges[0]; i++)

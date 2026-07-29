@@ -134,9 +134,7 @@ static const struct dac_range dac_ranges[] = {
 
 static const struct dac_range *find_range(const char *name)
 {
-	if (!strncmp(name, "±", strlen("±")))
-		name += strlen("±");
-	else if (name[0] == '+' && name[1] == '-') name += 2;
+	if (name[0] == '+' && name[1] == '-') name += 2;
 	else goto unipolar;
 	for (size_t i = 0; i < sizeof dac_ranges / sizeof dac_ranges[0]; i++)
 		if (dac_ranges[i].vmin < 0.0
