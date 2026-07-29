@@ -38,8 +38,11 @@
 // stay at 0 V and above for that reason. AVDD also needs headroom over the
 // top of the swing. Widen the step only once you know how J11/J17 are set.
 //
-// BUILD (-lm for lround/llround, and it must come after the source file):
-//   gcc -O2 -o dac_square contrib/dac_square.c -lm
+// BUILD, either way:
+//   ninja -C build                 -> build/dac_square (it is a meson target)
+//   gcc -O2 -o dac_square contrib/dac_square.c -lm    (standalone; -lm is for
+//                    lround/llround and must come AFTER the source file)
+// It is not installed -- run it from the build tree.
 //
 // RUN (needs root for the BAR mapping, same as backend="mmio"):
 //   sudo ./dac_square                       # 1 kHz, 0 -> 5 V on channel A
@@ -51,8 +54,10 @@
 // default). Rebind when you're done if you want /dev/parport0 back:
 //   echo 0000:05:00.2 | sudo tee /sys/bus/pci/drivers/parport_pc/bind
 //
-// Ctrl-C parks the output at --low and exits cleanly rather than leaving the
-// DAC sitting at whatever level the last frame happened to write.
+// Ctrl-C (or SIGTERM) parks the output at --low, unmaps the BAR, and exits
+// cleanly rather than leaving the DAC sitting at whatever level the last
+// frame happened to write.  parport_pc remains unbound, as requested at
+// startup, so it cannot reclaim the port while this tool owns the hardware.
 
 #define _GNU_SOURCE
 #include <errno.h>
@@ -487,13 +492,25 @@ int main(int argc, char **argv)
 	double act_lo = code_to_volts(code_lo, rng->vmin, rng->vmax);
 	double act_hi = code_to_volts(code_hi, rng->vmin, rng->vmax);
 
+	// Install this before unbinding or mapping the card.  The handler only
+	// records the request; all DAC and VM work stays in normal process context.
+	struct sigaction sa = { .sa_handler = on_sigint };
+	sigemptyset(&sa.sa_mask);
+	sigaction(SIGINT, &sa, NULL);
+	sigaction(SIGTERM, &sa, NULL);
+
 	if (unbind) unbind_parport_pc(pci);
+	if (stop_requested) return 0;
 
 	size_t span = SPP_ECR_OFFSET;
 	void *map = NULL;
 	size_t map_len = 0;
 	volatile uint8_t *base = map_bar(pci, SPP_BAR, span, &map, &map_len);
 	if (!base) return 1;
+	if (stop_requested) {
+		munmap(map, map_len);
+		return 0;
+	}
 	reg_data = base + SPP_DATA_OFFSET;
 	reg_ecr = base + SPP_ECR_OFFSET;
 	*reg_ecr = SPP_ECR_VALUE;
@@ -503,11 +520,6 @@ int main(int argc, char **argv)
 	pp_write_data((uint8_t)((1u << sync_bit) | (1u << sclk_bit)));
 
 	dac_configure(channel, rng->code, reset);
-
-	struct sigaction sa = { .sa_handler = on_sigint };
-	sigemptyset(&sa.sa_mask);
-	sigaction(SIGINT, &sa, NULL);
-	sigaction(SIGTERM, &sa, NULL);
 
 	if (realtime) try_realtime();
 

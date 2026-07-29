@@ -1933,6 +1933,12 @@ int parport_dac_fini(struct aylp_device *self)
 	}
 	if (data->ecr_map) munmap(data->ecr_map, data->ecr_len);
 	if (data->regs_map) munmap(data->regs_map, data->regs_len);
+	// Keep the kernel parallel-port driver detached after a clean shutdown.
+	// open_mmio() unbinds it before the BAR is mapped; repeating that operation
+	// here closes the small race where it was rebound while the test ran, and
+	// makes Ctrl-C cleanup leave the PCI function in the same safe state.
+	if (data->backend == AYLP_PARPORT_MMIO && data->unbind && data->pci)
+		unbind_parport_pc(data->pci);
 	if (data->pp_fd >= 0) {
 		if (data->pp_claimed) ioctl(data->pp_fd, PPRELEASE);
 		close(data->pp_fd);

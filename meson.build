@@ -69,6 +69,17 @@ shared_library('plugin_example', 'contrib/plugin_example.c',
 	override_options: 'b_lundef=false'
 )
 
+# dac_square: standalone bench tool that puts a square wave on one DAC81404
+# channel so the analog rise/fall time can be measured on a scope. Deliberately
+# independent of libaylp -- it maps the AX99100 BAR and bit-bangs the frames
+# itself, so it needs no anyloop deps, only libm for lround/llround. Built here
+# purely so `ninja -C build` covers it; it is not installed, since it is a
+# diagnostic you run from the build tree with sudo.
+executable('dac_square', 'contrib/dac_square.c',
+	install: false,
+	dependencies: [c.find_library('m', required: false)]
+)
+
 asi_sdk_dir = '/home/fsl/ASIStudio/lib'
 asi_lib = c.find_library('ASICamera2', dirs: [asi_sdk_dir], required: false)
 fs = import('fs')

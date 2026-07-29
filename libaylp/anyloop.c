@@ -24,7 +24,7 @@ const char *help_msg = "\nUsage: `anyloop [options] your_config_file.json`\n"
 struct aylp_state state = {0};
 struct aylp_conf conf = {0};
 
-static bool sigint_received = false;
+static volatile sig_atomic_t sigint_received = 0;
 
 static void cleanup(void)
 {
@@ -102,7 +102,7 @@ static void handle_signal(int sig, siginfo_t *info, void *context)
 {
 	UNUSED(info);
 	UNUSED(context);
-	if (sig == SIGINT) {
+	if (sig == SIGINT || sig == SIGTERM) {
 		sigint_received = true;
 	}
 }
@@ -208,6 +208,10 @@ int main(int argc, char **argv)
 		log_fatal("Failed to attach signal handler to SIGINT.");
 		return EXIT_FAILURE;
 	}
+	if (sigaction(SIGTERM, &signal_handler, NULL) == -1) {
+		log_fatal("Failed to attach signal handler to SIGTERM.");
+		return EXIT_FAILURE;
+	}
 
 	// initialize all devices
 	for (size_t idx=0; idx<conf.n_devices; idx++) {
@@ -303,7 +307,7 @@ int main(int argc, char **argv)
 	}
 
 	if (sigint_received)
-		log_info("Caught SIGINT; cleaning up");
+		log_info("Caught termination signal; cleaning up");
 	else
 		log_info("AYLP_DONE was set; cleaning up");
 

@@ -684,10 +684,18 @@ can be measured on a scope. It is standalone — it maps the BAR and bit-bangs
 the same frames this device does, without anyloop in the picture:
 
 ```
-gcc -O2 -o dac_square contrib/dac_square.c -lm
-sudo ./dac_square                        # 1 kHz, 0 -> 5 V on DACA
-sudo ./dac_square --freq 200 --high 9 --range 0-10 --rt
+ninja -C build                           # or: gcc -O2 -o dac_square \
+                                         #       contrib/dac_square.c -lm
+sudo build/dac_square                    # 1 kHz, 0 -> 5 V full-scale on DACA
+sudo build/dac_square --rt               # SCHED_FIFO, less edge jitter
+sudo build/dac_square --low 2.4 --high 2.6   # small-signal, the bode drive
+sudo build/dac_square --channel 1 --freq 200 # DACB, slower, longer flat tops
+sudo build/dac_square --help
 ```
+
+`dac_square` is a meson target but is **not** installed — run it from the build
+tree. `ninja -C build` also rebuilds `anyloop` itself, which is what you need
+after any change to `fsp` or `parport_dac`.
 
 It exists as a separate tool rather than a config because `test_source` has
 kinds constant/sine/noise but no square, and because a pipeline-generated

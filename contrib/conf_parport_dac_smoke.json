@@ -22,7 +22,9 @@
   "20": "pins measure 4.94 V -- do not connect those to the EVM.",
   "21": "To check the plumbing without root, set backend to \"ppdev\" (slow).",
   "22": "To check the plumbing without any DAC attached, leave probe true and",
-  "23": "watch for the 'data register verified' line at init."
+  "23": "watch for the 'data register verified' line at init.",
+  "24": "This runs until Ctrl+C. anyloop then finalizes parport_dac, parks",
+  "25": "the bus idle, unmaps its BARs, and leaves parport_pc unbound."
  },
  "pipeline": [
   {
@@ -66,12 +68,6 @@
    "uri": "anyloop:delay",
    "params": {
     "ns": 5000000
-   }
-  },
-  {
-   "uri": "anyloop:stop_after_count",
-   "params": {
-    "count": 4000
    }
   }
  ]
