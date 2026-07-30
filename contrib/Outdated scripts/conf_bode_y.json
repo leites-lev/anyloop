@@ -16,8 +16,8 @@
 				"camera_name": "ASI290MM",
 				"width": 32,
 				"height": 32,
-				"start_x":     384,
-				"start_y":     310,
+				"start_x":     1840,
+				"start_y":     680,
 				"_roi_note": "ROI centred on beam at coarse bias 2/2 (fine 1.5/2.15): probe-verified 2026-07-21, full-sensor CoM (x 919, y 507). Re-derive via contrib/probe_frame.json only on an alignment change.",
 				"exposure": 250,
 				"gain": 100,
@@ -71,7 +71,7 @@
 				"config": "y/tip open-loop plant, coarse bias 2.0/2.0 (beam realigned, matches steering_tuned.json operating point), 32x32 exp250 gain100 bw100, beam-centred ROI via start_x/start_y, tracked 20x20 thr22. Re-bode at the new bias to refresh Ky/tau. Beam now centred so the 07-21 y-clipping (beam parked row 23/32) should be gone; K uses <=30 Hz, tau uses full 5-300 Hz slope.",
 				"_start_delay": "hold injection at 0 (= fine channel parked at its bias) for 30 s so the coarse channels have time to adjust before the sweep starts",
 				"start_delay": 30.0,
-				"output_file": "fsm_bodey_724_course.pdf"
+				"output_file": "fsm_bodey_722_full4.pdf"
 			}
 		},
 		{

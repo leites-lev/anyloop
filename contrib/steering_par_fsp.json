@@ -24,10 +24,10 @@
 				"camera_name": "ASI290MM",
 				"width":    32,
 				"height":    32,
-				"start_x":     384,
-				"start_y":     310,
+				"start_x":     1840,
+				"start_y":     680,
 				"_roi_note": "start_x/start_y centre the 32x32 ROI on the beam parked at coarse bias 2/2 (fine 1.5/2.15): probe-verified 2026-07-21, full-sensor CoM (x 919, y 507). Re-derive with contrib/probe_frame.json only if the alignment (not the bias) changes -- the ROI now follows the beam by cropping instead of re-biasing.",
-				"exposure":   75,
+				"exposure":  50,
 				"gain":        100,
 				"bandwidth":   100,
 				"high_speed":  1,
@@ -45,7 +45,7 @@
 			"params": {
 				"region_height": 20,
 				"region_width":  20,
-				"threshold":     22,
+				"threshold":     5,
 				"track":         true
 			}
 		},
@@ -130,14 +130,9 @@
 			"uri": "anyloop:clamp",
 			"params": {
 				"type": "vector",
-				"min": -12.5,
-				"max": 12.5
+				"min": -1,
+				"max": 1
 			}
-		},
-		{
-			"_comment": "full-rate [y,x] COMMAND record (after fsp+clamp)",
-			"uri": "anyloop:file_sink",
-			"params": { "filename": "spikehunt_par_cmd.aylp" }
 		},
 		{
 			"_note": "PARPORT DAC. TWO channels only -- there is no coarse stage: ch0 = y/tip (DACA, +1.0 V/unit) = index 0, ch1 = x/tilt (DACB, -1.0 V/unit) = index 1. The fsp output is plain [y,x] in command units.",
@@ -161,13 +156,12 @@
 				"channel": [0, 1],
 				"index":   [0, 1],
 				"scale":   [1.0, -1.0],
-				"offset":  [2.5, 2.5],
-				"range": "0-5",
-				"range_max": "+-10",
+				"offset":  [0, 0],
+				"range": "+-5",
 				"_verify": "off in the closed loop: verify turns each write into 3 frames (write, read-command, NOP) plus a non-posted status read per bit. Use conf_parport_dac_smoke.json to exercise it before a run, not the loop itself.",
 				"verify": false,
 				"_skip_unchanged": "kept, but expect it to skip far LESS than on the BRIDGEplate: at 153 uV/LSB the command changes the code far more often than 1 mV codes did. That is fine -- a frame is ~6.4 us against a ~264 us period -- but it does mean the DAC sees more traffic than the piplate config did.",
-				"skip_unchanged": true,
+				"skip_unchanged": false,
 				"sync_update": false,
 				"start_delay": [2.0, 2.0],
 				"reset_at_init": true

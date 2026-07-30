@@ -116,7 +116,7 @@ def main():
                     help="reuse existing probe_full.aylp instead of grabbing a new one")
     ap.add_argument("--exposure", type=int, default=None,
                     help="probe exposure in µs (default: whatever probe_frame.json has)")
-    ap.add_argument("--settle", type=float, default=30.0,
+    ap.add_argument("--settle", type=float, default=3.0,
                     help="seconds to wait for the FSM to park before capturing (default 30; "
                          "the beam drifts for ~30 s after the hold starts). Use 0 to skip.")
     ap.add_argument("--aylp", default=None, help="path to an existing .aylp probe file")
