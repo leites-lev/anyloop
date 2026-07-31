@@ -117,6 +117,33 @@ Parameters
   horizon, `drift_tau`, and `broad_lp` preprocessing as the runtime. After
   loading, `broad_freeze_closed` and `broad_mu` determine whether the solution
   stays fixed or continues adapting.
+- `wiener_out`: optional path to dump the **learned** weights at exit, in
+  exactly the format `wiener_file` reads, so a converged run can be analysed
+  offline and then replayed as the next run's initialization. The dump happens
+  in `fini`, which runs on both the `AYLP_DONE` and the `SIGINT` path, so an
+  aborted run still saves whatever the observer had learned. The path is
+  probed for writability at init, so a bad path fails immediately rather than
+  after the run. Commented header lines record `broad_order`, `broad_mu`,
+  `broad_lp`, `fs`, the per-axis horizon and `K`, the closed-frame count, and
+  the per-axis tap norms `||w||` — the norms are the cheap convergence check,
+  since a converged observer settles and a diverging one grows. Reload only
+  into a run with the same `broad_order`, horizon, `broad_lp` and `drift_tau`:
+  taps are meaningful only against the model they were learned under, and the
+  loader's contiguous-index check cannot catch a horizon mismatch.
+- `wiener_trace`, `wiener_trace_period`: optional convergence trace, one text
+  line every `wiener_trace_period` seconds (default 10). Columns: elapsed
+  seconds, closed-frame count, per-axis `||w||`, `||w_next||` and `||dw||`
+  (the tap change since the previous sample), per-axis `drift_hat`, and the
+  cumulative per-axis guard and transient counts. `wiener_out` says where the
+  observer *ended up*; this says whether it had **stopped moving**, which is
+  the question a `settle_time` exists to answer — `||dw||` must have flattened
+  before the scored window opens. Deliberately a short line rather than a tap
+  snapshot, so the periodic write cannot disturb the RT loop; it is flushed
+  every sample so the trace survives an abort. With `pass_open: false` the
+  observer is fed zeros during the open phase and the NLMS step is
+  `mu*pe/energy` with `energy` floored at `1e-12`, so `||dw||` is exactly 0
+  there — a nonzero value before the loop closes means open-loop data is
+  leaking into the observer.
 - `broad_lp`: observer band-limit (odd boxcar taps on the NLMS input; 0 = off).
   The full-band observer is otherwise sensitive out to Nyquist, and any K/delay
   model error leaks command echo into its input as a *predictable* HF signal

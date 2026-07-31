@@ -1,0 +1,16 @@
+# bode_plot v2 2026-07-31 10:48:15
+# element=0 inject=replace output=raw amplitude=0.02 amplitude2=0.012
+# n_freqs=8 cycles=400 (10 segments x 40 cycles) n_settle=400+2cyc
+# fs_nominal=3788 fs_measured=3787.39
+# fit K(<=30Hz)=3.7057 +/- 0.0161  tau_meas_ms=0.1070  loop_frames=1.405 (tau*fs_meas + 1 hidden frame)  ph_resid_deg=0.50  mag_flat_rms=0.016
+# note: phase EXCLUDES one frame (correlator references phi[n-1]); loop_frames above already adds it back
+# config SMALL-AMPLITUDE Ky: y/tip open-loop plant through the PARPORT DAC (DAC81404, spi link, mmio, +-5 V range, mirror parked at 0 V), no coarse stage, ch0=y driven / ch1=x parked, scale +1.0 V/unit, offset 0. Drive +-20 mV (pass 1) and +-8 mV (pass 2), against the +-100/+-50 mV of fsm_bodey_par.dat. 32x32 exp50 gain100 bw100, ROI 1840/680, tracked 20x20 thr5. PURPOSE: the closed loop commands ~6 mV rms / ~20 mV peak, an order of magnitude below where Kx=3.787 was fit, and the 0.1 vs 0.05 V pair already showed 4% compression (3.787 -> 3.94). If K keeps rising toward the operating point then fsp's plant model under-subtracts its own command, which is what PAR-3's phi reconstruction suggests: x disturbance 28% above the open-phase error and a closed-window bound (0.045 px) above the open-window one (0.034 px), neither of which y shows. Range is 10-30 Hz because K is the <=30 Hz plateau; tau is NOT measurable here and stays 2.717 fr from fsm_bodey_par.dat. Compare the <=30 Hz plateau of all four amplitudes.
+# freq_Hz mag phase_rad mag_sem phase_sem_rad quality mag2 phase2_rad
+10 3.67645 -0.000264672 0.0205815 0.00470653 0.999902 3.68236 -0.0117776
+11 3.67545 0.00419648 0.0163073 0.0031736 0.999955 3.71933 0.00457236
+13.6874 3.69996 -0.00216495 0.0131931 0.00308828 0.999957 3.68551 0.00757545
+16.0133 3.71815 -0.00293026 0.00820425 0.00263811 0.999969 3.69546 -0.00117875
+19.5 3.74249 -0.023892 0.0994362 0.0267072 0.996796 3.61598 0.0250391
+22.3 3.75453 0.00228566 0.0898948 0.0192982 0.99831 3.9003 -0.00434451
+25.6425 3.80159 -0.0201641 0.069756 0.0126272 0.99928 3.7453 -0.0721069
+30.6 3.81322 -0.00952724 0.019784 0.00538197 0.999869 3.78882 -0.00711526

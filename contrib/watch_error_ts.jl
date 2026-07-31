@@ -25,7 +25,10 @@ const DEFAULT_SECONDS = 30.0  # rolling time-series window length, seconds
 #                 finer spectral resolution at the cost of slower updates.
 # --pixel/-p SIZE: the pixel span the center_of_mass output is normalized across,
 #                 used to convert it into pixels for the time-series panels
-#                 (default 64). The conversion is pixels = value * (SIZE - 1)/2.
+#                 (default 32, matching the ROI every current config uses; it
+#                 was 64 until 2026-07-30, which reported everything 2.03x high).
+#                 The conversion is pixels = value * (SIZE - 1)/2, so getting
+#                 this wrong scales every px figure by (SIZE-1)/(actual-1).
 #                 With track mode this is the IMAGE size (asi_source width /
 #                 height), because the tracking window reports absolute image
 #                 coordinates; without track it is the region/subaperture size.
@@ -49,7 +52,11 @@ function parse_args(args)
     timestamp = false
     seconds = DEFAULT_SECONDS
     com = false
-    pixel = 64.0    # span the CoM is normalized across (image size in track mode)
+    pixel = 32.0    # span the CoM is normalized across (image size in track mode)
+                    # 2026-07-30: was 64, which silently reported every figure
+                    # 2.03x high against the 32x32 ROI every current config uses
+                    # ((64-1)/2 = 31.5 px/unit instead of (32-1)/2 = 15.5).
+                    # MUST match asi_source width/height -- pass -p if it does not.
     fmin  = 0.0     # spectrum min frequency (Hz); 0 = from DC
     fmax  = 0.0     # spectrum max frequency (Hz); 0 = auto (Nyquist)
     xtick = 0.0     # spectrum x-axis tick spacing (Hz); 0 = auto

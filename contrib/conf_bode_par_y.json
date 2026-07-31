@@ -36,8 +36,8 @@
 				"camera_name": "ASI290MM",
 				"width": 32,
 				"height": 32,
-				"start_x": 1840,
-				"start_y": 680,
+				"start_x": 1832,
+				"start_y": 692,
 				"_roi_note": "ROI centred on beam at coarse bias 2/2 (fine 1.5/2.15): probe-verified 2026-07-21, full-sensor CoM (x 919, y 507). Re-derive via contrib/probe_frame.json only on an alignment change.",
 				"exposure": 50,
 				"gain": 100,
@@ -71,7 +71,7 @@
 			"uri": "anyloop:bode_plot",
 			"params": {
 				"sample_rate": 3788.0,
-				"element": 1,
+				"element": 0,
 				"inject": "replace",
 				"output": "raw",
 				"freq_start": 5.0,
@@ -90,11 +90,11 @@
 				"_avoid_freqs": "nudge sweep points off the measured bench lines (a line inside the lock-in skirt biases the point coherently -- segments do not average it out). List from attenuation6/8 memory.",
 				"avoid_freqs": [5.84, 9.07, 12.06, 13.17, 15, 17.49, 19.42, 21.26, 29.63, 35.53, 57.5, 58.08, 83.3, 84.02],
 				"avoid_df": 0.75,
-				"config": "y/tip open-loop plant through the PARPORT DAC (DAC81404, spi link, mmio, range 0-5 V on a +/-12 V supply), no coarse stage, ch0=y / ch1=x. Drive 2.5 V +/- 100 mV, i.e. 2.4..2.6 V (scale -1.0 V/unit, offset 2.5, amplitude 0.1). 32x32 exp250 gain100 bw100, beam-centred ROI via start_x/start_y, tracked 20x20 thr22. Purpose: derive BOTH Kx and tau for this transport from scratch. tau: expect SHORTER than the piplate-era 5.8 fr, since the ~0.5-1.4 ms serial write is now a ~6.4 us bit-bang. Kx: expect WELL BELOW the old 0.915 -- the fine channel is divided downstream and scale is halved (1.0 vs 2.0 V/unit), so the old value is not a prediction, only an upper bound. K uses <=30 Hz; tau uses the full 5-300 Hz phase slope, so the sweep must run to 300.",
+				"config": "x/tilt open-loop plant through the PARPORT DAC (DAC81404, spi link, mmio, range 0-5 V on a +/-12 V supply), no coarse stage, ch0=y / ch1=x. Drive 2.5 V +/- 100 mV, i.e. 2.4..2.6 V (scale -1.0 V/unit, offset 2.5, amplitude 0.1). 32x32 exp250 gain100 bw100, beam-centred ROI via start_x/start_y, tracked 20x20 thr22. Purpose: derive BOTH Kx and tau for this transport from scratch. tau: expect SHORTER than the piplate-era 5.8 fr, since the ~0.5-1.4 ms serial write is now a ~6.4 us bit-bang. Kx: expect WELL BELOW the old 0.915 -- the fine channel is divided downstream and scale is halved (1.0 vs 2.0 V/unit), so the old value is not a prediction, only an upper bound. K uses <=30 Hz; tau uses the full 5-300 Hz phase slope, so the sweep must run to 300.",
 				"_start_delay": "hold injection at 0 (= the channel parked at 0 V) for 30 s before the sweep starts. There is no coarse stage to settle any more, but the hold is kept: it gives the FSM and the camera AGC a quiet, known starting point, and bode_plot measures its baseline during it.",
 				"start_delay": 30.0,
 				"_output_file": "distinct filename on purpose: do NOT overwrite the piplate-era fsm_bodex_722_full7.pdf -- the whole point is comparing the two transports.",
-				"output_file": "fsm_bodey_par.pdf"
+				"output_file": "fsm_bodey_par3.pdf"
 			}
 		},
 		{

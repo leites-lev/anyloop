@@ -5,3 +5,10 @@ build
 # place to put testing data, etc
 notrack
 
+
+# per-run output directories (contrib/newrun.py) -- data, not source
+runs
+
+# raw binary run logs -- data, not source (single runs reach 100s of MB,
+# past GitHub's 100 MB/file hard limit). keep these on disk, out of git.
+*.aylp

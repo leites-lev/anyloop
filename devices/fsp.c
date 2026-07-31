@@ -368,6 +368,127 @@ static int fsp_load_wiener(struct aylp_fsp_data *data)
 }
 
 
+// Dump the learned full-band predictor in exactly the format
+// fsp_load_wiener() reads, so a converged run can be analysed offline and
+// replayed as the next run's wiener_file. The commented header records the
+// model the weights were learned UNDER -- taps are only meaningful against
+// their own order/horizon/broad_lp/K, and a file loaded under a different
+// horizon is silently wrong, so the loader's contiguous-index check is not
+// enough on its own. Called from fini, which runs on both the AYLP_DONE and
+// the SIGINT path, so an aborted run still saves what it had learned.
+static int fsp_save_wiener(struct aylp_fsp_data *data)
+{
+	if (!data->wiener_out) return 0;
+	if (!data->broad_order) {
+		log_warn("fsp: wiener_out ignored (broad_order = 0, so there "
+			"is no full-band predictor to save)");
+		return 0;
+	}
+	FILE *fp = fopen(data->wiener_out, "w");
+	if (!fp) {
+		log_error("fsp: could not open \"%s\" to save weights: %s",
+			data->wiener_out, strerror(errno));
+		return -1;
+	}
+	// Tap-weight norms are the cheap health check: a converged observer
+	// settles, while a diverging one grows without bound.
+	double n2[2] = {0.0, 0.0}, n2n[2] = {0.0, 0.0};
+	for (int a = 0; a < 2; a++) {
+		for (size_t i = 0; i < data->broad_order; i++) {
+			n2[a] += data->axis[a].broad_w[i]
+				* data->axis[a].broad_w[i];
+			n2n[a] += data->axis[a].broad_w_next[i]
+				* data->axis[a].broad_w_next[i];
+		}
+		n2[a] = sqrt(n2[a]);
+		n2n[a] = sqrt(n2n[a]);
+	}
+	time_t now = time(NULL);
+	struct tm tm_buf;
+	char stamp[32] = "unknown";
+	if (localtime_r(&now, &tm_buf))
+		strftime(stamp, sizeof stamp, "%Y-%m-%d %H:%M:%S", &tm_buf);
+	fprintf(fp, "# fsp full-band predictor weights saved %s\n", stamp);
+	fprintf(fp, "# broad_order=%zu broad_mu=%G broad_lp=%zu broad_gd=%zu "
+		"fs=%G\n", data->broad_order, data->broad_mu, data->broad_lp,
+		data->broad_gd, data->fs);
+	fprintf(fp, "# horizon y %zu+%.3G / x %zu+%.3G frames; K y %G / x %G\n",
+		data->axis[0].delay, data->axis[0].delay_frac,
+		data->axis[1].delay, data->axis[1].delay_frac,
+		data->axis[0].K, data->axis[1].K);
+	fprintf(fp, "# frames closed=%zu; ||w|| y %.6G / x %.6G; "
+		"||w_next|| y %.6G / x %.6G\n", data->n_closed,
+		n2[0], n2[1], n2n[0], n2n[1]);
+	fprintf(fp, "# freeze_closed=%s init=%s\n",
+		data->broad_freeze_closed ? "true" : "false",
+		data->wiener_file ? data->wiener_file : "zeros (cold start)");
+	fprintf(fp, "# reload with \"wiener_file\", but ONLY into a run with "
+		"the same broad_order, horizon, broad_lp and drift_tau\n");
+	fprintf(fp, "# index y_w y_w_next x_w x_w_next\n");
+	for (size_t i = 0; i < data->broad_order; i++) {
+		fprintf(fp, "%zu %.17G %.17G %.17G %.17G\n", i,
+			data->axis[0].broad_w[i], data->axis[0].broad_w_next[i],
+			data->axis[1].broad_w[i],
+			data->axis[1].broad_w_next[i]);
+	}
+	int ret = 0;
+	if (ferror(fp)) {
+		log_error("fsp: error writing weights to \"%s\"",
+			data->wiener_out);
+		ret = -1;
+	}
+	if (fclose(fp)) {
+		log_error("fsp: error closing \"%s\": %s", data->wiener_out,
+			strerror(errno));
+		ret = -1;
+	}
+	if (!ret)
+		log_info("fsp: saved y/x %zu-tap predictors to %s (||w|| y "
+			"%.4G / x %.4G after %zu closed frames)",
+			data->broad_order, data->wiener_out, n2[0], n2[1],
+			data->n_closed);
+	return ret;
+}
+
+
+// Append one convergence sample: where the taps are, and how far they moved
+// since the last sample. ||dw|| -> 0 is the observer having converged; a
+// settle_time is only defensible if this has flattened before the scored
+// window opens. Deliberately a short line rather than a full tap snapshot --
+// this runs in the RT path, so the write must stay small.
+static void fsp_trace_sample(struct aylp_fsp_data *data, double now)
+{
+	double wn[2], wnn[2], dwn[2];
+	for (int a = 0; a < 2; a++) {
+		double s = 0.0, sn = 0.0, sd = 0.0;
+		for (size_t i = 0; i < data->broad_order; i++) {
+			double w = data->axis[a].broad_w[i];
+			double d = w - data->wtrace_prev[a][i];
+			s += w * w;
+			sn += data->axis[a].broad_w_next[i]
+				* data->axis[a].broad_w_next[i];
+			sd += d * d;
+			data->wtrace_prev[a][i] = w;
+		}
+		wn[a] = sqrt(s);
+		wnn[a] = sqrt(sn);
+		dwn[a] = sqrt(sd);
+	}
+	fprintf(data->wiener_trace_fp,
+		"%.3f %zu %.8G %.8G %.8G %.8G %.8G %.8G %.6G %.6G "
+		"%zu %zu %zu %zu %.5G\n",
+		now - data->t0, data->n_closed,
+		wn[0], wnn[0], dwn[0], wn[1], wnn[1], dwn[1],
+		data->axis[0].drift_hat, data->axis[1].drift_hat,
+		data->axis[0].guard_events, data->axis[1].guard_events,
+		data->axis[0].transient_events,
+		data->axis[1].transient_events, data->broad_mu_cur);
+	// flushed every sample on purpose: the whole point is that the trace
+	// survives an abort, and it is one short line every few seconds
+	fflush(data->wiener_trace_fp);
+}
+
+
 // Update the innovation-triggered recovery state and return the fraction of
 // transient P control to use (0 = normal predictor, 1 = transient servo).
 static double fsp_transient_update(struct aylp_fsp_axis *ax,
@@ -594,6 +715,8 @@ int fsp_init(struct aylp_device *self)
 	data->cmd_fc = 0.0;		// raw minimum-variance command unless asked
 	data->broad_order = 0;		// modal-only unless explicitly identified
 	data->broad_mu = 0.03;
+	data->broad_mu_init = 0.0;	// 0 = schedule disabled
+	data->broad_mu_tau = 30.0;
 	data->broad_lp = 0;		// raw broadband observer unless asked
 	data->broad_freeze_closed = true;
 	data->drift_tau = 0.0;		// compound predictor unless asked
@@ -666,10 +789,25 @@ int fsp_init(struct aylp_device *self)
 			data->broad_order = json_object_get_uint64(val);
 		} else if (!strcmp(key, "broad_mu")) {
 			data->broad_mu = json_object_get_double(val);
+		} else if (!strcmp(key, "broad_mu_init")) {
+			data->broad_mu_init = json_object_get_double(val);
+		} else if (!strcmp(key, "broad_mu_tau")) {
+			data->broad_mu_tau = json_object_get_double(val);
 		} else if (!strcmp(key, "wiener_file")) {
 			xfree(data->wiener_file);
 			data->wiener_file =
 				xstrdup(json_object_get_string(val));
+		} else if (!strcmp(key, "wiener_out")) {
+			xfree(data->wiener_out);
+			data->wiener_out =
+				xstrdup(json_object_get_string(val));
+		} else if (!strcmp(key, "wiener_trace")) {
+			xfree(data->wiener_trace);
+			data->wiener_trace =
+				xstrdup(json_object_get_string(val));
+		} else if (!strcmp(key, "wiener_trace_period")) {
+			data->wiener_trace_period =
+				json_object_get_double(val);
 		} else if (!strcmp(key, "broad_lp")) {
 			data->broad_lp = json_object_get_uint64(val);
 		} else if (!strcmp(key, "drift_tau")) {
@@ -769,6 +907,18 @@ int fsp_init(struct aylp_device *self)
 	if (data->broad_order && (data->broad_mu <= 0.0
 			|| data->broad_mu >= 2.0)) {
 		log_error("fsp: broad_mu must satisfy 0 < broad_mu < 2.");
+		return -1;
+	}
+	if (data->broad_order && data->broad_mu_init > 0.0
+			&& (data->broad_mu_init < data->broad_mu
+				|| data->broad_mu_init >= 2.0)) {
+		log_error("fsp: broad_mu_init must satisfy broad_mu <= "
+			"broad_mu_init < 2 (it is the FASTER initial step).");
+		return -1;
+	}
+	if (data->broad_mu_init > 0.0 && data->broad_mu_tau <= 0.0) {
+		log_error("fsp: broad_mu_tau must be > 0 when broad_mu_init is "
+			"set.");
 		return -1;
 	}
 	if (data->transient_sigma > 0.0
@@ -925,7 +1075,66 @@ int fsp_init(struct aylp_device *self)
 				ax->plant_b[0], ax->plant_b[1], ax->plant_b[2],
 				ax->plant_a[1], ax->plant_a[2]);
 	}
+	data->broad_mu_cur = data->broad_mu_init > data->broad_mu
+		? data->broad_mu_init : data->broad_mu;
 	if (fsp_load_wiener(data)) return -1;
+	if (data->wiener_out) {
+		// Fail now, not after a 1700 s run: the dump happens in fini,
+		// so an unwritable path would otherwise cost the whole run's
+		// weights and only announce itself at the very end.
+		FILE *probe = fopen(data->wiener_out, "w");
+		if (!probe) {
+			log_error("fsp: wiener_out \"%s\" is not writable: %s",
+				data->wiener_out, strerror(errno));
+			// fini still runs on the init-failure path; drop the
+			// target so it does not repeat the same error
+			xfree(data->wiener_out);
+			data->wiener_out = NULL;
+			return -1;
+		}
+		fclose(probe);
+		log_info("fsp: will save learned %zu-tap predictors to %s at "
+			"exit", data->broad_order, data->wiener_out);
+	}
+	if (data->wiener_trace) {
+		if (!data->broad_order) {
+			log_warn("fsp: wiener_trace ignored (broad_order = 0)");
+			xfree(data->wiener_trace);
+			data->wiener_trace = NULL;
+		} else {
+			data->wiener_trace_fp = fopen(data->wiener_trace, "w");
+			if (!data->wiener_trace_fp) {
+				log_error("fsp: wiener_trace \"%s\" is not "
+					"writable: %s", data->wiener_trace,
+					strerror(errno));
+				xfree(data->wiener_trace);
+				data->wiener_trace = NULL;
+				return -1;
+			}
+			if (data->wiener_trace_period <= 0.0)
+				data->wiener_trace_period = 10.0;
+			for (int a = 0; a < 2; a++)
+				data->wtrace_prev[a] = xcalloc(
+					data->broad_order, sizeof(double));
+			fprintf(data->wiener_trace_fp,
+				"# fsp observer convergence trace, every %G s\n"
+				"# broad_order=%zu broad_mu=%G broad_lp=%zu "
+				"fs=%G start_delay=%G ramp=%G\n"
+				"# ||dw|| is the tap change since the previous "
+				"sample: it flattening is the observer having "
+				"converged\n"
+				"# t_s n_closed y_wnorm y_wnextnorm y_dwnorm "
+				"x_wnorm x_wnextnorm x_dwnorm y_drift x_drift "
+				"y_guard x_guard y_trans x_trans mu\n",
+				data->wiener_trace_period, data->broad_order,
+				data->broad_mu, data->broad_lp, data->fs,
+				data->start_delay, data->ramp);
+			fflush(data->wiener_trace_fp);
+			log_info("fsp: observer convergence trace every %G s "
+				"to %s", data->wiener_trace_period,
+				data->wiener_trace);
+		}
+	}
 	if (data->broad_order)
 		log_info("fsp: full-band %zu-state disturbance predictor, horizon "
 			"y %zu+%.3G / x %zu+%.3G frames, NLMS mu %G",
@@ -933,6 +1142,14 @@ int fsp_init(struct aylp_device *self)
 			data->axis[0].delay, data->axis[0].delay_frac,
 			data->axis[1].delay, data->axis[1].delay_frac,
 			data->broad_mu);
+	if (data->broad_order && data->broad_mu_init > data->broad_mu)
+		log_info("fsp: NLMS step schedule: mu %G -> %G with %G s time "
+			"constant from loop close (nominal constant "
+			"order/(mu*fs) = %.2G s at the initial step, %.2G s at "
+			"the final)", data->broad_mu_init, data->broad_mu,
+			data->broad_mu_tau,
+			data->broad_order / (data->broad_mu_init * data->fs),
+			data->broad_order / (data->broad_mu * data->fs));
 	if (data->broad_lp)
 		log_info("fsp: observer band-limit: %zu-tap boxcar prefilter "
 			"(first null %.0f Hz), +%zu frames folded into the broad "
@@ -1092,6 +1309,15 @@ int fsp_proc(struct aylp_device *self, struct aylp_state *state)
 	double now = tp.tv_sec + 1e-9 * tp.tv_nsec;
 	if (UNLIKELY(!data->t0)) data->t0 = now;
 
+	// Convergence sample. Taken from the top of proc so it covers the
+	// start_delay hold too -- a nonzero ||dw|| there would mean the
+	// observer is learning from data it is supposed to be ignoring.
+	if (UNLIKELY(data->wiener_trace_fp
+			&& now - data->t_wtrace >= data->wiener_trace_period)) {
+		data->t_wtrace = now;
+		fsp_trace_sample(data, now);
+	}
+
 	if (UNLIKELY(!data->res_v || data->res_v->size != s->size)) {
 		if (data->res_v) xfree_type(gsl_vector, data->res_v);
 		data->res_v = xmalloc_type(gsl_vector, s->size);
@@ -1113,6 +1339,14 @@ int fsp_proc(struct aylp_device *self, struct aylp_state *state)
 		double up = now - data->t_close;
 		frac = (data->ramp > 0.0 && up < data->ramp)
 			? up / data->ramp : 1.0;
+		// NLMS step schedule: decay from broad_mu_init to broad_mu
+		// with time constant broad_mu_tau, measured from loop close.
+		// Converges the slow eigenmodes during settle_time instead of
+		// during the scored window; see fsp.h.
+		if (data->broad_mu_init > data->broad_mu)
+			data->broad_mu_cur = data->broad_mu
+				+ (data->broad_mu_init - data->broad_mu)
+				* exp(-up / data->broad_mu_tau);
 		if (UNLIKELY(frac > 0.0 && !data->closed)) {
 			data->closed = true;
 			log_info("fsp: loop closing; blending command in "
@@ -1433,7 +1667,7 @@ int fsp_proc(struct aylp_device *self, struct aylp_state *state)
 				bool train = (!data->broad_freeze_closed
 					|| in_hold) && !suppress;
 				if (train && isfinite(pe)) {
-					double step = data->broad_mu * pe / energy1;
+					double step = data->broad_mu_cur * pe / energy1;
 					for (size_t i = 0; i < P; i++)
 						ax->broad_w[i] += step * ax->broad_xbuf[i];
 				} else if (!isfinite(pe)) {
@@ -1444,7 +1678,7 @@ int fsp_proc(struct aylp_device *self, struct aylp_state *state)
 				// Bode-fit horizon.
 				double pe2 = phi_bl - pred2;
 				if (train && isfinite(pe2)) {
-					double step = data->broad_mu * pe2 / energy2;
+					double step = data->broad_mu_cur * pe2 / energy2;
 					for (size_t i = 0; i < P; i++)
 						ax->broad_w_next[i] += step
 							* ax->broad_xbuf2[i];
@@ -1709,7 +1943,21 @@ int fsp_fini(struct aylp_device *self)
 				+ data->axis[1].transient_events,
 			data->axis[0].transient_events,
 			data->axis[1].transient_events);
+	// must precede the frees below: this is the only chance to persist the
+	// learned taps, and fini runs on the SIGINT path too
+	fsp_save_wiener(data);
+	if (data->wiener_trace_fp) {
+		// final sample, so the trace ends at the same state the
+		// wiener_out dump records
+		fsp_trace_sample(data, data->t_last > 0.0 ? data->t_last
+			: data->t0);
+		fclose(data->wiener_trace_fp);
+		data->wiener_trace_fp = NULL;
+		log_info("fsp: observer convergence trace written to %s",
+			data->wiener_trace);
+	}
 	for (int a = 0; a < 2; a++) {
+		xfree(data->wtrace_prev[a]);
 		xfree(data->axis[a].ucmd);
 		xfree(data->axis[a].broad_hist);
 		xfree(data->axis[a].broad_w);
@@ -1720,6 +1968,8 @@ int fsp_fini(struct aylp_device *self)
 	}
 	if (data->res_v) xfree_type(gsl_vector, data->res_v);
 	xfree(data->wiener_file);
+	xfree(data->wiener_out);
+	xfree(data->wiener_trace);
 	xfree(data);
 	return 0;
 }

@@ -36,8 +36,8 @@
 				"camera_name": "ASI290MM",
 				"width": 32,
 				"height": 32,
-				"start_x": 1840,
-				"start_y": 680,
+				"start_x": 1832,
+				"start_y": 692,
 				"_roi_note": "ROI centred on beam at coarse bias 2/2 (fine 1.5/2.15): probe-verified 2026-07-21, full-sensor CoM (x 919, y 507). Re-derive via contrib/probe_frame.json only on an alignment change.",
 				"exposure": 50,
 				"gain": 100,
@@ -94,7 +94,7 @@
 				"_start_delay": "hold injection at 0 (= the channel parked at 0 V) for 30 s before the sweep starts. There is no coarse stage to settle any more, but the hold is kept: it gives the FSM and the camera AGC a quiet, known starting point, and bode_plot measures its baseline during it.",
 				"start_delay": 30.0,
 				"_output_file": "distinct filename on purpose: do NOT overwrite the piplate-era fsm_bodex_722_full7.pdf -- the whole point is comparing the two transports.",
-				"output_file": "fsm_bodex_par.pdf"
+				"output_file": "fsm_bodex_par2.pdf"
 			}
 		},
 		{

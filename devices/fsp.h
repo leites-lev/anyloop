@@ -379,9 +379,48 @@ struct aylp_fsp_data {
 	// is not added again (which would double-count the same disturbance).
 	size_t broad_order;
 	double broad_mu;
+	// NLMS step SCHEDULE, the fix for eigenvalue-spread-limited convergence.
+	// The nominal NLMS time constant is broad_order/(broad_mu*fs) = 4.5 s at
+	// 512/0.03/3788, but the measured constant on this disturbance is 125-255
+	// s -- a 30-60x penalty, because LMS converges each eigenmode in
+	// proportion to its own eigenvalue and this spectrum spans ~4.4 decades.
+	// A single mu cannot fix that: large mu converges fast but leaves a
+	// misadjustment floor of roughly mu/(2-mu), small mu is quiet but slow.
+	// So schedule it (Robbins-Monro: large step early, small step late):
+	//   mu(t) = broad_mu + (broad_mu_init - broad_mu)*exp(-(t-t_close)/tau)
+	// starting from broad_mu_init at loop close and relaxing to broad_mu with
+	// time constant broad_mu_tau. The CONVERGED solution is unchanged -- mu
+	// affects only the path taken and the steady-state misadjustment, and by
+	// the time the scored window opens mu is back at its nominal value. Set
+	// broad_mu_init <= 0 (the default) to disable and use a constant
+	// broad_mu.
+	double broad_mu_init;
+	double broad_mu_tau;
+	double broad_mu_cur;	// current value, recomputed once per frame
 	// Optional offline Wiener initialization.  The text file has one row per
 	// tap: index y_w y_w_next x_w x_w_next.  It must contain broad_order rows.
 	char *wiener_file;
+	// Optional dump of the LEARNED weights at fini, in exactly the format
+	// wiener_file reads, so a run's converged predictor can be analysed
+	// offline and then replayed as the next run's initialization.  Written
+	// on normal AYLP_DONE exit and on SIGINT alike (libaylp/anyloop.c
+	// cleanup() runs fini on both paths), so an aborted run still yields
+	// whatever the observer had learned.  NULL disables.
+	char *wiener_out;
+	// Optional periodic convergence trace: one text line every
+	// wiener_trace_period seconds with the per-axis tap norms, the norm of
+	// the CHANGE since the previous sample, drift, and the cumulative
+	// guard/transient counts.  A single end-of-run dump says where the
+	// observer ended up; this says whether it had stopped moving, which is
+	// the question a settle_time is chosen to answer.  Tiny (~150 B per
+	// sample) so the periodic write cannot disturb the RT loop the way a
+	// full 512-tap snapshot could.  NULL disables.
+	char *wiener_trace;
+	double wiener_trace_period;	// s; <= 0 defaults to 10
+	FILE *wiener_trace_fp;
+	double t_wtrace;		// CLOCK_MONOTONIC of last sample (s)
+	// previous-sample copies, for the ||dw|| convergence metric
+	double *wtrace_prev[2];
 	// Observer band-limit (broad_lp > 0, odd): boxcar prefilter length on the
 	// reconstructed disturbance feeding the full-band observer. The NLMS is
 	// otherwise broadband to Nyquist, and any K/delay model error leaks the
