@@ -404,6 +404,7 @@ int center_of_mass_proc_track(struct aylp_device *self, struct aylp_state *state
 		data->win_y = (size_t)(abs_y + 0.5);
 		data->win_x = (size_t)(abs_x + 0.5);
 		data->lost = 0;
+		state->header.status &= (aylp_status)~AYLP_BEAM_LOST;
 	} else {
 		// Every pixel in the window is at or below threshold. Hold the
 		// last good output rather than reporting (0,0), which downstream
@@ -412,6 +413,7 @@ int center_of_mass_proc_track(struct aylp_device *self, struct aylp_state *state
 		// the window is stranded and can never find it again, so fall
 		// back to a full-image re-acquire.
 		if (++data->lost >= data->reacquire_after) {
+			state->header.status |= AYLP_BEAM_LOST;
 			if (data->lost == data->reacquire_after) {
 				log_warn("center_of_mass: no signal in window "
 					"for %zu frames; re-acquiring",
@@ -548,4 +550,3 @@ int center_of_mass_fini_threaded(struct aylp_device *self)
 	xfree(self->device_data);
 	return 0;
 }
-

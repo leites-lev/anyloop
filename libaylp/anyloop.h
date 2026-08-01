@@ -48,6 +48,10 @@ typedef uint8_t aylp_status;
 enum {
 	/** Signals that we are done with the loop. */
 	AYLP_DONE	= 1 << 0,
+	/** Sensor has lost the controlled optical signal. Devices may hold the
+	 * last measurement for continuity while still exposing this validity
+	 * state to downstream safety logic. */
+	AYLP_BEAM_LOST	= 1 << 1,
 	// add more as necessary
 };
 
@@ -284,4 +288,3 @@ const char *aylp_units_to_string(aylp_units units);
 
 
 #endif	// include guard
-

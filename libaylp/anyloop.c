@@ -273,7 +273,7 @@ int main(int argc, char **argv)
 	if (profile_mode)
 		profile = profile_new(&conf);
 
-	while (!sigint_received && state.header.status ^ AYLP_DONE) {
+	while (!sigint_received && !(state.header.status & AYLP_DONE)) {
 		for (size_t d=0; !sigint_received && d<conf.n_devices; d++) {
 			struct aylp_device *dev = &conf.devices[d];
 			if (dev->proc) {
@@ -320,4 +320,3 @@ int main(int argc, char **argv)
 	log_info("Exiting now!");
 	return EXIT_SUCCESS;
 }
-

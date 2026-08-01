@@ -46,6 +46,7 @@ project_source_files = [
 	'devices/vonkarman_stream.c',
 	'devices/piplate_bridge.c',
 	'devices/parport_dac.c',
+	'devices/parport_dac_range.c',
 	'devices/bode_plot.c',
 	'devices/latency_test.c',
 	'devices/attenuation_test.c'
@@ -59,6 +60,12 @@ executable('anyloop', project_source_files,
 	include_directories: incdir,
 	export_dynamic: true
 )
+
+parport_dac_range_test = executable('parport_dac_range_test',
+	['test/parport_dac_range.c', 'devices/parport_dac_range.c'],
+	install: false,
+	include_directories: include_directories('.'))
+test('parport_dac_range', parport_dac_range_test)
 
 shared_library('plugin_example', 'contrib/plugin_example.c',
 	name_prefix: '',
@@ -113,4 +120,3 @@ if alsa_dep.found() and fs.exists('contrib/aylp_alsa.c')
 else
 	message('alsa-lib not found; aylp_alsa will not be built')
 endif
-

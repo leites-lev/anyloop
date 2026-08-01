@@ -68,18 +68,28 @@ static void fsp_mmT(const double *A, const double *B, double *C, size_t D)
 #define AYLP_FSP_ADAPT_ITERS 16
 
 // snapshot A and seed P = Q, then reset the iteration counter.
-static int fsp_solve_gain_begin(struct aylp_fsp_axis *ax)
+static int fsp_solve_gain_begin_scaled(struct aylp_fsp_axis *ax,
+	double q_scale)
 {
 	size_t D = ax->dim;
-	if (D == 0 || D > AYLP_FSP_MAX_DIM) return -1;
+	if (D == 0 || D > AYLP_FSP_MAX_DIM
+			|| !isfinite(q_scale) || q_scale <= 0.0) return -1;
+	ax->adapt_q_scale = q_scale;
 	fsp_build_A(ax, ax->adapt_A);
 	// Q (diagonal, q_i on position states) doubles as the initial P
 	memset(ax->adapt_P, 0, D * D * sizeof(double));
 	for (size_t i = 0; i < ax->n_modes; i++)
-		ax->adapt_P[(2*i) * D + (2*i)] = ax->q[i] > 0.0 ? ax->q[i] : 1e-9;
+		ax->adapt_P[(2*i) * D + (2*i)] =
+			(ax->q[i] > 0.0 ? ax->q[i] : 1e-9) * q_scale;
 	ax->adapt_it = 0;
 	ax->adapt_prev_trace = 0.0;
 	return 0;
+}
+
+
+static int fsp_solve_gain_begin(struct aylp_fsp_axis *ax)
+{
+	return fsp_solve_gain_begin_scaled(ax, 1.0);
 }
 
 // advance the fixed-point iteration by up to `niter` steps.
@@ -119,7 +129,9 @@ static int fsp_solve_gain_iterate(struct aylp_fsp_axis *ax, size_t niter)
 		fsp_mm(A, Pf, AP, D);
 		fsp_mmT(AP, A, Pn, D);
 		for (size_t i = 0; i < ax->n_modes; i++)
-			Pn[(2*i)*D + (2*i)] += ax->q[i] > 0.0 ? ax->q[i] : 1e-9;
+			Pn[(2*i)*D + (2*i)] +=
+				(ax->q[i] > 0.0 ? ax->q[i] : 1e-9)
+				* ax->adapt_q_scale;
 		// convergence on the trace
 		double tr = 0.0;
 		for (size_t i = 0; i < D; i++) tr += Pn[i*D+i];
@@ -169,6 +181,20 @@ static int fsp_solve_gain(struct aylp_fsp_axis *ax)
 		;
 	if (done < 0) return -1;
 	return fsp_solve_gain_finalize(ax);
+}
+
+// Build the event-only modal observer without disturbing the normal gain or
+// its adaptation workspace.  A physical push is an abrupt increase in modal
+// drive, so multiplying Q makes the observer reacquire the ring-down's
+// amplitude and phase quickly.  This synchronous solve is init-only; it must
+// never migrate into the real-time path.
+static int fsp_solve_transient_gain(struct aylp_fsp_axis *ax, double q_scale)
+{
+	struct aylp_fsp_axis tmp = *ax;
+	for (size_t i = 0; i < tmp.n_modes; i++) tmp.q[i] *= q_scale;
+	if (fsp_solve_gain(&tmp)) return -1;
+	memcpy(ax->transient_L, tmp.L, ax->dim * sizeof(double));
+	return 0;
 }
 
 // (re)compute the AR(2) coefficients of every mode from its f/zeta at rate fs
@@ -489,36 +515,256 @@ static void fsp_trace_sample(struct aylp_fsp_data *data, double now)
 }
 
 
+static const char *fsp_transient_controller_name(
+	enum aylp_fsp_transient_controller controller)
+{
+	switch (controller) {
+	case AYLP_FSP_TRANSIENT_PROPORTIONAL: return "proportional";
+	case AYLP_FSP_TRANSIENT_INTEGRAL: return "integral";
+	case AYLP_FSP_TRANSIENT_PI: return "pi";
+	case AYLP_FSP_TRANSIENT_MODAL: return "modal";
+	case AYLP_FSP_TRANSIENT_HYBRID: return "hybrid";
+	}
+	return "unknown";
+}
+
+
+static bool fsp_transient_uses_integral(
+	enum aylp_fsp_transient_controller controller)
+{
+	return controller == AYLP_FSP_TRANSIENT_INTEGRAL
+		|| controller == AYLP_FSP_TRANSIENT_PI
+		|| controller == AYLP_FSP_TRANSIENT_HYBRID;
+}
+
+
+static bool fsp_transient_uses_modal(
+	enum aylp_fsp_transient_controller controller)
+{
+	return controller == AYLP_FSP_TRANSIENT_MODAL
+		|| controller == AYLP_FSP_TRANSIENT_HYBRID;
+}
+
+
+// Learn a candidate stationary predictor without touching the production FIR.
+// Errors are measured before this sample's update (prequential/held-out), so a
+// shadow cannot qualify merely by fitting the samples it has just seen. A
+// promotion means the persistent disturbance has demonstrated a new predictable
+// regime; the ordinary event detector still requires the promoted model's
+// residual to remain quiet before cross-fading out of recovery.
+static void fsp_shadow_update(struct aylp_fsp_axis *ax,
+	struct aylp_fsp_data *data, double pe, double pe2,
+	double primary_pred1, double primary_pred2,
+	double energy1, double energy2, bool suppress, double now, size_t axis)
+{
+	if (!ax->shadow_active || suppress || ax->transient_saturated) {
+		ax->shadow_advantage_start = 0.0;
+		return;
+	}
+	if (ax->transient_recovering) {
+		ax->shadow_advantage_start = 0.0;
+		return;
+	}
+	size_t P = data->broad_order;
+	double pred1 = 0.0, pred2 = 0.0;
+	for (size_t i = 0; i < P; i++) {
+		pred1 += ax->shadow_w[i] * ax->broad_xbuf[i];
+		pred2 += ax->shadow_w_next[i] * ax->broad_xbuf2[i];
+	}
+	// Since pe = target - primary_prediction, target - shadow_prediction is
+	// pe + primary_prediction - shadow_prediction.
+	double spe = pe + primary_pred1 - pred1;
+	double spe2 = pe2 + primary_pred2 - pred2;
+	if (!isfinite(spe) || !isfinite(spe2)) {
+		ax->shadow_active = false;
+		log_warn("fsp: %s event shadow predictor became non-finite; "
+			"discarding candidate", axis == 0 ? "y" : "x");
+		return;
+	}
+	// Qualify against the exact delay-horizon innovation used by
+	// fsp_transient_update() to hold/release the event. The adjacent horizon is
+	// still trained and promoted as a pair, but improvement confined to that
+	// auxiliary fractional-delay model cannot pass this gate.
+	double primary_sample = pe * pe;
+	double shadow_sample = spe * spe;
+	if (!ax->shadow_frames) {
+		ax->shadow_primary_e2 = primary_sample;
+		ax->shadow_e2 = shadow_sample;
+	} else {
+		ax->shadow_primary_e2 += data->transient_shadow_beta
+			* (primary_sample - ax->shadow_primary_e2);
+		ax->shadow_e2 += data->transient_shadow_beta
+			* (shadow_sample - ax->shadow_e2);
+	}
+	ax->shadow_frames++;
+
+	// Train only the shadow, with the event threshold as the influence bound.
+	double learn1 = spe, learn2 = spe2;
+	double clip = ax->transient_threshold;
+	if (clip > 0.0 && fabs(learn1) > clip)
+		learn1 = copysign(clip, learn1);
+	if (clip > 0.0 && fabs(learn2) > clip)
+		learn2 = copysign(clip, learn2);
+	double step1 = data->transient_shadow_mu * learn1 / energy1;
+	double step2 = data->transient_shadow_mu * learn2 / energy2;
+	double primary_norm2 = 0.0, delta_norm2 = 0.0;
+	for (size_t i = 0; i < P; i++) {
+		ax->shadow_w[i] += step1 * ax->broad_xbuf[i];
+		ax->shadow_w_next[i] += step2 * ax->broad_xbuf2[i];
+		double d1 = ax->shadow_w[i] - ax->broad_w[i];
+		double d2 = ax->shadow_w_next[i] - ax->broad_w_next[i];
+		delta_norm2 += d1*d1 + d2*d2;
+		primary_norm2 += ax->broad_w[i]*ax->broad_w[i]
+			+ ax->broad_w_next[i]*ax->broad_w_next[i];
+	}
+	if (ax->shadow_promoted) {
+		// The candidate has already passed the persistent-regime gate. Keep the
+		// active model synchronized with its conservative updates so the normal
+		// release detector can actually observe agreement with the new regime.
+		// Event recovery still owns the command until the usual quiet hold/ramp.
+		memcpy(ax->broad_w, ax->shadow_w, P * sizeof(double));
+		memcpy(ax->broad_w_next, ax->shadow_w_next, P * sizeof(double));
+		return;
+	}
+
+	double ratio2 = data->transient_shadow_ratio
+		* data->transient_shadow_ratio;
+	double norm = sqrt(primary_norm2);
+	double norm_limit = data->transient_shadow_norm_ratio * fmax(norm, 0.1);
+	bool eligible = now - ax->transient_start
+			>= data->transient_shadow_min_duration
+		&& !ax->transient_saturated
+		&& ax->shadow_primary_e2 > 1e-12
+		&& ax->shadow_e2 <= ratio2 * ax->shadow_primary_e2
+		&& sqrt(delta_norm2) <= norm_limit;
+	if (!eligible) {
+		ax->shadow_advantage_start = 0.0;
+		return;
+	}
+	if (ax->shadow_advantage_start <= 0.0) {
+		ax->shadow_advantage_start = now;
+		return;
+	}
+	if (now - ax->shadow_advantage_start < data->transient_shadow_hold)
+		return;
+
+	memcpy(ax->broad_w, ax->shadow_w, P * sizeof(double));
+	memcpy(ax->broad_w_next, ax->shadow_w_next, P * sizeof(double));
+	ax->shadow_error_ratio = sqrt(ax->shadow_e2 / ax->shadow_primary_e2);
+	ax->shadow_promoted = true;
+	ax->shadow_promotions++;
+	data->shadow_promotions++;
+	log_warn("fsp: %s event shadow model promoted after %.3G s: held-out "
+		"RMS ratio %.3G, coefficient change %.3G (limit %.3G); event "
+		"recovery remains active until the new model is quiet",
+		axis == 0 ? "y" : "x", now - ax->transient_start,
+		ax->shadow_error_ratio, sqrt(delta_norm2), norm_limit);
+}
+
+
 // Update the innovation-triggered recovery state and return the fraction of
-// transient P control to use (0 = normal predictor, 1 = transient servo).
+// event recovery to use (0 = normal predictor, 1 = selected event controller).
 static double fsp_transient_update(struct aylp_fsp_axis *ax,
-	const struct aylp_fsp_data *data, double resid, double authority,
+	struct aylp_fsp_data *data, double resid, double authority,
 	double now, size_t axis)
 {
 	if (data->transient_sigma <= 0.0 || !isfinite(resid)) return 0.0;
+	// During post-close warm-up, learn the residual baseline but do not trip.
+	// This is deliberately not an open-loop/frozen calibration: the EWMA keeps
+	// tracking whenever no event is active, and the broadband weights continue
+	// adapting in closed loop. Early cold-predictor errors are forgotten over
+	// transient_tau before the detector arms.
+	bool armed = now - data->t0 >=
+		data->start_delay + data->transient_arm_delay;
 	double sigma = sqrt(fmax(ax->transient_var, 0.0));
 	double threshold = data->transient_sigma * sigma;
 	if (threshold < data->transient_floor)
 		threshold = data->transient_floor;
-	bool event = authority > 0.0 && fabs(resid) > threshold;
+	ax->transient_threshold = threshold;
+	bool outside_model = armed && fabs(resid) > threshold;
+	// Authority gates entry only. Once recovery is active, a burst-guard hold
+	// or another temporary authority reduction must not masquerade as model
+	// agreement and release the event while innovation is still high.
+	// Online modal re-identification refreshes the event-only gain after the
+	// normal gain.  Do not enter a modal event during that short solve window:
+	// its AR coefficients already describe the new model while transient_L
+	// still describes the old one.
+	enum aylp_fsp_transient_controller entry_controller =
+		data->transient_controller;
+	if (data->transient_modal_ab && ((ax->transient_events + 1) & 1))
+		entry_controller = AYLP_FSP_TRANSIENT_PROPORTIONAL;
+	bool modal_ready = !fsp_transient_uses_modal(entry_controller)
+		|| ax->transient_gain_current;
+	bool event_trigger = authority > 0.0 && outside_model && modal_ready;
+	if (ax->transient_blocked) {
+		if (outside_model) return 0.0;
+		ax->transient_blocked = false;
+		log_info("fsp: %s transient detector re-armed after innovation "
+			"returned below threshold", axis == 0 ? "y" : "x");
+	}
 
-	if (!ax->transient_active && event) {
+	if (!ax->transient_active && event_trigger) {
 		ax->transient_active = true;
 		ax->transient_recovering = false;
 		ax->transient_t_event = now;
 		ax->transient_events++;
-		log_warn("fsp: transient recovery on %s axis (event %zu): "
-			"|innovation| %.4G > %.4G; using Kp=%G fallback",
-			axis == 0 ? "y" : "x", ax->transient_events,
-			fabs(resid), threshold, data->transient_kp);
-	} else if (ax->transient_active && event) {
+		// entry_controller also handles backward-compatible same-run push A/B:
+		// odd events proportional, even events the configured controller.
+		ax->transient_controller = entry_controller;
+		ax->transient_modal = fsp_transient_uses_modal(
+			ax->transient_controller);
+		ax->transient_i = 0.0;
+		ax->transient_i_prev = 0.0;
+		ax->transient_i_step = 0.0;
+		ax->transient_peak_i = 0.0;
+		ax->transient_start = now;
+		ax->transient_error_t_last = now;
+		ax->transient_peak_error = 0.0;
+		ax->transient_peak_command = 0.0;
+		ax->transient_error2 = 0.0;
+		ax->transient_frames = 0;
+		ax->shadow_active = data->transient_shadow_mu > 0.0
+			&& data->broad_order && ax->shadow_w && ax->shadow_w_next;
+		ax->shadow_promoted = false;
+		ax->transient_saturated = false;
+		ax->shadow_primary_e2 = 0.0;
+		ax->shadow_e2 = 0.0;
+		ax->shadow_advantage_start = 0.0;
+		ax->shadow_error_ratio = NAN;
+		ax->shadow_frames = 0;
+		if (ax->shadow_active) {
+			memcpy(ax->shadow_w, ax->broad_w,
+				data->broad_order * sizeof(double));
+			memcpy(ax->shadow_w_next, ax->broad_w_next,
+				data->broad_order * sizeof(double));
+		}
+		if (fsp_transient_uses_integral(ax->transient_controller))
+			log_warn("fsp: transient recovery on %s axis (event %zu): "
+				"|innovation| %.4G > %.4G; using %s recovery, "
+				"Kp=%G, Ki=%G/s", axis == 0 ? "y" : "x",
+				ax->transient_events, fabs(resid), threshold,
+				fsp_transient_controller_name(ax->transient_controller),
+				data->transient_kp, data->transient_ki);
+		else
+			log_warn("fsp: transient recovery on %s axis (event %zu): "
+				"|innovation| %.4G > %.4G; using %s recovery, Kp=%G",
+				axis == 0 ? "y" : "x", ax->transient_events,
+				fabs(resid), threshold,
+				fsp_transient_controller_name(ax->transient_controller),
+				data->transient_kp);
+	} else if (ax->transient_active && outside_model) {
 		ax->transient_t_event = now;
 		ax->transient_recovering = false;
-	} else if (!ax->transient_active) {
+	} else if (!ax->transient_active && !outside_model) {
+		// Once armed, an out-of-model sample is never part of the quiet baseline,
+		// even if a burst-guard hold or a pending modal-gain solve temporarily
+		// prevents event entry.  Otherwise the guard can teach the detector that
+		// the very disturbance it should catch is ordinary noise.
 		ax->transient_var += data->transient_beta
 			* (resid * resid - ax->transient_var);
 	}
 
+	if (!armed && !ax->transient_active) return 0.0;
 	if (!ax->transient_active) return 0.0;
 	double quiet = now - ax->transient_t_event;
 	if (quiet <= data->transient_hold) return 1.0;
@@ -532,8 +778,40 @@ static double fsp_transient_update(struct aylp_fsp_axis *ax,
 		? data->transient_ramp : 1e-9;
 	double mix = 1.0 - (quiet - data->transient_hold) / ramp;
 	if (mix <= 0.0) {
+		double duration = now - ax->transient_start;
+		double error_settle =
+			ax->transient_error_t_last - ax->transient_start;
+		double innovation_quiet =
+			ax->transient_t_event - ax->transient_start;
+		double rms = ax->transient_frames
+			? sqrt(ax->transient_error2 / (double)ax->transient_frames)
+			: 0.0;
+		log_info("fsp: %s transient %zu (%s) recovered: output settle %.4G s, "
+			"innovation quiet %.4G s, handoff %.4G s, peak |e| %.4G, "
+			"rms(e) %.4G, "
+			"peak |u| %.4G, peak |I| %.4G",
+			axis == 0 ? "y" : "x", ax->transient_events,
+			fsp_transient_controller_name(ax->transient_controller), error_settle,
+			innovation_quiet, duration, ax->transient_peak_error, rms,
+			ax->transient_peak_command, ax->transient_peak_i);
+		if (data->transient_log_fp) {
+			fprintf(data->transient_log_fp,
+				"%s,%zu,%s,%.9G,%.9G,%.9G,%.9G,%.9G,%.9G,%.9G,%.9G,%zu,%d,%.9G\n",
+				axis == 0 ? "y" : "x", ax->transient_events,
+				fsp_transient_controller_name(ax->transient_controller),
+				ax->transient_start - data->t0, error_settle,
+				innovation_quiet, duration,
+				ax->transient_peak_error, rms,
+				ax->transient_peak_command, ax->transient_peak_i,
+				ax->transient_frames, ax->shadow_promoted,
+				ax->shadow_error_ratio);
+			fflush(data->transient_log_fp);
+		}
 		ax->transient_active = false;
 		ax->transient_recovering = false;
+		ax->shadow_active = false;
+		ax->transient_i = 0.0;
+		ax->transient_i_step = 0.0;
 		return 0.0;
 	}
 	return mix;
@@ -691,6 +969,8 @@ static int fsp_parse_axis(struct aylp_fsp_axis *ax, struct json_object *obj)
 
 
 static void fsp_adapt(struct aylp_fsp_data *data);
+static int fsp_adapt_advance(struct aylp_fsp_axis *ax,
+	struct aylp_fsp_data *data, size_t axis, size_t niter);
 
 int fsp_init(struct aylp_device *self)
 {
@@ -722,11 +1002,29 @@ int fsp_init(struct aylp_device *self)
 	data->drift_tau = 0.0;		// compound predictor unless asked
 	data->transient_sigma = 0.0;	// transient fallback is opt-in
 	data->transient_floor = 0.02;
+	data->transient_settle_error = 0.03;
 	data->transient_kp = 0.25;
+	data->transient_ki = 5.0;
+	data->transient_i_leak = 0.0;
+	data->transient_i_limit = 1.0;
+	data->transient_controller = AYLP_FSP_TRANSIENT_PROPORTIONAL;
+	data->transient_modal_q_scale = 0.0;
 	data->transient_tau = 5.0;
 	data->transient_hold = 0.10;
 	data->transient_ramp = 0.25;
+	data->transient_clamp_lo = NAN;
+	data->transient_clamp_hi = NAN;
+	data->transient_trip_command = NAN;
+	data->transient_max_duration = 0.0;
+	data->transient_arm_delay = 0.0;	// arm at close unless asked
+	data->transient_shadow_mu = 0.0;	// opt-in persistent-regime recovery
+	data->transient_shadow_tau = 0.5;
+	data->transient_shadow_min_duration = 2.0;
+	data->transient_shadow_hold = 1.0;
+	data->transient_shadow_ratio = 0.70;
+	data->transient_shadow_norm_ratio = 1.0;
 	data->trip_frames = 8;
+	data->beam_recover_ramp = 0.5;
 	// burst guard defaults: on. Quiet-bench 250-450 Hz envelope is ~0.003
 	// normalized; the floor keeps the bar at 4 * 0.008 = 0.032 (~0.5 px),
 	// well below the multi-px bursts and well above ambient.
@@ -817,8 +1115,46 @@ int fsp_init(struct aylp_device *self)
 		} else if (!strcmp(key, "transient_floor")) {
 			data->transient_floor =
 				fabs(json_object_get_double(val));
+		} else if (!strcmp(key, "transient_settle_error")) {
+			data->transient_settle_error =
+				fabs(json_object_get_double(val));
 		} else if (!strcmp(key, "transient_kp")) {
 			data->transient_kp = json_object_get_double(val);
+		} else if (!strcmp(key, "transient_ki")) {
+			data->transient_ki = json_object_get_double(val);
+		} else if (!strcmp(key, "transient_i_leak")) {
+			data->transient_i_leak = json_object_get_double(val);
+		} else if (!strcmp(key, "transient_i_limit")) {
+			data->transient_i_limit =
+				fabs(json_object_get_double(val));
+		} else if (!strcmp(key, "transient_controller")) {
+			const char *s = json_object_get_string(val);
+			data->transient_controller_set = true;
+			if (!strcmp(s, "proportional"))
+				data->transient_controller =
+					AYLP_FSP_TRANSIENT_PROPORTIONAL;
+			else if (!strcmp(s, "integral"))
+				data->transient_controller = AYLP_FSP_TRANSIENT_INTEGRAL;
+			else if (!strcmp(s, "pi"))
+				data->transient_controller = AYLP_FSP_TRANSIENT_PI;
+			else if (!strcmp(s, "modal"))
+				data->transient_controller = AYLP_FSP_TRANSIENT_MODAL;
+			else if (!strcmp(s, "hybrid"))
+				data->transient_controller = AYLP_FSP_TRANSIENT_HYBRID;
+			else {
+				log_error("fsp: unknown transient_controller \"%s\".", s);
+				return -1;
+			}
+		} else if (!strcmp(key, "transient_modal_q_scale")) {
+			data->transient_modal_q_scale =
+				json_object_get_double(val);
+		} else if (!strcmp(key, "transient_modal_ab")) {
+			data->transient_modal_ab =
+				json_object_get_boolean(val);
+		} else if (!strcmp(key, "transient_log")) {
+			xfree(data->transient_log);
+			data->transient_log =
+				xstrdup(json_object_get_string(val));
 		} else if (!strcmp(key, "transient_tau")) {
 			data->transient_tau = json_object_get_double(val);
 		} else if (!strcmp(key, "transient_hold")) {
@@ -827,6 +1163,35 @@ int fsp_init(struct aylp_device *self)
 		} else if (!strcmp(key, "transient_ramp")) {
 			data->transient_ramp =
 				fabs(json_object_get_double(val));
+		} else if (!strcmp(key, "transient_clamp")) {
+			double limit = fabs(json_object_get_double(val));
+			data->transient_clamp_lo = -limit;
+			data->transient_clamp_hi = limit;
+		} else if (!strcmp(key, "transient_clamp_min")) {
+			data->transient_clamp_lo = json_object_get_double(val);
+		} else if (!strcmp(key, "transient_clamp_max")) {
+			data->transient_clamp_hi = json_object_get_double(val);
+		} else if (!strcmp(key, "transient_trip_command")) {
+			data->transient_trip_command =
+				fabs(json_object_get_double(val));
+		} else if (!strcmp(key, "transient_max_duration")) {
+			data->transient_max_duration =
+				fabs(json_object_get_double(val));
+		} else if (!strcmp(key, "transient_arm_delay")) {
+			data->transient_arm_delay =
+				fabs(json_object_get_double(val));
+		} else if (!strcmp(key, "transient_shadow_mu")) {
+			data->transient_shadow_mu = json_object_get_double(val);
+		} else if (!strcmp(key, "transient_shadow_tau")) {
+			data->transient_shadow_tau = json_object_get_double(val);
+		} else if (!strcmp(key, "transient_shadow_min_duration")) {
+			data->transient_shadow_min_duration = json_object_get_double(val);
+		} else if (!strcmp(key, "transient_shadow_hold")) {
+			data->transient_shadow_hold = json_object_get_double(val);
+		} else if (!strcmp(key, "transient_shadow_ratio")) {
+			data->transient_shadow_ratio = json_object_get_double(val);
+		} else if (!strcmp(key, "transient_shadow_norm_ratio")) {
+			data->transient_shadow_norm_ratio = json_object_get_double(val);
 		} else if (!strcmp(key, "broad_freeze_closed")) {
 			data->broad_freeze_closed = json_object_get_boolean(val);
 		} else if (!strcmp(key, "trip_error")) {
@@ -835,6 +1200,9 @@ int fsp_init(struct aylp_device *self)
 			data->trip_command = fabs(json_object_get_double(val));
 		} else if (!strcmp(key, "trip_frames")) {
 			data->trip_frames = json_object_get_uint64(val);
+		} else if (!strcmp(key, "beam_recover_ramp")) {
+			data->beam_recover_ramp =
+				fabs(json_object_get_double(val));
 		} else if (!strcmp(key, "guard_ratio")) {
 			data->guard_ratio = json_object_get_double(val);
 		} else if (!strcmp(key, "guard_floor")) {
@@ -862,6 +1230,11 @@ int fsp_init(struct aylp_device *self)
 		log_error("fsp: type must be \"vector\".");
 		return -1;
 	}
+	// Preserve the pre-selector behavior: configuring an event-only modal
+	// gain used modal recovery unless a controller was named explicitly.
+	if (!data->transient_controller_set
+			&& data->transient_modal_q_scale > 0.0)
+		data->transient_controller = AYLP_FSP_TRANSIENT_MODAL;
 	// Resolve the output bounds: clamp_min/clamp_max win over the symmetric
 	// `clamp` shorthand, whichever order they appeared in the config.
 	if (isnan(data->clamp_lo)) data->clamp_lo = -data->clamp;
@@ -888,6 +1261,25 @@ int fsp_init(struct aylp_device *self)
 			"when the actuator's reachable range is not centred "
 			"on the command origin", data->clamp_lo,
 			data->clamp_hi);
+	if (isnan(data->transient_clamp_lo))
+		data->transient_clamp_lo = data->clamp_lo;
+	if (isnan(data->transient_clamp_hi))
+		data->transient_clamp_hi = data->clamp_hi;
+	if (isnan(data->transient_trip_command))
+		data->transient_trip_command = data->trip_command;
+	if (!isfinite(data->transient_clamp_lo)
+	|| !isfinite(data->transient_clamp_hi)
+	|| data->transient_clamp_lo >= data->transient_clamp_hi
+	|| data->transient_clamp_lo > data->clamp_lo
+	|| data->transient_clamp_hi < data->clamp_hi
+	|| data->transient_clamp_lo > 0.0
+	|| data->transient_clamp_hi < 0.0) {
+		log_error("fsp: transient clamp [%G, %G] must be finite, contain "
+			"zero, and contain the normal clamp [%G, %G].",
+			data->transient_clamp_lo, data->transient_clamp_hi,
+			data->clamp_lo, data->clamp_hi);
+		return -1;
+	}
 	if (data->delay < 1) {
 		log_error("fsp: delay must be >= 1 sample.");
 		return -1;
@@ -921,12 +1313,96 @@ int fsp_init(struct aylp_device *self)
 			"set.");
 		return -1;
 	}
-	if (data->transient_sigma > 0.0
-			&& (data->transient_kp <= 0.0
-				|| data->transient_kp >= 1.0
-				|| data->transient_tau <= 0.0)) {
+	if (!isfinite(data->transient_sigma)
+	|| !isfinite(data->transient_floor)
+	|| !isfinite(data->transient_settle_error)
+	|| !isfinite(data->transient_kp)
+	|| !isfinite(data->transient_ki)
+	|| !isfinite(data->transient_i_leak)
+	|| !isfinite(data->transient_i_limit)
+	|| !isfinite(data->transient_tau)
+	|| !isfinite(data->transient_hold)
+	|| !isfinite(data->transient_ramp)
+	|| !isfinite(data->transient_trip_command)
+	|| !isfinite(data->transient_max_duration)
+	|| !isfinite(data->transient_arm_delay)
+	|| !isfinite(data->transient_shadow_mu)
+	|| !isfinite(data->transient_shadow_tau)
+	|| !isfinite(data->transient_shadow_min_duration)
+	|| !isfinite(data->transient_shadow_hold)
+	|| !isfinite(data->transient_shadow_ratio)
+	|| !isfinite(data->transient_shadow_norm_ratio)
+	|| data->transient_floor < 0.0
+	|| data->transient_settle_error < 0.0
+	|| data->transient_ki < 0.0
+	|| data->transient_i_leak < 0.0
+	|| data->transient_i_limit < 0.0
+	|| data->transient_hold < 0.0
+	|| data->transient_ramp < 0.0
+	|| data->transient_trip_command < 0.0
+	|| data->transient_max_duration < 0.0
+	|| data->transient_arm_delay < 0.0
+	|| data->transient_shadow_mu < 0.0
+	|| data->transient_shadow_tau < 0.0
+	|| data->transient_shadow_min_duration < 0.0
+	|| data->transient_shadow_hold < 0.0
+	|| data->transient_shadow_norm_ratio < 0.0) {
+		log_error("fsp: transient parameters must be finite and floor, "
+			"settle_error, Ki, I leak/limit, hold, ramp, trip, "
+			"max_duration and arm_delay "
+			"must be >= 0.");
+		return -1;
+	}
+	if (data->transient_shadow_mu > 0.0
+			&& (data->transient_sigma <= 0.0
+				|| !data->broad_order
+				|| data->transient_shadow_mu >= 2.0
+				|| data->transient_shadow_tau <= 0.0
+				|| data->transient_shadow_ratio <= 0.0
+				|| data->transient_shadow_ratio >= 1.0
+				|| data->transient_shadow_norm_ratio <= 0.0)) {
+		log_error("fsp: transient shadow recovery requires transient_sigma > 0, "
+			"broad_order > 0, "
+			"0 < shadow_mu < 2, shadow_tau > 0, 0 < shadow_ratio < 1, "
+			"and shadow_norm_ratio > 0.");
+		return -1;
+	}
+	if (data->transient_sigma > 0.0 && data->transient_tau <= 0.0) {
 		log_error("fsp: enabled transient recovery requires "
-			"0 < transient_kp < 1 and transient_tau > 0.");
+			"transient_tau > 0.");
+		return -1;
+	}
+	if (data->transient_sigma > 0.0
+			&& data->transient_controller != AYLP_FSP_TRANSIENT_INTEGRAL
+			&& (data->transient_kp <= 0.0
+				|| data->transient_kp >= 1.0)) {
+		log_error("fsp: proportional, PI, modal and hybrid transient "
+			"controllers require 0 < transient_kp < 1.");
+		return -1;
+	}
+	if (data->transient_sigma > 0.0
+			&& fsp_transient_uses_integral(data->transient_controller)
+			&& (data->transient_ki <= 0.0
+				|| data->transient_i_limit <= 0.0)) {
+		log_error("fsp: integral, PI and hybrid transient controllers "
+			"require transient_ki > 0 and transient_i_limit > 0.");
+		return -1;
+	}
+	if (data->transient_modal_q_scale < 0.0
+			|| !isfinite(data->transient_modal_q_scale)) {
+		log_error("fsp: transient_modal_q_scale must be finite and >= 0.");
+		return -1;
+	}
+	if (fsp_transient_uses_modal(data->transient_controller)
+			&& data->transient_modal_q_scale <= 0.0) {
+		log_error("fsp: modal and hybrid transient controllers require "
+			"transient_modal_q_scale > 0.");
+		return -1;
+	}
+	if (data->transient_modal_ab
+			&& !fsp_transient_uses_modal(data->transient_controller)) {
+		log_error("fsp: transient_modal_ab requires transient_controller "
+			"modal or hybrid.");
 		return -1;
 	}
 	if (data->broad_lp) {
@@ -948,6 +1424,10 @@ int fsp_init(struct aylp_device *self)
 	if ((data->trip_error > 0.0 || data->trip_command > 0.0)
 			&& !data->trip_frames) {
 		log_error("fsp: trip_frames must be >= 1 when a trip is enabled.");
+		return -1;
+	}
+	if (!isfinite(data->beam_recover_ramp)) {
+		log_error("fsp: beam_recover_ramp must be finite and >= 0.");
 		return -1;
 	}
 	if (!axy || !axx) {
@@ -975,6 +1455,14 @@ int fsp_init(struct aylp_device *self)
 				"contain 0 -- the startup hold, ramp and burst "
 				"guard all drive the command to zero.",
 				a == 0 ? "y" : "x", ax->clamp_lo, ax->clamp_hi);
+			return -1;
+		}
+		if (data->transient_clamp_lo > ax->clamp_lo
+		|| data->transient_clamp_hi < ax->clamp_hi) {
+			log_error("fsp: transient clamp [%G, %G] must contain the %s "
+				"axis clamp [%G, %G].", data->transient_clamp_lo,
+				data->transient_clamp_hi, a == 0 ? "y" : "x",
+				ax->clamp_lo, ax->clamp_hi);
 			return -1;
 		}
 		if (ax->clamp_lo != -ax->clamp_hi)
@@ -1027,6 +1515,21 @@ int fsp_init(struct aylp_device *self)
 	if (data->transient_sigma > 0.0)
 		data->transient_beta =
 			1.0 - exp(-1.0 / (data->transient_tau * data->fs));
+	if (data->transient_shadow_mu > 0.0)
+		data->transient_shadow_beta = 1.0
+			- exp(-1.0 / (data->transient_shadow_tau * data->fs));
+	if (data->transient_log) {
+		data->transient_log_fp = fopen(data->transient_log, "w");
+		if (!data->transient_log_fp) {
+			log_error("fsp: fopen %s: %m", data->transient_log);
+			return -1;
+		}
+		fprintf(data->transient_log_fp,
+			"axis,event,recovery,start_s,error_settle_s,innovation_quiet_s,"
+			"recovery_s,peak_abs_error,error_rms,peak_abs_command,"
+			"peak_abs_integral,samples,shadow_promoted,shadow_error_ratio\n");
+		fflush(data->transient_log_fp);
+	}
 
 	for (int a = 0; a < 2; a++) {
 		struct aylp_fsp_axis *ax = &data->axis[a];
@@ -1038,6 +1541,16 @@ int fsp_init(struct aylp_device *self)
 				"q/r and mode params.", a == 0 ? "y" : "x");
 			return -1;
 		}
+		if (data->transient_modal_q_scale > 0.0
+				&& fsp_solve_transient_gain(ax,
+					data->transient_modal_q_scale)) {
+			log_error("fsp: transient modal Riccati solve failed on %s "
+				"axis; check transient_modal_q_scale and mode params.",
+				a == 0 ? "y" : "x");
+			return -1;
+		}
+		ax->transient_gain_current =
+			data->transient_modal_q_scale > 0.0;
 		// One extra command is retained for fractional-delay interpolation.
 		ax->ucmd = xcalloc(ax->delay + 1, sizeof(double));
 		if (data->broad_order) {
@@ -1048,6 +1561,11 @@ int fsp_init(struct aylp_device *self)
 			ax->broad_w = xcalloc(data->broad_order, sizeof(double));
 			ax->broad_w_next = xcalloc(data->broad_order,
 				sizeof(double));
+			if (data->transient_shadow_mu > 0.0) {
+				ax->shadow_w = xcalloc(data->broad_order, sizeof(double));
+				ax->shadow_w_next = xcalloc(data->broad_order,
+					sizeof(double));
+			}
 			ax->broad_xbuf = xcalloc(data->broad_order, sizeof(double));
 			ax->broad_xbuf2 = xcalloc(data->broad_order, sizeof(double));
 			if (data->broad_lp)
@@ -1055,8 +1573,7 @@ int fsp_init(struct aylp_device *self)
 					sizeof(double));
 		}
 		ax->r_ewma = ax->r;
-		ax->transient_var =
-			data->transient_floor * data->transient_floor;
+		ax->transient_var = 0.0;
 		for (size_t i = 0; i < ax->n_modes; i++) {
 			// q_ewma tracks the mode's STATE energy; seed it at the
 			// stationary energy implied by the configured drive q
@@ -1164,14 +1681,38 @@ int fsp_init(struct aylp_device *self)
 			"with %G s EWMA", data->drift_tau);
 	if (data->transient_sigma > 0.0)
 		log_info("fsp: transient path on: trigger %G sigma (floor %G), "
-			"Kp %G, quiet hold %G s, return ramp %G s",
+			"controller %s, Kp %G, Ki %G/s, I leak %G/s, I limit %G, "
+			"output-settle band %G, quiet hold %G s, "
+			"return ramp %G s, armed %G s after close, event clamp "
+			"[%G, %G], event command trip %G, timeout %G s%s",
 			data->transient_sigma, data->transient_floor,
-			data->transient_kp, data->transient_hold,
-			data->transient_ramp);
+			fsp_transient_controller_name(data->transient_controller),
+			data->transient_kp, data->transient_ki,
+			data->transient_i_leak, data->transient_i_limit,
+			data->transient_settle_error,
+			data->transient_hold,
+			data->transient_ramp,
+			data->transient_arm_delay,
+			data->transient_clamp_lo, data->transient_clamp_hi,
+			data->transient_trip_command,
+			data->transient_max_duration,
+			data->transient_modal_q_scale > 0.0
+				? ", event-only modal observer enabled" : "");
+	if (data->transient_shadow_mu > 0.0)
+		log_info("fsp: event shadow NLMS on: mu %G, validation tau %G s, "
+			"minimum event %G s, error ratio <= %G for %G s, coefficient "
+			"change <= %Gx primary norm", data->transient_shadow_mu,
+			data->transient_shadow_tau,
+			data->transient_shadow_min_duration,
+			data->transient_shadow_ratio,
+			data->transient_shadow_hold,
+			data->transient_shadow_norm_ratio);
 	if (data->trip_error > 0.0 || data->trip_command > 0.0)
-		log_info("fsp: latched safety trip: error=%G command=%G for %zu "
-			"frames", data->trip_error, data->trip_command,
-			data->trip_frames);
+		log_info("fsp: non-latching limit diagnostics: error=%G command=%G "
+			"for %zu frames; upstream beam loss holds zero, then ramps "
+			"back over %G s",
+			data->trip_error, data->trip_command,
+			data->trip_frames, data->beam_recover_ramp);
 	if (data->guard_ratio > 0.0)
 		log_info("fsp: burst guard on: y %.0f Hz / x %.0f Hz detectors, "
 			"trigger %Gx over max(baseline, %G) sustained %zu/%zu "
@@ -1208,11 +1749,10 @@ int fsp_init(struct aylp_device *self)
 		fsp_adapt(data);	// build_modes/comp + solve_begin, both axes
 		for (int a = 0; a < 2; a++) {
 			struct aylp_fsp_axis *ax = &data->axis[a];
-			while (fsp_solve_gain_iterate(ax, AYLP_FSP_RICCATI_MAXIT)
-					== 0)
+			while (ax->adapt_solving
+					&& fsp_adapt_advance(ax, data, (size_t)a,
+						AYLP_FSP_RICCATI_MAXIT) == 0)
 				;
-			fsp_solve_gain_finalize(ax);	// restores the init gain
-			ax->adapt_solving = false;
 		}
 		log_info("fsp: warmed adaptation path (first re-identification "
 			"pre-touched)");
@@ -1276,6 +1816,11 @@ static void fsp_adapt(struct aylp_fsp_data *data)
 		if (ax->r_ewma > 1e-12) ax->r = ax->r_ewma;
 		fsp_build_modes(ax, data->fs);
 		fsp_build_comp(ax, data);
+		// The mode coefficients and q/r have changed, so the previous fast
+		// event gain is no longer paired with the active physical model.
+		if (data->transient_modal_q_scale > 0.0)
+			ax->transient_gain_current = false;
+		ax->adapt_transient_solving = false;
 		// Kick off the resumable Riccati solve instead of running it
 		// here: fsp_proc advances it a few iterations per frame so it
 		// never bursts. The modes/comp above take effect immediately;
@@ -1295,6 +1840,108 @@ static void fsp_adapt(struct aylp_fsp_data *data)
 }
 
 
+// Advance one axis's serial normal-then-transient Riccati refresh.  The event
+// solve uses the same persistent workspace, so it remains bounded per frame and
+// does not reintroduce the multi-millisecond real-time burst the amortization
+// was added to remove.
+static int fsp_adapt_advance(struct aylp_fsp_axis *ax,
+	struct aylp_fsp_data *data, size_t axis, size_t niter)
+{
+	int done = fsp_solve_gain_iterate(ax, niter);
+	if (done == 0) return 0;
+	const char *name = axis == 0 ? "y" : "x";
+	if (done < 0) {
+		log_warn("fsp: adaptive %s Riccati solve failed on %s axis; "
+			"keeping previous gain.", ax->adapt_transient_solving
+				? "transient" : "normal", name);
+		ax->adapt_solving = false;
+		ax->adapt_transient_solving = false;
+		return -1;
+	}
+
+	if (!ax->adapt_transient_solving) {
+		if (fsp_solve_gain_finalize(ax)) {
+			log_warn("fsp: adaptive normal Riccati solve failed on %s "
+				"axis; keeping previous gain.", name);
+			ax->adapt_solving = false;
+			return -1;
+		}
+		if (data->transient_modal_q_scale <= 0.0) {
+			ax->adapt_solving = false;
+			return 1;
+		}
+		if (fsp_solve_gain_begin_scaled(ax,
+				data->transient_modal_q_scale)) {
+			log_warn("fsp: adaptive transient Riccati init failed on %s "
+				"axis; modal event entry remains inhibited.", name);
+			ax->adapt_solving = false;
+			return -1;
+		}
+		ax->adapt_transient_solving = true;
+		return 0;
+	}
+
+	// finalize() targets the normal gain and posterior variance. Preserve those
+	// already-refreshed values while using the common finalizer for transient_L.
+	double normal_L[AYLP_FSP_MAX_DIM];
+	double normal_post[AYLP_FSP_MAX_MODES];
+	memcpy(normal_L, ax->L, ax->dim * sizeof(double));
+	memcpy(normal_post, ax->post_var, ax->n_modes * sizeof(double));
+	int err = fsp_solve_gain_finalize(ax);
+	if (!err)
+		memcpy(ax->transient_L, ax->L, ax->dim * sizeof(double));
+	memcpy(ax->L, normal_L, ax->dim * sizeof(double));
+	memcpy(ax->post_var, normal_post, ax->n_modes * sizeof(double));
+	ax->adapt_solving = false;
+	ax->adapt_transient_solving = false;
+	if (err) {
+		log_warn("fsp: adaptive transient Riccati solve failed on %s axis; "
+			"modal event entry remains inhibited.", name);
+		return -1;
+	}
+	ax->transient_gain_current = true;
+	log_debug("fsp: adaptive transient gain refreshed on %s axis.", name);
+	return 1;
+}
+
+
+static void fsp_reset_after_beam_loss(struct aylp_fsp_axis *ax,
+	struct aylp_fsp_data *data)
+{
+	memset(ax->xhat, 0, ax->dim * sizeof(double));
+	memset(ax->ucmd, 0, (ax->delay + 1) * sizeof(double));
+	ax->uhead = 0;
+	ax->frac_x1 = ax->frac_y1 = 0.0;
+	ax->plant_z1 = ax->plant_z2 = 0.0;
+	ax->plant_iz1 = ax->plant_iz2 = 0.0;
+	ax->lp_z1 = ax->lp_z2 = 0.0;
+	ax->drift_hat = 0.0;
+	ax->phi_dc = 0.0;
+	ax->transient_active = false;
+	ax->transient_recovering = false;
+	ax->transient_blocked = false;
+	ax->shadow_active = false;
+	ax->transient_i = 0.0;
+	ax->transient_i_prev = 0.0;
+	ax->transient_i_step = 0.0;
+	ax->guard_active = false;
+	ax->guard_ramping = false;
+	ax->gd_over_count = 0;
+	if (data->broad_order) {
+		memset(ax->broad_hist, 0,
+			ax->broad_hist_len * sizeof(double));
+		ax->broad_head = 0;
+		ax->broad_seen = 0;
+		ax->broad_fab = ax->broad_hist_len;
+		if (data->broad_lp) {
+			memset(ax->broad_lpbuf, 0,
+				data->broad_lp * sizeof(double));
+			ax->broad_lphead = 0;
+		}
+	}
+}
+
+
 int fsp_proc(struct aylp_device *self, struct aylp_state *state)
 {
 	struct aylp_fsp_data *data = self->device_data;
@@ -1308,6 +1955,20 @@ int fsp_proc(struct aylp_device *self, struct aylp_state *state)
 	}
 	double now = tp.tv_sec + 1e-9 * tp.tv_nsec;
 	if (UNLIKELY(!data->t0)) data->t0 = now;
+	bool sensor_lost = state->header.status & AYLP_BEAM_LOST;
+	if (UNLIKELY(sensor_lost && !data->beam_lost)) {
+		data->beam_lost = true;
+		data->beam_recover_start = 0.0;
+		for (size_t a = 0; a < 2; a++)
+			fsp_reset_after_beam_loss(&data->axis[a], data);
+		log_error("fsp: BEAM LOST from upstream sensor; holding output at "
+			"zero while acquisition searches");
+	} else if (UNLIKELY(!sensor_lost && data->beam_lost)) {
+		data->beam_lost = false;
+		data->beam_recover_start = now;
+		log_info("fsp: beam re-acquired; resuming normal operation over "
+			"%G s", data->beam_recover_ramp);
+	}
 
 	// Convergence sample. Taken from the top of proc so it covers the
 	// start_delay hold too -- a nonzero ||dw|| there would mean the
@@ -1353,7 +2014,19 @@ int fsp_proc(struct aylp_device *self, struct aylp_state *state)
 				"over %G s", data->ramp);
 		}
 	}
-	if (data->tripped) frac = 0.0;
+	if (data->beam_lost) {
+		frac = 0.0;
+	} else if (data->beam_recover_start > 0.0) {
+		double mix = data->beam_recover_ramp > 0.0
+			? (now - data->beam_recover_start) / data->beam_recover_ramp
+			: 1.0;
+		if (mix >= 1.0) {
+			mix = 1.0;
+			data->beam_recover_start = 0.0;
+			log_info("fsp: beam re-acquisition ramp complete");
+		}
+		frac *= mix;
+	}
 
 	// --- stall-gap patch: a proc-to-proc gap beyond gap_trip means the
 	// source dropped frames (scheduler hiccup) or stalled outright
@@ -1455,6 +2128,15 @@ int fsp_proc(struct aylp_device *self, struct aylp_state *state)
 		size_t ring_len = delay + 1;
 		size_t slot_older = ax->uhead;	// u(k-delay-1)
 		size_t slot = (slot_older + 1) % ring_len;	// u(k-delay)
+		if (UNLIKELY(data->beam_lost)) {
+			// center_of_mass intentionally holds its last coordinate while
+			// searching. Do not treat that stale value as a measurement or
+			// let it train either observer; just advance the real zero command.
+			ax->ucmd[slot_older] = 0.0;
+			ax->uhead = (ax->uhead + 1) % ring_len;
+			r->data[j * r->stride] = 0.0;
+			continue;
+		}
 		if (data->broad_order) {
 			ax->broad_head = (ax->broad_head + 1)
 				% ax->broad_hist_len;
@@ -1508,6 +2190,7 @@ int fsp_proc(struct aylp_device *self, struct aylp_state *state)
 				size_t need = ax->gd_min_samples > 0
 					? ax->gd_min_samples : 1;
 				if (ax->gd_over_count >= need) {
+					size_t sustained = ax->gd_over_count;
 					ax->guard_active = true;
 					ax->guard_ramping = false;
 					ax->gd_over_count = 0;
@@ -1525,7 +2208,7 @@ int fsp_proc(struct aylp_device *self, struct aylp_state *state)
 							j == 0 ? "y" : "x",
 							ax->guard_events, ax->gd_f0,
 							sqrt(ax->gd_env), sqrt(thr),
-							ax->gd_over_count,
+							sustained,
 							data->guard_hold,
 							data->guard_ramp);
 					}
@@ -1663,9 +2346,14 @@ int fsp_proc(struct aylp_device *self, struct aylp_state *state)
 				double pe = phi_bl - pred1;
 				transient_mix = fsp_transient_update(ax, data, pe,
 					frac * g_gain, now, j);
-				if (ax->transient_active) suppress = true;
-				bool train = (!data->broad_freeze_closed
-					|| in_hold) && !suppress;
+				// A push is deliberately outside the stationary disturbance
+				// distribution. Freeze both FIR horizons for the entire event,
+				// including the return cross-fade, then resume on the first fully
+				// normal frame. The frozen predictor remains the independent model
+				// used by the release detector, so the event cannot teach itself
+				// into agreement.
+				bool train = (!data->broad_freeze_closed || in_hold)
+					&& !suppress && !ax->transient_active;
 				if (train && isfinite(pe)) {
 					double step = data->broad_mu_cur * pe / energy1;
 					for (size_t i = 0; i < P; i++)
@@ -1677,6 +2365,8 @@ int fsp_proc(struct aylp_device *self, struct aylp_state *state)
 				// combination is the conditional mean at the fractional
 				// Bode-fit horizon.
 				double pe2 = phi_bl - pred2;
+				fsp_shadow_update(ax, data, pe, pe2, pred1, pred2,
+					energy1, energy2, suppress, now, j);
 				if (train && isfinite(pe2)) {
 					double step = data->broad_mu_cur * pe2 / energy2;
 					for (size_t i = 0; i < P; i++)
@@ -1723,18 +2413,24 @@ int fsp_proc(struct aylp_device *self, struct aylp_state *state)
 			r->data[j * r->stride] = 0.0;
 			continue;
 		}
-		for (size_t d = 0; d < ax->dim; d++)
-			ax->xhat[d] = xpred[d] + ax->L[d] * innov;
 		if (!data->broad_order) {
 			transient_mix = fsp_transient_update(ax, data, innov,
 				frac * g_gain, now, j);
-			if (ax->transient_active) suppress = true;
 		}
+		// During a push, use the high-Q physical-model gain to identify the
+		// newly excited modes from successive position measurements.  Their
+		// two-state AR realizations estimate both displacement and velocity;
+		// normal operation keeps the quieter stationary gain.
+		const double *observer_L = ax->L;
+		if (ax->transient_active && ax->transient_modal)
+			observer_L = ax->transient_L;
+		for (size_t d = 0; d < ax->dim; d++)
+			ax->xhat[d] = xpred[d] + observer_L[d] * innov;
 
 		// --- adaptation statistics (cheap, per sample); frozen while
 		// the burst guard is active so the ringing never contaminates
 		// the identified model ---
-		if (beta > 0.0 && !suppress) {
+		if (beta > 0.0 && !suppress && !ax->transient_active) {
 			ax->r_ewma += beta * (innov*innov - ax->r_ewma);
 			for (size_t i = 0; i < ax->n_modes; i++) {
 				// E[x_i^2] = Var(xhat_i) + post_var_i, not
@@ -1796,14 +2492,35 @@ int fsp_proc(struct aylp_device *self, struct aylp_state *state)
 		double vibration_hat = data->broad_order ? broad_hat : phi_hat;
 		double predictive_hat = ax->drift_hat + vibration_hat;
 		// Normal operation cancels the separately estimated drift plus the
-		// predicted vibration. A large innovation cross-fades to a bounded
-		// delayed P servo on the actual residual error, which reacts to an
-		// unmodeled bump without asking the learned FIR to extrapolate it.
+		// learned full-band prediction. Event recovery is selected independently.
+		// It deliberately uses this same axis's Bode-derived K and the modal
+		// prediction above uses this same axis's delay/delay_frac horizon; there
+		// is no second transient plant gain or delay to keep synchronized.
+		// P, I, PI, fast modal+P, or fast modal+PI (hybrid).
 		double v_predictive = -predictive_hat / ax->K;
-		// Preserve the existing slow pointing correction during recovery;
-		// only the vibration predictor is replaced by direct feedback.
+		double transient_vibration = ax->transient_modal
+			? phi_hat : 0.0;
+		bool transient_integral = ax->transient_active
+			&& fsp_transient_uses_integral(ax->transient_controller);
+		bool transient_proportional = ax->transient_controller
+			!= AYLP_FSP_TRANSIENT_INTEGRAL;
+		ax->transient_i_prev = ax->transient_i;
+		ax->transient_i_step = 0.0;
+		if (transient_integral && !ax->transient_recovering) {
+			double next = ax->transient_i + (-data->transient_ki * e / ax->K
+				- data->transient_i_leak * ax->transient_i) / data->fs;
+			if (next > data->transient_i_limit)
+				next = data->transient_i_limit;
+			if (next < -data->transient_i_limit)
+				next = -data->transient_i_limit;
+			ax->transient_i_step = next - ax->transient_i;
+			ax->transient_i = next;
+		}
 		double v_transient =
-			-(ax->drift_hat + data->transient_kp * e) / ax->K;
+			-(ax->drift_hat + transient_vibration
+				+ (transient_proportional
+					? data->transient_kp * e : 0.0)) / ax->K
+			+ (transient_integral ? ax->transient_i : 0.0);
 		double v = frac * g_gain
 			* ((1.0 - transient_mix) * v_predictive
 				+ transient_mix * v_transient);
@@ -1812,26 +2529,45 @@ int fsp_proc(struct aylp_device *self, struct aylp_state *state)
 			u = fsp_biquad(v, ax->plant_ib, ax->plant_ia,
 				&ax->plant_iz1, &ax->plant_iz2);
 		// A static centroid offset is normal and may require substantial DC
-		// command to remove.  Trip only when the magnitude grows beyond its
-		// learned open-loop level; motion toward zero is successful control,
-		// not a fault.
-		bool over_error = data->trip_error > 0.0
+		// command to remove. These thresholds diagnose an implausible request;
+		// the clamps contain it, while only explicit upstream beam loss latches
+		// the output to zero.
+		// A detected push is expected to violate the normal pointing-error
+		// threshold. During that explicitly bounded window, use its separate
+		// command threshold and hard timeout instead.
+		bool over_error = !ax->transient_active && data->trip_error > 0.0
 			&& fabs(e) > fabs(ax->trip_center) + data->trip_error;
-		bool over_command = data->trip_command > 0.0
-			&& fabs(u) > data->trip_command;
+		double command_trip = ax->transient_active
+			? data->transient_trip_command : data->trip_command;
+		bool over_command = command_trip > 0.0 && fabs(u) > command_trip;
+		bool event_timeout = ax->transient_active
+			&& data->transient_max_duration > 0.0
+			&& now - ax->transient_start > data->transient_max_duration;
 		if (frac > 0.0 && (over_error || over_command)) {
 			ax->trip_count++;
 		} else {
 			ax->trip_count = 0;
+			ax->trip_warned = false;
 		}
-		if (!data->tripped && ax->trip_count >= data->trip_frames) {
-			data->tripped = true;
-			log_error("fsp: SAFETY TRIP latched on %s axis: e=%G "
-				"(open baseline=%G), requested u=%G; output held at "
-				"zero until restart", j == 0 ? "y" : "x", e,
+		if (!ax->trip_warned && ax->trip_count >= data->trip_frames) {
+			ax->trip_warned = true;
+			log_warn("fsp: command/error limit on %s axis: e=%G "
+				"(open baseline=%G), requested u=%G; output remains "
+				"clamped", j == 0 ? "y" : "x", e,
 				ax->trip_center, u);
 		}
-		if (data->tripped) u = 0.0;
+		if (event_timeout) {
+			ax->transient_active = false;
+			ax->transient_recovering = false;
+			ax->shadow_active = false;
+			ax->transient_blocked = true;
+			ax->transient_i = 0.0;
+			ax->transient_i_step = 0.0;
+			log_warn("fsp: %s transient exceeded %G s; returning to "
+				"normal authority until innovation is quiet",
+				j == 0 ? "y" : "x", data->transient_max_duration);
+		}
+		if (data->beam_lost) u = 0.0;
 		// command robustness low-pass (DF2T biquad); see fsp.h
 		if (data->cmd_fc > 0.0) {
 			double uf = data->lp_b0*u + ax->lp_z1;
@@ -1839,7 +2575,7 @@ int fsp_proc(struct aylp_device *self, struct aylp_state *state)
 			ax->lp_z2 = data->lp_b2*u - data->lp_a2*uf;
 			u = uf;
 		}
-		if (data->tripped) {
+		if (data->beam_lost) {
 			u = 0.0;
 			ax->lp_z1 = ax->lp_z2 = 0.0;
 			ax->plant_iz1 = ax->plant_iz2 = 0.0;
@@ -1856,8 +2592,37 @@ int fsp_proc(struct aylp_device *self, struct aylp_state *state)
 		// a downstream clamp stage. Per-axis because the two axes can
 		// have opposite command->voltage signs, which mirrors an
 		// asymmetric window (see aylp_fsp_axis).
-		if (u > ax->clamp_hi) u = ax->clamp_hi;
-		if (u < ax->clamp_lo) u = ax->clamp_lo;
+		double clamp_hi = ax->transient_active
+			? data->transient_clamp_hi : ax->clamp_hi;
+		double clamp_lo = ax->transient_active
+			? data->transient_clamp_lo : ax->clamp_lo;
+		double u_unclamped = u;
+		if (u > clamp_hi) u = clamp_hi;
+		if (u < clamp_lo) u = clamp_lo;
+		if (ax->transient_active && u != u_unclamped)
+			ax->transient_saturated = true;
+		// Conditional-integration anti-windup. The internal I limit is the
+		// first boundary; if plant/filter dynamics still make the actuator
+		// saturate and this frame's I step pushes farther into saturation,
+		// roll that step back. The already bounded output remains continuous.
+		if (transient_integral && u != u_unclamped
+				&& (u_unclamped - u) * ax->transient_i_step > 0.0) {
+			ax->transient_i = ax->transient_i_prev;
+			ax->transient_i_step = 0.0;
+		}
+		if (ax->transient_active) {
+			double ae = fabs(e), au = fabs(u);
+			if (ae > data->transient_settle_error)
+				ax->transient_error_t_last = now;
+			if (ae > ax->transient_peak_error)
+				ax->transient_peak_error = ae;
+			if (au > ax->transient_peak_command)
+				ax->transient_peak_command = au;
+			if (fabs(ax->transient_i) > ax->transient_peak_i)
+				ax->transient_peak_i = fabs(ax->transient_i);
+			ax->transient_error2 += e * e;
+			ax->transient_frames++;
+		}
 
 		// Apply the fractional part of the plant delay before the integer
 		// command ring. H(z)=(a+z^-1)/(1+a*z^-1), with DC group delay f.
@@ -1901,6 +2666,8 @@ int fsp_proc(struct aylp_device *self, struct aylp_state *state)
 	if (data->adapt_period > 0.0 && data->t_close
 			&& !data->axis[0].adapt_solving
 			&& !data->axis[1].adapt_solving
+			&& !data->axis[0].transient_active
+			&& !data->axis[1].transient_active
 			&& (now - data->t_adapt) >= data->adapt_period) {
 		fsp_adapt(data);
 		data->t_adapt = now;
@@ -1908,13 +2675,7 @@ int fsp_proc(struct aylp_device *self, struct aylp_state *state)
 	for (int a = 0; a < 2; a++) {
 		struct aylp_fsp_axis *ax = &data->axis[a];
 		if (!ax->adapt_solving) continue;
-		int done = fsp_solve_gain_iterate(ax, AYLP_FSP_ADAPT_ITERS);
-		if (done == 0) continue;	// more iterations next frame
-		if (done < 0 || fsp_solve_gain_finalize(ax))
-			log_warn("fsp: adaptive Riccati solve failed on %s "
-				"axis; keeping previous gain.",
-				a == 0 ? "y" : "x");
-		ax->adapt_solving = false;
+		fsp_adapt_advance(ax, data, (size_t)a, AYLP_FSP_ADAPT_ITERS);
 	}
 
 	state->vector = r;
@@ -1938,11 +2699,19 @@ int fsp_fini(struct aylp_device *self)
 			"stalled or hiccuped; check asi_source recovery lines)",
 			data->gap_events);
 	if (data->transient_sigma > 0.0)
-		log_info("fsp transient final: %zu activations (y %zu / x %zu)",
+		log_info("fsp transient final: %zu activations (y %zu / x %zu), "
+			"%zu validated shadow promotion(s)",
 			data->axis[0].transient_events
 				+ data->axis[1].transient_events,
 			data->axis[0].transient_events,
-			data->axis[1].transient_events);
+			data->axis[1].transient_events,
+			data->shadow_promotions);
+	if (data->transient_log_fp) {
+		fclose(data->transient_log_fp);
+		data->transient_log_fp = NULL;
+		log_info("fsp: push-event summary written to %s",
+			data->transient_log);
+	}
 	// must precede the frees below: this is the only chance to persist the
 	// learned taps, and fini runs on the SIGINT path too
 	fsp_save_wiener(data);
@@ -1962,12 +2731,15 @@ int fsp_fini(struct aylp_device *self)
 		xfree(data->axis[a].broad_hist);
 		xfree(data->axis[a].broad_w);
 		xfree(data->axis[a].broad_w_next);
+		xfree(data->axis[a].shadow_w);
+		xfree(data->axis[a].shadow_w_next);
 		xfree(data->axis[a].broad_xbuf);
 		xfree(data->axis[a].broad_xbuf2);
 		xfree(data->axis[a].broad_lpbuf);
 	}
 	if (data->res_v) xfree_type(gsl_vector, data->res_v);
 	xfree(data->wiener_file);
+	xfree(data->transient_log);
 	xfree(data->wiener_out);
 	xfree(data->wiener_trace);
 	xfree(data);

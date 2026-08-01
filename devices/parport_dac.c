@@ -291,6 +291,7 @@
 #include "anyloop.h"
 #include "logging.h"
 #include "parport_dac.h"
+#include "parport_dac_range.h"
 #include "xalloc.h"
 
 // Where the AX99100 puts the parallel port's registers inside its memory BAR.
@@ -389,99 +390,6 @@
 #define DAC_UPDATE_WAIT_NS 2400
 // seconds between throughput reports
 #define PARPORT_DAC_DIAG_PERIOD 5.0
-
-struct dac_range {
-	const char *name;
-	int code;		// DACRANGE nibble
-	double vmin, vmax;
-};
-
-// SLASEH2A table 8-16
-static const struct dac_range dac_ranges[] = {
-	{ "0-5",   0x0,   0.0,  5.0 },
-	{ "0-10",  0x1,   0.0, 10.0 },
-	{ "0-20",  0x2,   0.0, 20.0 },
-	{ "0-40",  0x3,   0.0, 40.0 },
-	{ "+-5",   0x5,  -5.0,  5.0 },
-	{ "+-10",  0x6, -10.0, 10.0 },
-	{ "+-20",  0x7, -20.0, 20.0 },
-	{ "0-6",   0x8,   0.0,  6.0 },
-	{ "0-12",  0x9,   0.0, 12.0 },
-	{ "0-24",  0xA,   0.0, 24.0 },
-	{ "+-6",   0xD,  -6.0,  6.0 },
-	{ "+-12",  0xE, -12.0, 12.0 },
-};
-
-static const struct dac_range *find_range(const char *name)
-{
-	// Accept ASCII spellings of a bipolar range, e.g. "+-10" or "-10".
-	if (name[0] == '+' && name[1] == '-') name += 2;
-	else if (name[0] == '-') name += 1;
-	else goto unipolar;
-	for (size_t i = 0; i < sizeof dac_ranges / sizeof dac_ranges[0]; i++)
-		if (dac_ranges[i].vmin < 0.0
-		&& !strcmp(dac_ranges[i].name + 2, name))
-			return &dac_ranges[i];
-	return NULL;
-unipolar:
-	for (size_t i = 0; i < sizeof dac_ranges / sizeof dac_ranges[0]; i++)
-		if (!strcmp(dac_ranges[i].name, name))
-			return &dac_ranges[i];
-	return NULL;
-}
-
-/** Index of a range in dac_ranges[], or -1. */
-static int find_range_index(const char *name)
-{
-	const struct dac_range *r = find_range(name);
-	if (!r) return -1;
-	return (int)(r - dac_ranges);
-}
-
-/** True if range `outer` fully contains range `inner`. */
-static bool range_contains(int outer, int inner)
-{
-	return dac_ranges[outer].vmin <= dac_ranges[inner].vmin
-		&& dac_ranges[outer].vmax >= dac_ranges[inner].vmax;
-}
-
-static double range_span(int i)
-{
-	return dac_ranges[i].vmax - dac_ranges[i].vmin;
-}
-
-/** Pick the range to use for `volts` on channel `i`: the NARROWEST range that
-* both contains the voltage and is inside the [base, max] window the config
-* allows. Returns the current range unchanged when nothing better applies.
-*
-* Widening happens immediately -- the alternative is clipping the command.
-* Narrowing is deliberately reluctant (see dac_autorange): a range change is
-* not free, so it should not chatter at a boundary. */
-static int pick_range(struct aylp_parport_dac_data *data, size_t i,
-	double volts)
-{
-	int best = -1;
-	for (size_t r = 0; r < sizeof dac_ranges / sizeof dac_ranges[0]; r++) {
-		// stay inside the window the user allowed: at least as wide as
-		// `range`, no wider than `range_max`. This is what keeps
-		// auto-ranging from selecting a range the SUPPLY cannot
-		// deliver -- the part would happily accept +-20 on +-12 rails
-		// and simply saturate ~1.5 V short, with the loop none the
-		// wiser (SLASEH2A 7.13: bipolar needs AVSS <= VMIN-1.5 and
-		// AVDD >= VMAX+1.5).
-		if (!range_contains((int)r, data->range_base_idx[i])) continue;
-		if (!range_contains(data->range_max_idx[i], (int)r)) continue;
-		if (volts < dac_ranges[r].vmin || volts > dac_ranges[r].vmax)
-			continue;
-		if (best < 0 || range_span((int)r) < range_span(best))
-			best = (int)r;
-	}
-	// nothing fits: the command is outside even range_max. Stay where we
-	// are and let volts_to_code() clamp, which is the same thing that
-	// would have happened without auto-ranging.
-	if (best < 0) return data->range_max_idx[i];
-	return best;
-}
 
 static double monotonic_s(void)
 {
@@ -1150,28 +1058,12 @@ static bool dac_change_range(struct aylp_parport_dac_data *data, size_t i,
 static bool dac_autorange(struct aylp_parport_dac_data *data, size_t i,
 	double volts)
 {
-	int cur = data->range_idx[i];
-	int want = pick_range(data, i, volts);
-	// widen: needed right now, no hysteresis -- the alternative is
-	// clipping the command this very iteration
-	if (volts < data->vmin[i] || volts > data->vmax[i]) {
-		if (want != cur)
-			return dac_change_range(data, i, want, volts);
-		data->shrink_count[i] = 0;
+	int target;
+	if (!dac_range_update(data->range_base_idx[i], data->range_max_idx[i],
+		data->range_idx[i], volts, data->shrink_frac,
+		data->shrink_dwell, &data->shrink_count[i], &target))
 		return false;
-	}
-	if (want == cur || range_span(want) >= range_span(cur)) {
-		data->shrink_count[i] = 0;
-		return false;
-	}
-	// narrowing candidate: require a margin, sustained
-	if (volts < dac_ranges[want].vmin * data->shrink_frac
-	|| volts > dac_ranges[want].vmax * data->shrink_frac) {
-		data->shrink_count[i] = 0;
-		return false;
-	}
-	if (++data->shrink_count[i] < data->shrink_dwell) return false;
-	return dac_change_range(data, i, want, volts);
+	return dac_change_range(data, i, target, volts);
 }
 
 /** Send one channel's 16-bit code, whichever link is configured. */
@@ -1591,7 +1483,8 @@ int parport_dac_init(struct aylp_device *self)
 	size_t n = val_count(ch_val);
 	size_t counts[] = {
 		val_count(idx_val), val_count(scale_val), val_count(offset_val),
-		val_count(delay_val), val_count(range_val)
+		val_count(delay_val), val_count(range_val),
+		val_count(range_max_val)
 	};
 	for (size_t k = 0; k < sizeof counts / sizeof counts[0]; k++)
 		if (counts[k] > n) n = counts[k];
@@ -1632,7 +1525,7 @@ int parport_dac_init(struct aylp_device *self)
 		}
 		if (data->start_delays[i] > 0.0) data->has_start_delay = true;
 		const char *rname = val_str_at(range_val, i, "0-10");
-		const struct dac_range *r = find_range(rname);
+		const struct dac_range *r = dac_find_range(rname);
 		if (!r) {
 			log_error("parport_dac: unknown range \"%s\" (try "
 				"\"0-5\", \"0-10\", \"0-20\", \"0-40\", "
@@ -1646,13 +1539,13 @@ int parport_dac_init(struct aylp_device *self)
 		data->range_base_idx[i] = data->range_idx[i];
 		// range_max defaults to `range` itself, i.e. auto-ranging off
 		const char *rmax = val_str_at(range_max_val, i, rname);
-		int mi = find_range_index(rmax);
+		int mi = dac_find_range_index(rmax);
 		if (mi < 0) {
 			log_error("parport_dac: unknown range_max \"%s\"",
 				rmax);
 			return -1;
 		}
-		if (!range_contains(mi, data->range_base_idx[i])) {
+		if (!dac_range_contains(mi, data->range_base_idx[i])) {
 			log_error("parport_dac: range_max \"%s\" (%g..%g V) "
 				"does not contain range \"%s\" (%g..%g V) -- "
 				"auto-ranging can only WIDEN a channel, never "
@@ -1682,6 +1575,19 @@ int parport_dac_init(struct aylp_device *self)
 		log_error("parport_dac: sync_update is only supported on the "
 			"spi link; on the pico link the bridge firmware owns "
 			"the DAC's init and LDAC timing");
+		return -1;
+	}
+	if (data->auto_range && data->link != AYLP_PARPORT_LINK_SPI) {
+		log_error("parport_dac: range_max wider than range requires the "
+			"spi link; the pico bridge owns DACRANGE and its sample "
+			"protocol has no range-change command");
+		return -1;
+	}
+	if (!isfinite(data->shrink_frac) || data->shrink_frac <= 0.0
+	|| data->shrink_frac >= 1.0 || data->shrink_dwell <= 0) {
+		log_error("parport_dac: shrink_frac must satisfy 0 < value < 1 "
+			"and shrink_dwell must be > 0 (got %G, %ld)",
+			data->shrink_frac, data->shrink_dwell);
 		return -1;
 	}
 	if (data->sync_update && data->n_outputs == 1)
@@ -1761,7 +1667,7 @@ int parport_dac_init(struct aylp_device *self)
 	if (data->sync_update) dac_soft_ldac(data);
 
 	self->type_in   = AYLP_T_VECTOR;
-	self->units_in  = AYLP_U_MINMAX;
+	self->units_in  = AYLP_U_MINMAX | AYLP_U_V;
 	self->type_out  = AYLP_T_UNCHANGED;
 	self->units_out = AYLP_U_UNCHANGED;
 
@@ -1781,28 +1687,12 @@ int parport_dac_init(struct aylp_device *self)
 			data->scales[i], data->offsets[i],
 			data->vmin[i], data->vmax[i]);
 		if (data->range_max_idx[i] != data->range_base_idx[i]) {
-			double lo = data->offsets[i] - fabs(data->scales[i]);
-			double hi = data->offsets[i] + fabs(data->scales[i]);
 			log_info("parport_dac:     auto-range up to %s "
 				"(%g..%g V), narrowing below %g%% sustained "
 				"%ld iters", dac_ranges[data->range_max_idx[i]]
 				.name, dac_ranges[data->range_max_idx[i]].vmin,
 				dac_ranges[data->range_max_idx[i]].vmax,
 				100.0 * data->shrink_frac, data->shrink_dwell);
-			// A command of +-1 is the most an upstream clamp of
-			// 1.0 can ask for. If even that fits the base range,
-			// auto-ranging is dead code in this config and the
-			// user probably expected otherwise.
-			if (lo >= data->vmin[i] && hi <= data->vmax[i])
-				log_warn("parport_dac:     ch%d: a full-scale "
-					"command (+-1) spans only %g..%g V, "
-					"which already fits range %s -- "
-					"auto-ranging can never trigger here. "
-					"Widen `scale` or the upstream clamp "
-					"if you meant it to.",
-					data->channels[i], lo, hi,
-					dac_ranges[data->range_base_idx[i]]
-						.name);
 		}
 	}
 	return 0;
@@ -1921,6 +1811,16 @@ int parport_dac_proc(struct aylp_device *self, struct aylp_state *state)
 int parport_dac_fini(struct aylp_device *self)
 {
 	struct aylp_parport_dac_data *data = self->device_data;
+	if (data->auto_range) {
+		char ranges[128] = "";
+		size_t off = 0;
+		for (size_t i = 0; i < data->n_outputs && off < sizeof ranges; i++)
+			off += (size_t)snprintf(ranges + off, sizeof ranges - off,
+				" ch%d=%s", data->channels[i],
+				dac_ranges[data->range_idx[i]].name);
+		log_info("parport_dac: auto-range final: %ld change(s);%s",
+			data->diag_range_changes, ranges);
+	}
 
 	// leave the outputs where they are (the mirror is presumably still
 	// holding a beam) but park the bus in its idle state
