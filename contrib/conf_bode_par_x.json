@@ -37,7 +37,7 @@
 				"width": 32,
 				"height": 32,
 				"start_x": 1832,
-				"start_y": 692,
+				"start_y": 662,
 				"_roi_note": "ROI centred on beam at coarse bias 2/2 (fine 1.5/2.15): probe-verified 2026-07-21, full-sensor CoM (x 919, y 507). Re-derive via contrib/probe_frame.json only on an alignment change.",
 				"exposure": 50,
 				"gain": 100,

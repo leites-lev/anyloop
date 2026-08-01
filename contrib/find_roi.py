@@ -16,7 +16,24 @@ Usage:
 Notes / gotchas (why the arithmetic is what it is):
   * Frame centre is (dim-1)/2, NOT dim/2: center_of_mass normalises px to
     -1..+1 as -1 + 2*px/(dim-1), so norm 0 = px 15.5 on a 32-px frame.
-  * ASI ROI grid: start_x must be a multiple of 8, start_y a multiple of 2.
+  * ASI ROI grid: start_x snaps to a multiple of 4, start_y to a multiple of 2.
+    MEASURED on the ASI290MM 2026-07-31, not assumed -- ASISetStartPos followed
+    by ASIGetStartPos (which exists in libASICamera2.so but is absent from
+    contrib/ASICamera2.h, so nothing here had ever read the value back):
+    1832->1832, 1833/1834/1835->1832, 1836->1836, 1838->1836, 1840->1840, and
+    start_y 663->662, 665->664. 1836 is NOT a multiple of 8 and is accepted
+    verbatim, so the grid is 4. This file used to align x to 8, which threw
+    away half the achievable precision for nothing: worst-case x residual was
+    +-4 px and is now +-2. ASISetStartPos returns ASI_SUCCESS even when it
+    silently snaps, so a wrong value is invisible without the read-back.
+  * THE RESIDUAL CANNOT BE DRIVEN TO ZERO BY CROPPING. start_x is an integer on
+    a 4-px grid and the beam CoM is fractional, so the best a crop can do is
+    +-2 px in x and +-1 px in y. Exact centring needs the beam moved onto the
+    grid (an FSM/DAC bias nudge -- but K is bias-dependent and must be re-fit
+    after, see the Kx 3.97-4.36 wander) or a setpoint offset in
+    center_of_mass, which has no such parameter today. The offset column below
+    tells you how much is left; it is reported relative to frame centre, so a
+    perfectly centred beam reads (0.0, 0.0).
   * The operating exposure saturates the beam and shifts its CoM a few px vs a
     dim exposure -- probe near the loop's exposure so you centre where the loop
     actually sees the beam. Run only after the coarse channels settle (~30 s).
@@ -95,8 +112,8 @@ def align(v, a):
 
 
 def roi_start(bx, by, w, h, sw, sh):
-    sx = align(bx - (w - 1) / 2, 8)          # start_x on 8-px grid
-    sy = align(by - (h - 1) / 2, 2)          # start_y on 2-px grid
+    sx = align(bx - (w - 1) / 2, 4)          # start_x on 4-px grid (measured)
+    sy = align(by - (h - 1) / 2, 2)          # start_y on 2-px grid (measured)
     sx = max(0, min(sx, sw - w))
     sy = max(0, min(sy, sh - h))
     return sx, sy
@@ -110,13 +127,29 @@ def asi_params(cfg):
     return None
 
 
+def com_window(cfg):
+    """Tracking-window (h, w) from the config's center_of_mass, or None.
+
+    The window centres on the beam and spans (region-1)/2 either side, so an
+    off-centre park eats into the clearance against the ROI edge. Running out
+    is not a soft failure: it truncates the spot and desensitises the centroid,
+    which is what halved PAR-4's y rejection in every band.
+    """
+    for st in cfg.get("pipeline", []):
+        if "center_of_mass" in st.get("uri", ""):
+            p = st.get("params", {})
+            if "region_height" in p and "region_width" in p:
+                return p["region_height"], p["region_width"]
+    return None
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--no-capture", action="store_true",
                     help="reuse existing probe_full.aylp instead of grabbing a new one")
     ap.add_argument("--exposure", type=int, default=None,
                     help="probe exposure in µs (default: whatever probe_frame.json has)")
-    ap.add_argument("--settle", type=float, default=3.0,
+    ap.add_argument("--settle", type=float, default=30.0,
                     help="seconds to wait for the FSM to park before capturing (default 30; "
                          "the beam drifts for ~30 s after the hold starts). Use 0 to skip.")
     ap.add_argument("--aylp", default=None, help="path to an existing .aylp probe file")
@@ -139,7 +172,12 @@ def main():
     bx, by, mx = beam_com(img)
     H, W = img.shape
     print(f"# beam CoM: x={bx:.1f}  y={by:.1f}   (sensor {W}x{H}, peak px {mx:.0f})")
-    print(f"# {'config':28s} {'WxH':>9s}  start_x  start_y   beam-in-ROI")
+    print(f"# offset = beam position minus frame centre (dim-1)/2, in ROI px:"
+          f" 0.0 means the loop sees zero error with the beam parked.")
+    print(f"# x is limited to +-2.0 by the 4-px ASI grid, y to +-1.0 by the"
+          f" 2-px grid -- see the module docstring.")
+    print(f"# {'config':28s} {'WxH':>9s}  start_x  start_y"
+          f"   offset(x,y)  margin")
 
     for f in sorted(glob.glob(os.path.join(ROOT, "contrib", "*.json"))):
         try:
@@ -153,8 +191,22 @@ def main():
         if w >= W and h >= H:        # the full-sensor probe config itself
             continue
         sx, sy = roi_start(bx, by, w, h, W, H)
+        ox = (bx - sx) - (w - 1) / 2
+        oy = (by - sy) - (h - 1) / 2
+        win = com_window(cfg)
+        if win:
+            rh, rw = win
+            # clearance between the tracking window's furthest edge and the
+            # ROI's; negative means the window is running off the sensor crop
+            mx = (w - 1) / 2 - (abs(ox) + (rw - 1) / 2)
+            my = (h - 1) / 2 - (abs(oy) + (rh - 1) / 2)
+            m = min(mx, my)
+            marg = f"{m:5.1f}px" + ("  CLIPS!" if m < 0 else
+                                    "  TIGHT" if m < 1.0 else "")
+        else:
+            marg = "     n/a"
         print(f"  {os.path.basename(f):28s} {w:4d}x{h:<4d}  {sx:7d}  {sy:7d}"
-              f"   ({bx - sx:.1f}, {by - sy:.1f})")
+              f"   ({ox:+.1f},{oy:+.1f})  {marg}")
 
         if args.write:
             s = open(f).read()
