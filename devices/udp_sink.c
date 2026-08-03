@@ -1,4 +1,5 @@
 #include <errno.h>
+#include <limits.h>
 #include <netdb.h>
 #include <arpa/inet.h>
 #include <json-c/json.h>
@@ -11,6 +12,104 @@
 #include "logging.h"
 #include "udp_sink.h"
 #include "xalloc.h"
+
+
+/** Reduce the pipeline data to [peak, mean, saturated_fraction].
+* Written to out as three doubles. This exists so a viewer can follow beam
+* intensity at the FULL loop rate: a 248x248 uchar frame is 61.5 kB, which is
+* 233 MB/s at 3788 Hz and cannot be sent (or decoded) every iteration, while
+* this is 24 bytes and costs one pass over data that is already hot in cache.
+* Send the raw frame instead when you need the image itself -- the reduction is
+* lossy by construction and there is no way back to the pixels from it.
+*
+* saturated_fraction is the share of pixels at the maximum the sample type can
+* represent, which is meaningful only for uchar (camera) data; it is reported as
+* 0 for double data, where there is no such ceiling. It matters because a peak
+* pinned at 255 hides everything above it, so the mean is the only honest
+* brightness reading left once the sensor clips.
+*
+* Walks the data in its native layout rather than calling
+* get_contiguous_bytes(), which would copy the whole block for a non-contiguous
+* matrix -- a malloc and a 61.5 kB memcpy per iteration is exactly the cost this
+* is here to avoid. */
+static int udp_sink_stats(struct aylp_state *state, double *out)
+{
+	size_t n = 0;
+	// integer accumulators on the uchar path: comparing and summing into
+	// doubles inside the loop stops the compiler from vectorizing it
+	// 32 bits is enough for both and keeps the widening the vectorizer has
+	// to do to a minimum: a 248x248 frame of 255s sums to 15.7e6, and the
+	// saturated count can't exceed the pixel count
+	unsigned char peak_u = 0;
+	unsigned sum_u = 0, sat_u = 0;
+	double peak_d = 0.0, sum_d = 0.0;
+	switch (state->header.type) {
+	case AYLP_T_MATRIX_UCHAR: {
+		gsl_matrix_uchar *m = state->matrix_uchar;
+		for (size_t i = 0; i < m->size1; i++) {
+			const unsigned char *row = m->data + i*m->tda;
+			for (size_t j = 0; j < m->size2; j++) {
+				unsigned char v = row[j];
+				if (v > peak_u) peak_u = v;
+				sum_u += v;
+				sat_u += (v == UCHAR_MAX);
+			}
+		}
+		n = m->size1 * m->size2;
+		out[0] = peak_u;
+		out[1] = n ? (double)sum_u / n : 0.0;
+		out[2] = n ? (double)sat_u / n : 0.0;
+		return 0; }
+	case AYLP_T_BLOCK_UCHAR: {
+		gsl_block_uchar *b = state->block_uchar;
+		for (size_t i = 0; i < b->size; i++) {
+			unsigned char v = b->data[i];
+			if (v > peak_u) peak_u = v;
+			sum_u += v;
+			sat_u += (v == UCHAR_MAX);
+		}
+		n = b->size;
+		out[0] = peak_u;
+		out[1] = n ? (double)sum_u / n : 0.0;
+		out[2] = n ? (double)sat_u / n : 0.0;
+		return 0; }
+	case AYLP_T_MATRIX: {
+		gsl_matrix *m = state->matrix;
+		for (size_t i = 0; i < m->size1; i++) {
+			const double *row = m->data + i*m->tda;
+			for (size_t j = 0; j < m->size2; j++) {
+				if (row[j] > peak_d) peak_d = row[j];
+				sum_d += row[j];
+			}
+		}
+		n = m->size1 * m->size2;
+		break; }
+	case AYLP_T_VECTOR: {
+		gsl_vector *v = state->vector;
+		for (size_t i = 0; i < v->size; i++) {
+			double e = v->data[i*v->stride];
+			if (e > peak_d) peak_d = e;
+			sum_d += e;
+		}
+		n = v->size;
+		break; }
+	case AYLP_T_BLOCK: {
+		gsl_block *b = state->block;
+		for (size_t i = 0; i < b->size; i++) {
+			if (b->data[i] > peak_d) peak_d = b->data[i];
+			sum_d += b->data[i];
+		}
+		n = b->size;
+		break; }
+	default:
+		log_error("Can't reduce data of type 0x%hhX", state->header.type);
+		return -1;
+	}
+	out[0] = peak_d;
+	out[1] = n ? sum_d / n : 0.0;
+	out[2] = 0.0;	// no saturation ceiling for double data
+	return 0;
+}
 
 
 int udp_sink_init(struct aylp_device *self)
@@ -54,6 +153,18 @@ int udp_sink_init(struct aylp_device *self)
 		} else if (!strcmp(key, "decimation")) {
 			data->decimation = json_object_get_uint64(val);
 			log_trace("decimation = %zu", data->decimation);
+		} else if (!strcmp(key, "reduce")) {
+			const char *s = json_object_get_string(val);
+			if (!s || !strcmp(s, "none")) {
+				data->reduce = AYLP_UDP_SINK_RAW;
+			} else if (!strcmp(s, "stats")) {
+				data->reduce = AYLP_UDP_SINK_STATS;
+			} else {
+				log_error("Unknown reduce \"%s\"; expected "
+					"\"none\" or \"stats\"", s);
+				return -1;
+			}
+			log_trace("reduce = %d", data->reduce);
 		} else {
 			log_warn("Unknown parameter \"%s\"", key);
 		}
@@ -95,6 +206,26 @@ int udp_sink_proc(struct aylp_device *self, struct aylp_state *state)
 		return 0;
 	}
 	data->countdown = data->decimation - 1;
+	if (data->reduce == AYLP_UDP_SINK_STATS) {
+		if (udp_sink_stats(state, data->stats)) return -1;
+		// keep the pipeline's status flags, but describe what we are
+		// actually sending: a 3-vector in counts, not the original data
+		data->stats_head = state->header;
+		data->stats_head.type = AYLP_T_VECTOR;
+		data->stats_head.units = AYLP_U_COUNTS;
+		data->stats_head.log_dim.y = 3;
+		data->stats_head.log_dim.x = 1;
+		data->iovecs[0].iov_base = &data->stats_head;
+		data->iovecs[0].iov_len = sizeof(data->stats_head);
+		data->iovecs[1].iov_base = data->stats;
+		data->iovecs[1].iov_len = sizeof(data->stats);
+		ssize_t err = writev(data->sock, data->iovecs, 2);
+		if (err < 0) {
+			log_error("Couldn't send stats: %s", strerror(errno));
+			return -1;
+		}
+		return 0;
+	}
 	// make data contiguous
 	int needs_free = get_contiguous_bytes(&data->bytes, state);
 	if (needs_free < 0) return needs_free;

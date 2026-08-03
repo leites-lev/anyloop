@@ -23,15 +23,16 @@
 		{
 			"uri": "file:/home/fsl/anyloop_levfork/anyloop/build/asi_source.so",
 			"params": {
-				"camera_name": "ASI290MM",
-				"width":    32,
-				"height":    32,
-				"start_x":     1832,
-				"start_y":     662,
-				"_roi_note": "start_x/start_y centre the 32x32 ROI on the beam parked at coarse bias 2/2 (fine 1.5/2.15): probe-verified 2026-07-21, full-sensor CoM (x 919, y 507). Re-derive with contrib/probe_frame.json only if the alignment (not the bias) changes -- the ROI now follows the beam by cropping instead of re-biasing.",
-				"exposure":  50,
-				"gain":        100,
-				"bandwidth":   100,
+				"camera_name": "ASI662MM",
+				"width":    248,
+				"height":    248,
+				"start_x": 1100,
+				"start_y": 488,
+				"_camera_note": "ASI662MM (IMX662, 1920x1080) as of 2026-08-02, replacing the ASI290MM (1936x1096) this file ran on through PAR-1..PAR-6. It is the only camera enumerated on the bench now. EVERY MEASURED NUMBER IN THIS FILE PREDATES THE SWAP and must be re-taken: fs (the 3788 Hz below is the 290's frame rate at 32x32/exp50/bw100 -- the 662 is a different sensor and readout, so this is the loop period and therefore K's units, the delay in FRAMES, and broad_lp all at once), delay, K, and the pixel scale used to convert error units to px. Re-run the bodes before trusting a run.",
+				"_roi_note": "STALE -- start_x/start_y below still centre the 32x32 ROI for the ASI290MM's 1936x1096 sensor (probe-verified 2026-07-21, full-sensor CoM x 919, y 507, at coarse bias 2/2 / fine 1.5/2.15). They are still in range on the 662's 1920x1080 so nothing errors, but they do NOT point at the beam. Re-derive with contrib/find_roi.py (which now probes whatever camera this file names) before the next run -- the ROI follows the beam by cropping instead of re-biasing.",
+				"exposure":  600,
+				"gain":        300,
+				"bandwidth":   50,
 				"high_speed":  1,
 				"die_on_stall": 0
 			}
@@ -42,12 +43,21 @@
 			"params": { "ip": "127.0.0.1", "port": "64730", "decimation": 64 }
 		},
 		{
+			"_comment": "[peak, mean, saturated] to watch_error_ts.jl's intensity panel",
+			"_note": "its own port, NOT the 64730 above: two processes bound to one UDP port either refuse to bind or split the datagrams between them, which would starve the heatmap. Intensity is not in the CoM stream -- center_of_mass emits only [y,x] -- so it has to be taken off the image here.",
+			"_undecimated": "NO decimation on purpose. \"reduce\": \"stats\" sends three doubles (24 B) instead of the 61.5 kB frame, so the full loop rate costs ~91 kB/s on loopback and one pass over pixels already hot in cache. Sending the frame itself every iteration would be 233 MB/s at 3788 Hz, which is why this panel was previously stuck at loop_rate/64. Add \"decimation\" back only if you switch to a raw-frame sink.",
+			"uri": "anyloop:udp_sink",
+			"params": { "ip": "127.0.0.1", "port": "64733", "reduce": "stats" }
+		},
+		{
 			"_comment": "tracking window copied from steering_tuned.json",
 			"uri": "anyloop:center_of_mass",
 			"params": {
 				"region_height": 20,
 				"region_width":  20,
-				"threshold":     5,
+				"threshold":     10,
+				"_min_peak": "hold the centroid instead of updating it when no beam is in frame; 40 against a measured beamless window peak of 5-6 and a saturating beam -- see steering_tuned.json for the full derivation",
+				"min_peak": 40,
 				"track":         true
 			}
 		},
@@ -97,7 +107,7 @@
 				"clamp_min":    -1.0,
 				"clamp_max":    1.0,
 				"_start_delay": "SHORTENED 2026-07-30 from 30000 s (an effectively-never sentinel that held the command at zero for the whole run) to 10 s, so this config actually closes the loop and gives a quick read on performance. 10 s is ~2 NLMS time constants: broad_order/(broad_mu*fs) = 512/(0.03*3788) = 4.5 s. The observer identifies on genuinely open-loop error during the hold and then keeps learning, since broad_freeze_closed is false here.",
-				"start_delay":  10.0,
+				"start_delay":  100000.0,
 				"ramp":         5.0,
 				"adapt_period": 8.0,
 				"adapt_df_max": 0.5,

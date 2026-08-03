@@ -123,7 +123,9 @@ for i in 1:100000
         px = (com_x + 1) / 2 * (ncols - 1) + 1
         py = (com_y + 1) / 2 * (nrows - 1) + 1
 
-        heatmap(data0.data, aspect_ratio=:equal, size=(800,800))
+        # fixed colour limits: autoscaling per frame makes the background noise
+        # look like signal whenever the spot dims, and hides saturation
+        heatmap(data0.data, aspect_ratio=:equal, size=(800,800), clims=(0,250))
         display(scatter!([px], [py],
             marker=:cross, markersize=10, color=:magenta, label="CoM"
         ))

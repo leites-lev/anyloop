@@ -34,8 +34,8 @@
 				"camera_name": "ASI290MM",
 				"width": 32,
 				"height": 32,
-				"start_x": 1832,
-				"start_y": 662,
+				"start_x": 1208,
+				"start_y": 596,
 				"_roi_note": "start_y RE-CENTRED 684 -> 692 for PAR-5. PAR-4 parked at y +5.95 px, and the 20x20 tracking window centres on the beam and spans +-10 px, so it reached 15.95 px against the 32x32 ROI's 15.5 px half-width -- the window ran off the edge, truncating the spot and desensitizing the centroid by roughly 2x. That is why PAR-4's y rejection fell by almost exactly half in EVERY low band (1-10 Hz 4.8->2.4x, 10-30 15.8->7.7x, 30-60 9.8->6.0x): a uniform loss of rejection across the band is the signature of a loop-gain error, not of environment or of incomplete convergence. Park VERIFIED before this run at y +0.70 px / x +0.53 px over 13 s, the best centring of any PAR run. RULE: measure the park position before every run and re-derive the ROI once |park| > ~2 px; the beam walks several px per hour, which is also the likeliest explanation for the Kx sweeps reading 3.97-4.36 across one morning.",
 				"_exposure": "50, matching conf_bode_par_x/y.json and steering_tuned.json. This is not cosmetic: exposure smear is part of the loop delay (about exposure/2, i.e. 0.19 frame at 50 us against 0.95 frame at 250 us), and the delay configured in the fsp block was fit through a chain running at 50. Going back to 250 adds ~0.4 frame the fit does not know about. Re-bode if you want the longer exposure.",
 				"exposure": 50,
@@ -52,6 +52,14 @@
 			"params": { "ip": "127.0.0.1", "port": "64730", "decimation": 64 }
 		},
 		{
+			"_comment": "[peak, mean, saturated] to watch_error_ts.jl's intensity panel",
+			"_note": "its own port, NOT the 64730 above: two processes bound to one UDP port either refuse to bind or split the datagrams between them, which would starve the heatmap. Intensity is not in the CoM stream -- center_of_mass emits only [y,x] -- so it has to be taken off the image here.",
+			"_undecimated": "NO decimation on purpose. \"reduce\": \"stats\" sends three doubles (24 B) instead of the 61.5 kB frame, so the full loop rate costs ~91 kB/s on loopback. Add \"decimation\" back only if you switch to a raw-frame sink.",
+			"_cost": "this is the QUOTABLE-MEASUREMENT config, so weigh the extra per-iteration work: one pass over the frame (~61 kB, already hot in cache, ~1-2 us) plus a 64-byte sendto, EVERY iteration rather than every 64th. That is small against a 264 us period but it is not nothing, and measured runs before 2026-08-02 did not have it at all. Delete this stanza if a run has to be strictly comparable to those.",
+			"uri": "anyloop:udp_sink",
+			"params": { "ip": "127.0.0.1", "port": "64733", "reduce": "stats" }
+		},
+		{
 			"_comment": "tracking window copied from steering_tuned.json",
 			"uri": "anyloop:center_of_mass",
 			"params": {
@@ -59,6 +67,8 @@
 				"region_width": 20,
 				"_threshold": "5 as of 2026-07-30: the camera is now shrouded and the background floor is low, so the high threshold that used to be needed to reject stray light costs signal for nothing. Matches conf_bode_par_x/y.json and steering_par_fsp.json.",
 				"threshold": 5,
+				"_min_peak": "hold the centroid instead of updating it when no beam is in frame; 40 against a measured beamless window peak of 5-6 and a saturating beam -- see steering_tuned.json for the full derivation",
+				"min_peak": 40,
 				"track": true
 			}
 		},

@@ -6,6 +6,14 @@
 #include <sys/uio.h>
 #include "anyloop.h"
 
+// what to send: the data itself, or a reduction of it
+enum aylp_udp_sink_reduce {
+	// send the whole block, unchanged (the default)
+	AYLP_UDP_SINK_RAW = 0,
+	// send [peak, mean, saturated_fraction] as three doubles instead
+	AYLP_UDP_SINK_STATS,
+};
+
 struct aylp_udp_sink_data {
 	int sock;
 	// destination
@@ -18,6 +26,11 @@ struct aylp_udp_sink_data {
 	size_t decimation;
 	// counts iterations since the last send
 	size_t countdown;
+	// param: whether to reduce the data before sending it
+	enum aylp_udp_sink_reduce reduce;
+	// reduction output and its header, reused every iteration
+	double stats[3];
+	struct aylp_header stats_head;
 };
 
 // initialize udp_sink device

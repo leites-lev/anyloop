@@ -48,6 +48,14 @@ typedef uint8_t aylp_status;
 enum {
 	/** Signals that we are done with the loop. */
 	AYLP_DONE	= 1 << 0,
+	/** Set by a sensor when this iteration carries no fresh measurement --
+	* the data in the pipeline is a repeat of the previous iteration's,
+	* held because the sensor did not believe what it saw. Downstream
+	* devices can use this to stop acting on stale data; an integrator that
+	* keeps winding on a held error is the usual way a lost beam turns into
+	* a large excursion. Cleared again as soon as a real measurement
+	* arrives, so it describes THIS iteration, not a latched condition. */
+	AYLP_NO_SIGNAL	= 1 << 1,
 	// add more as necessary
 };
 

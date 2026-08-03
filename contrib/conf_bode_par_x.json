@@ -36,8 +36,8 @@
 				"camera_name": "ASI290MM",
 				"width": 32,
 				"height": 32,
-				"start_x": 1832,
-				"start_y": 662,
+				"start_x": 1208,
+				"start_y": 596,
 				"_roi_note": "ROI centred on beam at coarse bias 2/2 (fine 1.5/2.15): probe-verified 2026-07-21, full-sensor CoM (x 919, y 507). Re-derive via contrib/probe_frame.json only on an alignment change.",
 				"exposure": 50,
 				"gain": 100,
@@ -58,6 +58,8 @@
 				"region_height": 20,
 				"region_width": 20,
 				"threshold": 5,
+				"_min_peak": "hold the centroid instead of updating it when no beam is in frame; 40 against a measured beamless window peak of 5-6 and a saturating beam -- see steering_tuned.json for the full derivation",
+				"min_peak": 40,
 				"track": true
 			}
 		},

@@ -21,6 +21,7 @@ project_source_files = [
 	'libaylp/block.c',
 	'libaylp/config.c',
 	'libaylp/pretty.c',
+	'libaylp/types.c',
 	'libaylp/thread_pool.c',
 	'libaylp/xalloc.c',
 	'libaylp/profile.c',
@@ -60,6 +61,38 @@ executable('anyloop', project_source_files,
 	export_dynamic: true
 )
 
+# Unit tests. These link the device sources they exercise directly rather than
+# going through the anyloop binary, so they need no camera and no config file --
+# `ninja -C build test` is safe to run on any machine.
+test_center_of_mass = executable('test_center_of_mass',
+	[
+		'tests/test_center_of_mass.c',
+		'devices/center_of_mass.c',
+		'libaylp/logging.c',
+		'libaylp/thread_pool.c',
+		'libaylp/types.c',
+		'libaylp/xalloc.c'
+	],
+	install: false,
+	dependencies: deps,
+	include_directories: [incdir, include_directories('devices')]
+)
+test('center_of_mass', test_center_of_mass)
+
+test_pid_park = executable('test_pid_park',
+	[
+		'tests/test_pid_park.c',
+		'devices/pid.c',
+		'libaylp/logging.c',
+		'libaylp/types.c',
+		'libaylp/xalloc.c'
+	],
+	install: false,
+	dependencies: deps,
+	include_directories: [incdir, include_directories('devices')]
+)
+test('pid_park', test_pid_park)
+
 shared_library('plugin_example', 'contrib/plugin_example.c',
 	name_prefix: '',
 	install: true,
@@ -78,6 +111,13 @@ shared_library('plugin_example', 'contrib/plugin_example.c',
 executable('dac_square', 'contrib/dac_square.c',
 	install: false,
 	dependencies: [c.find_library('m', required: false)]
+)
+
+# parport_pins: standalone bench tool that parks SCLK/SDIN/SYNC at a static
+# level so the DB25 pins can be metered. Same standalone posture as dac_square
+# (maps the BAR itself, no libaylp, not installed), and needs no libm.
+executable('parport_pins', 'contrib/parport_pins.c',
+	install: false
 )
 
 asi_sdk_dir = '/home/fsl/ASIStudio/lib'

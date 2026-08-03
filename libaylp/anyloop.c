@@ -49,55 +49,6 @@ static void cleanup(void)
 }
 
 
-aylp_type aylp_type_from_string(const char *type_name)
-{
-	#define AYLP_TYPE_FROM_STRING_MATCH_TYPE(TYPE, type) \
-	if (!strcasecmp(type_name, #type)) return TYPE;
-	FOR_AYLP_TYPES(AYLP_TYPE_FROM_STRING_MATCH_TYPE)
-
-	log_error("Couldn't parse type: %s", type_name);
-	return AYLP_T_NONE;
-}
-
-const char *aylp_type_to_string(aylp_type type)
-{
-	switch (type) {
-	#define AYLP_TYPE_TO_STRING_MATCH_TYPE(TYPE, type) \
-	case TYPE: \
-		return #type; \
-		break;
-	FOR_AYLP_TYPES(AYLP_TYPE_TO_STRING_MATCH_TYPE)
-	default:
-		log_error("Unknown type 0x%hhX", type);
-		return "NONE";
-	}
-}
-
-aylp_units aylp_units_from_string(const char *units_name)
-{
-	#define AYLP_UNITS_FROM_STRING_MATCH_UNITS(UNITS, units) \
-	if (!strcasecmp(units_name, #units)) return UNITS;
-	FOR_AYLP_UNITS(AYLP_UNITS_FROM_STRING_MATCH_UNITS)
-
-	log_error("Couldn't parse units: %s", units_name);
-	return AYLP_U_NONE;
-}
-
-const char *aylp_units_to_string(aylp_units units)
-{
-	switch (units) {
-	#define AYLP_UNITS_TO_STRING_MATCH_UNITS(UNITS, units) \
-	case UNITS: \
-		return #units; \
-		break;
-	FOR_AYLP_UNITS(AYLP_UNITS_TO_STRING_MATCH_UNITS)
-	default:
-		log_error("Unknown units 0x%hhX", units);
-		return "NONE";
-	}
-}
-
-
 static void handle_signal(int sig, siginfo_t *info, void *context)
 {
 	UNUSED(info);
@@ -273,7 +224,12 @@ int main(int argc, char **argv)
 	if (profile_mode)
 		profile = profile_new(&conf);
 
-	while (!sigint_received && state.header.status ^ AYLP_DONE) {
+	// test the DONE bit, not the whole word: `status ^ AYLP_DONE` was
+	// equivalent only while DONE was the only flag that existed. With any
+	// second flag set (AYLP_NO_SIGNAL), status becomes 0b11, the xor gives
+	// 0b10, and the loop would refuse to exit on a device that had just
+	// asked it to.
+	while (!sigint_received && !(state.header.status & AYLP_DONE)) {
 		for (size_t d=0; !sigint_received && d<conf.n_devices; d++) {
 			struct aylp_device *dev = &conf.devices[d];
 			if (dev->proc) {

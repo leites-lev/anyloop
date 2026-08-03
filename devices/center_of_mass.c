@@ -1,3 +1,4 @@
+#include <math.h>
 #include <pthread.h>
 #include <string.h>
 #include <time.h>
@@ -77,10 +78,16 @@ int center_of_mass_init(struct aylp_device *self)
 	data->region_width = 0;
 	data->thread_count = 1;
 	data->threshold = 0;
+	data->min_peak = 0;	// 0 => any nonzero sum counts as a beam
+	data->ref_cut = 0.0;		// 0 => no partial-beam test
+	data->ref_warmup = 200;
+	data->ref_rate = 0.01;
+	data->ref_floor = 0.25;
+	data->had_beam = true;	// so the first loss logs
 	data->track = false;
 	data->init_y = -1;	// <0 => acquire from the brightest pixel
 	data->init_x = -1;
-	data->reacquire_after = 10;
+	data->reacquire_after = 30;
 	data->acquire_seconds = 0.0;	// no acquisition phase by default
 	data->acquire_height = 0;	// 0 => the whole image
 	data->acquire_width = 0;
@@ -108,6 +115,39 @@ int center_of_mass_init(struct aylp_device *self)
 		} else if (!strcmp(key, "threshold")) {
 			data->threshold = (unsigned char)json_object_get_int(val);
 			log_trace("threshold = %u", data->threshold);
+		} else if (!strcmp(key, "min_peak")) {
+			data->min_peak = (unsigned char)json_object_get_int(val);
+			log_trace("min_peak = %u", data->min_peak);
+		} else if (!strcmp(key, "ref_cut")) {
+			data->ref_cut = json_object_get_double(val);
+			if (data->ref_cut < 0.0 || data->ref_cut > 1.0) {
+				log_error("ref_cut must be in [0, 1]; it is a "
+					"fraction of the frame's typical row"
+				);
+				return -1;
+			}
+			log_trace("ref_cut = %G", data->ref_cut);
+		} else if (!strcmp(key, "ref_warmup")) {
+			data->ref_warmup = json_object_get_uint64(val);
+			if (!data->ref_warmup) {
+				log_error("ref_warmup must be nonzero");
+				return -1;
+			}
+			log_trace("ref_warmup = %zu", data->ref_warmup);
+		} else if (!strcmp(key, "ref_rate")) {
+			data->ref_rate = json_object_get_double(val);
+			if (data->ref_rate <= 0.0 || data->ref_rate > 1.0) {
+				log_error("ref_rate must be in (0, 1]");
+				return -1;
+			}
+			log_trace("ref_rate = %G", data->ref_rate);
+		} else if (!strcmp(key, "ref_floor")) {
+			data->ref_floor = json_object_get_double(val);
+			if (data->ref_floor <= 0.0 || data->ref_floor >= 1.0) {
+				log_error("ref_floor must be in (0, 1)");
+				return -1;
+			}
+			log_trace("ref_floor = %G", data->ref_floor);
 		} else if (!strcmp(key, "track")) {
 			data->track = json_object_get_boolean(val);
 			log_trace("track = %d", data->track);
@@ -150,6 +190,39 @@ int center_of_mass_init(struct aylp_device *self)
 	if ((data->init_y < 0) != (data->init_x < 0)) {
 		log_error("Provide both init_y and init_x, or neither");
 		return -1;
+	}
+	if (data->min_peak && !data->track) {
+		log_warn("min_peak only applies in track mode; ignoring it");
+		data->min_peak = 0;
+	}
+	if (data->min_peak && data->min_peak <= data->threshold) {
+		// a pixel has to clear `threshold` to weigh anything at all, so a
+		// min_peak at or below it can never reject a frame the old code
+		// would have accepted -- it is silently doing nothing
+		log_warn("min_peak %u is at or below threshold %u, so it can "
+			"never reject a frame; raise it above the background "
+			"peak of a beamless frame", data->min_peak,
+			data->threshold
+		);
+	}
+	if (data->ref_cut > 0.0 && !data->track) {
+		log_warn("ref_cut only applies in track mode; ignoring it");
+		data->ref_cut = 0.0;
+	}
+	if (data->ref_cut > 0.0) {
+		if (data->region_height < 4) {
+			// with three rows or fewer there is no meaningful
+			// profile to compare against, and after ref_floor
+			// trims the weak ones there would be nothing left
+			log_error("ref_cut needs region_height >= 4 to have a "
+				"row profile to compare; it is %zu",
+				data->region_height
+			);
+			return -1;
+		}
+		data->ref = xcalloc(data->region_height, sizeof(double));
+		data->rows = xcalloc(data->region_height, sizeof(double));
+		data->rho = xcalloc(data->region_height, sizeof(double));
 	}
 
 	if (data->track) {
@@ -262,6 +335,23 @@ int center_of_mass_proc(struct aylp_device *self, struct aylp_state *state)
 
 int center_of_mass_fini(struct aylp_device *self)
 {
+	struct aylp_center_of_mass_data *data = self->device_data;
+	// The reject rate is the number that decides whether gating chopped
+	// frames is workable at all, and it is the one thing the rate-limited
+	// per-episode warnings cannot tell you. Every held frame hands the loop
+	// the previous frame's error again, so the integrator keeps winding on
+	// stale data -- a few percent is free, a third is added loop delay.
+	if (data && data->track && data->n_held) {
+		log_info("center_of_mass: held %zu of %zu frames (%.2f%%) over "
+			"%zu episodes", data->n_held, data->n_frames,
+			100.0 * data->n_held / data->n_frames, data->n_episodes
+		);
+	}
+	if (data) {
+		xfree(data->ref);
+		xfree(data->rows);
+		xfree(data->rho);
+	}
 	xfree(self->device_data);
 	return 0;
 }
@@ -271,7 +361,7 @@ int center_of_mass_fini(struct aylp_device *self)
 * Used to acquire on the first frame, and to recover after the beam has been
 * lost for reacquire_after frames. Note that this locks onto whatever is
 * brightest — if a stray reflection outpeaks the beam, pass init_y/init_x. */
-static void acquire_window(
+static bool acquire_window(
 	struct aylp_center_of_mass_data *data, gsl_matrix_uchar *img
 ) {
 	unsigned char best = 0;
@@ -283,8 +373,21 @@ static void acquire_window(
 			if (v > best) { best = v; by = i; bx = j; }
 		}
 	}
+	// The brightest pixel of a beamless frame is just the loudest speck of
+	// read noise, and it lands somewhere new every frame. Moving the window
+	// there is worse than not moving at all: if the beam returns where it
+	// left, an unmoved window is already on it. Park at the image centre
+	// only when we have never had a placement to keep.
+	if (data->min_peak && best < data->min_peak) {
+		if (!data->acquired) {
+			data->win_y = img->size1 / 2;
+			data->win_x = img->size2 / 2;
+		}
+		return false;
+	}
 	data->win_y = by;
 	data->win_x = bx;
+	return true;
 }
 
 
@@ -311,6 +414,136 @@ static double com_monotonic_s(void)
 	struct timespec t;
 	clock_gettime(CLOCK_MONOTONIC, &t);
 	return t.tv_sec + 1e-9 * t.tv_nsec;
+}
+
+
+/** Result of the partial-beam test, for logging. */
+struct com_cut {
+	bool cut;	// some rows are lit and others are not
+	double lo;	// dimmest significant row, relative to the reference
+	double mid;	// the frame's typical row, relative to the reference
+	size_t n_sig;	// rows that carried enough reference to be judged
+};
+
+/** Is this frame's beam cut across rows?
+*
+* Divides the frame's row profile by the learned reference profile. On a whole
+* beam every row comes back at the same ratio -- whatever the frame's brightness
+* happens to be relative to the reference, uniformly across rows -- so the
+* comparison below is between the dimmest row and the frame's own typical row,
+* and the frame's overall level cancels. On a cut beam the ratios split into two
+* groups, near the frame's level where the shutter let light through and near
+* zero where it did not, and the dimmest row falls far under the typical one.
+*
+* The median is the typical row rather than the mean or the max: on a frame cut
+* clean in half the mean sits halfway between the two groups and the max is one
+* noisy row, while the median stays with whichever group holds more rows, which
+* is all this needs to see a gap. */
+static struct com_cut com_check_cut(
+	struct aylp_center_of_mass_data *data, size_t win_h
+) {
+	struct com_cut r = {0};
+	double ref_max = 0.0;
+	for (size_t i = 0; i < win_h; i++)
+		if (data->ref[i] > ref_max) ref_max = data->ref[i];
+	if (ref_max <= 0.0)
+		return r;	// no reference yet; nothing to say
+	double floor = data->ref_floor * ref_max;
+
+	// ratios of the rows the reference says should carry real signal,
+	// insertion-sorted as they are collected. win_h is a window height --
+	// tens of rows at most -- so this is a handful of compares, and it keeps
+	// the median exact rather than approximating it
+	for (size_t i = 0; i < win_h; i++) {
+		if (data->ref[i] < floor)
+			continue;
+		double v = data->rows[i] / data->ref[i];
+		size_t k = r.n_sig++;
+		while (k > 0 && data->rho[k-1] > v) {
+			data->rho[k] = data->rho[k-1];
+			k--;
+		}
+		data->rho[k] = v;
+	}
+	// three rows is the fewest that can show a dim one against a typical
+	// one; below that the test would be comparing a row to itself
+	if (r.n_sig < 3)
+		return r;
+
+	r.lo = data->rho[0];
+	r.mid = data->rho[r.n_sig / 2];
+	// mid <= 0 means every significant row lost its light while the window
+	// as a whole still has some -- the beam is not where the reference says
+	// it is, which is not a frame to steer on either
+	r.cut = r.mid <= 0.0 || r.lo < data->ref_cut * r.mid;
+	return r;
+}
+
+
+/** Fold this frame's row profile into the reference.
+*
+* Before the bootstrap finishes this takes the row-wise maximum, because the
+* source may already be chopping while it runs: a cut only ever removes light,
+* so each row's largest value over enough frames is its uncut value, while a
+* mean would learn a blend of whole and cut beams and sit too low. Afterwards it
+* is an EMA over accepted frames only, which follows slow drift in power, focus
+* and alignment without letting cut frames pull it down toward themselves. */
+static void com_update_ref(struct aylp_center_of_mass_data *data, size_t win_h)
+{
+	if (!data->ref_ready) {
+		for (size_t i = 0; i < win_h; i++)
+			if (data->rows[i] > data->ref[i])
+				data->ref[i] = data->rows[i];
+		if (++data->ref_seen >= data->ref_warmup) {
+			data->ref_ready = true;
+			log_info("center_of_mass: reference profile learned "
+				"from %zu frames; partial-beam gate is now "
+				"active", data->ref_seen
+			);
+		}
+		return;
+	}
+	for (size_t i = 0; i < win_h; i++)
+		data->ref[i] += data->ref_rate * (data->rows[i] - data->ref[i]);
+}
+
+
+/** Throw the learned reference away.
+*
+* Called when the window re-acquires: the beam has been gone long enough that
+* the window is being replaced from scratch, and a profile learned at the old
+* position describes a beam that may not be there any more. Relearning costs
+* ref_warmup frames; keeping a stale reference costs every frame after. */
+static void com_reset_ref(struct aylp_center_of_mass_data *data)
+{
+	if (!data->ref)
+		return;
+	for (size_t i = 0; i < data->region_height; i++)
+		data->ref[i] = 0.0;
+	data->ref_seen = 0;
+	data->ref_ready = false;
+}
+
+
+/** Seconds between beam-lost/beam-back log lines. */
+#define COM_LOG_INTERVAL 1.0
+
+/** True at most once per COM_LOG_INTERVAL, so the beam-lost and beam-back
+* transitions can be logged without flooding.
+*
+* These fire once per loss episode, which is the right cadence for a beam that
+* occasionally drops out and completely the wrong one for a chopped source: a
+* flux gate rejecting alternate frames produces an episode every few frames, and
+* at loop rate that is hundreds of log lines a second going to a terminal in the
+* middle of the control loop. The suppressed episodes are still counted, and
+* fini reports the totals, so nothing is lost but the noise. */
+static bool com_log_ok(struct aylp_center_of_mass_data *data)
+{
+	double now = com_monotonic_s();
+	if (now - data->last_log_t < COM_LOG_INTERVAL)
+		return false;
+	data->last_log_t = now;
+	return true;
 }
 
 
@@ -349,19 +582,28 @@ int center_of_mass_proc_track(struct aylp_device *self, struct aylp_state *state
 		data->com = xmalloc_type(gsl_vector, 2);
 	}
 	if (UNLIKELY(!data->acquired)) {
+		bool placed;
 		if (data->init_y >= 0) {
 			data->win_y = (size_t)data->init_y;
 			data->win_x = (size_t)data->init_x;
+			placed = true;
 		} else {
-			acquire_window(data, img);
+			placed = acquire_window(data, img);
 		}
-		data->acquired = true;
-		data->acquiring = data->acquire_seconds > 0.0;
-		data->acquire_t0 = com_monotonic_s();
-		log_info("center_of_mass: acquired window at (%zu,%zu)%s",
-			data->win_y, data->win_x,
-			data->acquiring ? "; starting wide acquisition phase" : ""
-		);
+		// Staying unacquired until a real beam shows up also keeps the
+		// acquisition phase honest: its clock must start when there is
+		// something to acquire, or it expires against a dark sensor and
+		// narrows the window onto noise.
+		if (placed) {
+			data->acquired = true;
+			data->acquiring = data->acquire_seconds > 0.0;
+			data->acquire_t0 = com_monotonic_s();
+			log_info("center_of_mass: acquired window at (%zu,%zu)%s",
+				data->win_y, data->win_x,
+				data->acquiring
+					? "; starting wide acquisition phase" : ""
+			);
+		}
 	}
 	// During the acquisition phase the sum runs over a wider window (the whole
 	// image by default). The point is that a wide window is flux-weighted over
@@ -381,36 +623,128 @@ int center_of_mass_proc_track(struct aylp_device *self, struct aylp_state *state
 	size_t org_y = data->win_y - win_h/2;
 	size_t org_x = data->win_x - win_w/2;
 
+	// The row profile is only kept when the partial-beam test is armed and
+	// the window is at its configured size. During the acquisition phase the
+	// window is a different (wider) shape, so a profile taken then does not
+	// describe the same thing and must not be mixed into the reference.
+	bool profile = data->ref_cut > 0.0 && !data->acquiring;
+
 	double y = 0.0, x = 0.0, s = 0.0;
+	unsigned char peak = 0;
 	for (size_t l = 0; l < win_h; l++) {
+		double row = 0.0;
 		for (size_t m = 0; m < win_w; m++) {
 			unsigned char raw = img->data[
 				(org_y + l) * img->tda + org_x + m
 			];
+			if (raw > peak) peak = raw;
 			unsigned char el = raw > data->threshold
 				? raw - data->threshold : 0;
 			// accumulate in image coordinates, not window ones
 			y += (org_y + l)*el;
 			x += (org_x + m)*el;
 			s += el;
+			row += el;
 		}
+		// win_h == region_height whenever `profile` is set, so this
+		// cannot run off the end of the array
+		if (profile) data->rows[l] = row;
 	}
 
-	if (LIKELY(s != 0.0)) {
+	// "Is the beam in frame?" is a question about brightness, and a nonzero
+	// sum does not answer it: sensor read noise running a few counts above
+	// `threshold` gives a perfectly nonzero sum whose centroid is noise and
+	// wanders the full width of the window. Only a real peak separates a
+	// beam from a dark frame -- with min_peak 0 this is exactly the old
+	// s != 0 test, so configs that do not set it are unaffected.
+	//
+	// The three tests fail for different reasons and the log line has to say
+	// which, so keep them apart rather than folding them into one bool: an
+	// empty sum means nothing cleared `threshold`, a low peak means the
+	// window holds no bright pixel, and a split row profile with a healthy
+	// peak means the beam is only partly there -- a rolling shutter that
+	// caught a chopped source mid-cycle. Reporting the wrong one sends you
+	// tuning the wrong parameter.
+	//
+	// The partial-beam test is skipped until the reference has been learned,
+	// so the first ref_warmup frames go through on the brightness tests
+	// alone. That is deliberate: a gate is worth less than the reference it
+	// would be guessing at, and at loop rate the warmup is milliseconds.
+	struct com_cut cut = {0};
+	const char *why = 0;
+	if (UNLIKELY(s == 0.0))
+		why = "sum";
+	else if (UNLIKELY(peak < data->min_peak))
+		why = "peak";
+	else if (profile && data->ref_ready) {
+		cut = com_check_cut(data, win_h);
+		if (UNLIKELY(cut.cut))
+			why = "cut";
+	}
+	bool beam = !why;
+	// only whole frames teach the reference what a whole beam looks like
+	if (profile && beam)
+		com_update_ref(data, win_h);
+
+	data->n_frames++;
+	if (LIKELY(beam)) {
 		double abs_y = y/s, abs_x = x/s;
 		data->last_y = -1.0 + 2*abs_y/(max_y - 1);
 		data->last_x = -1.0 + 2*abs_x/(max_x - 1);
 		// recentre the window for the next frame
 		data->win_y = (size_t)(abs_y + 0.5);
 		data->win_x = (size_t)(abs_x + 0.5);
+		if (UNLIKELY(!data->had_beam)) {
+			if (com_log_ok(data))
+				log_info("center_of_mass: beam back after %zu "
+					"frames (peak %u, dimmest row %.2f of "
+					"typical); resuming updates", data->lost,
+					peak, cut.mid > 0.0 ? cut.lo/cut.mid : 1.0
+				);
+			data->had_beam = true;
+		}
 		data->lost = 0;
 	} else {
-		// Every pixel in the window is at or below threshold. Hold the
-		// last good output rather than reporting (0,0), which downstream
-		// reads as "perfectly centred" and would let the integrator park
-		// and then lurch when the beam reappears. If the beam stays gone,
-		// the window is stranded and can never find it again, so fall
-		// back to a full-image re-acquire.
+		// No beam: hold the last good output rather than emitting a
+		// centroid we do not believe. Reporting the noise centroid would
+		// feed the loop a fictitious error; reporting (0,0) reads
+		// downstream as "perfectly centred" and would let the integrator
+		// park and then lurch when the beam reappears. Holding is the
+		// only option that leaves the loop where the beam last was.
+		// If the beam stays gone the window is stranded and can never
+		// find it again, so fall back to a full-image re-acquire.
+		data->n_held++;
+		if (UNLIKELY(data->had_beam)) {
+			data->n_episodes++;
+			if (com_log_ok(data)) {
+				if (!strcmp(why, "sum"))
+					log_warn("center_of_mass: no beam in frame "
+						"(no pixel in the window is above "
+						"threshold %u; window peak %u); "
+						"holding centroid (%.4f,%.4f)",
+						data->threshold, peak,
+						data->last_y, data->last_x
+					);
+				else if (!strcmp(why, "peak"))
+					log_warn("center_of_mass: no beam in frame "
+						"(window peak %u < min_peak %u); "
+						"holding centroid (%.4f,%.4f)",
+						peak, data->min_peak,
+						data->last_y, data->last_x
+					);
+				else
+					log_warn("center_of_mass: beam cut across "
+						"rows (dimmest of %zu rows is %.2f "
+						"of typical, under ref_cut %G; "
+						"peak %u is fine); holding centroid "
+						"(%.4f,%.4f)", cut.n_sig,
+						cut.mid > 0.0 ? cut.lo/cut.mid : 0.0,
+						data->ref_cut, peak,
+						data->last_y, data->last_x
+					);
+			}
+			data->had_beam = false;
+		}
 		if (++data->lost >= data->reacquire_after) {
 			if (data->lost == data->reacquire_after) {
 				log_warn("center_of_mass: no signal in window "
@@ -422,6 +756,10 @@ int center_of_mass_proc_track(struct aylp_device *self, struct aylp_state *state
 				// straight back to the narrow one
 				data->acquiring = data->acquire_seconds > 0.0;
 				data->acquire_t0 = com_monotonic_s();
+				// the reference describes a beam at the old
+				// window position, which is exactly what we
+				// have just stopped believing in
+				com_reset_ref(data);
 			}
 			acquire_window(data, img);
 		}
@@ -444,6 +782,15 @@ int center_of_mass_proc_track(struct aylp_device *self, struct aylp_state *state
 
 	// zero-copy update of pipeline state
 	state->vector = data->com;
+	// Tell the rest of the pipeline whether this centroid is a fresh
+	// measurement or last frame's held over. Everything downstream sees an
+	// ordinary vector either way -- holding is invisible in the data, which
+	// is the point of holding -- so without this flag an integrator has no
+	// way to tell that it is winding on the same error over and over.
+	if (LIKELY(beam))
+		state->header.status &= ~(aylp_status)AYLP_NO_SIGNAL;
+	else
+		state->header.status |= AYLP_NO_SIGNAL;
 	// housekeeping on the header
 	state->header.type = self->type_out;
 	state->header.units = self->units_out;

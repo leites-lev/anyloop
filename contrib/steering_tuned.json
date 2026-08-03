@@ -44,16 +44,17 @@
 		{
 			"uri": "file:/home/fsl/anyloop_levfork/anyloop/build/asi_source.so",
 			"params": {
-				"camera_name": "ASI290MM",
-				"width": 32,
-				"height": 32,
-				"start_x": 1832,
-				"start_y": 662,
-				"_roi_note": "ROI centred on beam at coarse bias 2/2 (fine 1.5/2.15): probe-verified 2026-07-21, full-sensor CoM (x 919, y 507). Re-derive via contrib/probe_frame.json only on an alignment change.",
-				"exposure": 50,
-				"gain": 100,
-				"bandwidth": 100,
-				"high_speed": 1,
+				"camera_name": "ASI662MM",
+				"width":   248,
+				"height":   248,
+				"start_x": 1100,
+				"start_y": 488,
+				"_camera_note": "ASI662MM (IMX662, 1920x1080) as of 2026-08-02, replacing the ASI290MM (1936x1096) this file ran on through PAR-1..PAR-6. It is the only camera enumerated on the bench now. EVERY MEASURED NUMBER IN THIS FILE PREDATES THE SWAP and must be re-taken: fs (the 3788 Hz below is the 290's frame rate at 32x32/exp50/bw100 -- the 662 is a different sensor and readout, so this is the loop period and therefore K's units, the delay in FRAMES, and broad_lp all at once), delay, K, and the pixel scale used to convert error units to px. Re-run the bodes before trusting a run.",
+				"_roi_note": "STALE -- start_x/start_y below still centre the 32x32 ROI for the ASI290MM's 1936x1096 sensor (probe-verified 2026-07-21, full-sensor CoM x 919, y 507, at coarse bias 2/2 / fine 1.5/2.15). They are still in range on the 662's 1920x1080 so nothing errors, but they do NOT point at the beam. Re-derive with contrib/find_roi.py (which now probes whatever camera this file names) before the next run -- the ROI follows the beam by cropping instead of re-biasing.",
+				"exposure":  32,
+				"gain":        0,
+				"bandwidth":   100,
+				"high_speed":  1,
 				"die_on_stall": 0
 			}
 		},
@@ -68,14 +69,29 @@
 			}
 		},
 		{
+			"_comment": "Send [peak, mean, saturated] to watch_error_ts.jl's intensity panel on port 64733",
+			"_note": "its own port, NOT the 64730 above: two processes bound to one UDP port either refuse to bind or split the datagrams between them, which would starve the heatmap. Intensity is not in the CoM stream -- center_of_mass emits only [y,x] -- so it has to be taken off the image here.",
+			"_undecimated": "NO decimation, unlike the 64730/64731 pair, and deliberately so. \"reduce\": \"stats\" sends three doubles (24 B) instead of the 61.5 kB frame, so the full loop rate costs ~91 kB/s on loopback and one pass over pixels already hot in cache. This sink is also not drawn against any other, so it has no reason to share their cadence.",
+			"uri": "anyloop:udp_sink",
+			"params": {
+				"ip":     "127.0.0.1",
+				"port":   "64733",
+				"reduce": "stats"
+			}
+		},
+		{
 			"_comment": "Track a 15x15 window centred on the previous CoM, so the stray reflection never enters the sum.",
 			"_note": "Output stays normalized across the whole 64x64 image, NOT the window: the setpoint is still frame centre and the PID gains below are unchanged. With the beam-centred ROI the stray reflection sits INSIDE the frame at ~(10, 28) and carries flux comparable to the beam, so the old whole-frame acquisition phase can settle between the two spots -- init the window on the beam (frame centre) explicitly instead. The reflection is 22 px from the beam, well outside the 15 px window.",
+			"_shutter": "ref_cut drops the frames the rolling shutter cuts. The source is chopped and the sensor reads out row by row, so a frame catches the chop's on-window across only some of its rows and the beam comes back with a hard horizontal edge through it. Those frames are not dark and not dim -- the rows that were lit are at full brightness -- so neither `threshold` nor `min_peak` sees them, and their centroid is pulled toward the surviving rows: a systematic error along the shutter axis that beats against the chop instead of averaging out. The test divides this frame's row profile by a learned reference profile of the whole beam and asks whether some rows are lit while others are not: a whole beam gives the same ratio on every row (so the frame's brightness cancels, and a dim beam is not mistaken for a cut one), a cut beam gives two groups. Rejected frames hold the previous centroid rather than emitting one.",
+			"_shutter_tune": "0.5 means the dimmest judged row must stay above half the frame's typical row. Measured on a simulated sigma=2 beam (tests/test_center_of_mass.c): whole beam 1.00, beam dimmed 4x 0.61, any cut through the judged rows 0.00 -- so the separation is wide and the value is not delicate. Lower toward 0.3 only if the source swings in power by more than ~4x. ref_floor (default 0.25) sets which rows get judged and is the real sensitivity knob: lower it to catch shallower cuts at the price of noisier ratios. ref_warmup 200 frames at loop rate is ~60 ms of learning during which the gate is OFF; the bootstrap takes the row-wise max so it learns the uncut profile even though the chop is already running while it does. STILL WORTH CHECKING that the beam sits well above threshold 10: the threshold subtraction is the one part of this that is not exactly scale-free, and a beam only a few counts over it will tilt the ratios.",
+			"_shutter_cost": "Watch the held fraction in the exit summary (\"held N of M frames\"). A held frame hands the pid the previous frame's error a second time and the integrator keeps winding on it, which reads downstream as added loop delay and eats phase margin. A few percent is fine. If it runs to tens of percent the answer is to stop MAKING partial frames (expose over a whole chop period, or trigger the camera off the chop) rather than to filter them, because by then the loop is running on a small fraction of its nominal rate.",
 			"uri": "anyloop:center_of_mass",
 			"params": {
 				"region_height":   20,
 				"region_width":    20,
-				"threshold":       22,
-				"track":           true
+				"threshold":       10,
+				"track":           true,
+				"reacquire_after": 30000
 			}
 		},
 		{
@@ -102,19 +118,21 @@
 			"uri": "anyloop:pid",
 			"params": {
 				"type": "vector",
-"p": 0,
-"py": 0,
-"i": 66,
-"iy": 69
-			}
+"p": 0.5,
+"py": 0.5,
+"i":70,
+"iy": 70,
+"clamp": 10,
+"park_after": 300,
+"park_value": 0	}
 		},
 		{
 			
 			"uri": "anyloop:clamp",
 			"params": {
 				"type": "vector",
-				"min": -1.0,
-				"max": 1.0
+				"min": -10.0,
+				"max": 10.0
 			}
 		},
 		{
@@ -134,9 +152,9 @@
 				"link": "spi",
 				"channel": [0, 1],
 				"index": [0, 1],
-				"scale": [1, -1],
-				"offset": [0, 0],
-				"range": "+-5",
+				"scale": [0, 0],
+				"offset": [-1, 1],
+				"range": "+-10",
 				"_no_range_max": "auto-ranging deliberately NOT enabled for a sweep. A mid-sweep range change would glitch the output for a frame and step the quantization, both of which land straight in the lock-in as a bogus data point. The sweep never leaves 2.4..2.6 V anyway, deep inside 0-5. Note the STEERING configs DO auto-range (range_max +-10) -- the bode measures the plant at a fixed 0-5 range and fixed 76 uV/LSB on purpose, so K and tau are not entangled with a range change.",
 				"_verify": "off in a swept/timed run: verify turns each write into 3 frames (write, read-command, NOP) plus a non-posted status read per bit. Use it in a bench smoke config, not here.",
 				"verify": false,

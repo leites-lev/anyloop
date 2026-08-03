@@ -1,6 +1,29 @@
 #!/usr/bin/julia
 # Rolling time-series + PSD plot of the [y, x] error signal from center_of_mass.
 # Listens on UDP port 64732.
+#
+# Optionally also plots beam intensity over time, listening on port 64733 (see
+# --iport). Intensity is NOT in the CoM stream -- center_of_mass emits only
+# [y, x] -- so it has to come from the image, which means a second udp_sink in
+# the config:
+#
+#   {"uri": "anyloop:udp_sink", "params": {
+#       "ip": "127.0.0.1", "port": "64733", "reduce": "stats"}}
+#
+# placed anywhere after asi_source and before center_of_mass. "reduce": "stats"
+# makes the loop send [peak, mean, saturated] as three doubles instead of the
+# frame: 24 bytes against 61.5 kB for a 248x248 image, so it runs UNDECIMATED at
+# the full loop rate. Sending frames that fast is not possible -- 233 MB/s at
+# 3788 Hz -- which is why this panel was stuck at loop_rate/decimation before.
+#
+# A plain frame sink (no "reduce") still works and is reduced here instead, but
+# then it must be decimated, and the trace updates at loop_rate/decimation.
+#
+# The port must be its own rather than the 64730 that watch_steering.jl uses:
+# two processes bound to one UDP port either refuse to bind or (with
+# SO_REUSEPORT) split the datagrams between them, which would starve the
+# heatmap. The panel is skipped silently when nothing arrives, so configs
+# without the sink behave exactly as before.
 include("anyloop.jl")
 using .Anyloop
 using Plots; gr()
@@ -47,6 +70,14 @@ const DEFAULT_SECONDS = 30.0  # rolling time-series window length, seconds
 # --com/-c: text mode. Instead of plotting, print the [y, x] CoM to stdout
 #                 (throttled to ~5 Hz) with a running mean, for reading the
 #                 spot's resting position. No figure is produced.
+# --iport/-P PORT: UDP port carrying the intensity stream, either in-loop stats
+#                 or raw frames (default 64733; 0 disables the panel and never
+#                 binds). Needs the extra udp_sink described at the top. The
+#                 panel plots per-frame peak counts against a FIXED 0-255 axis
+#                 -- peak is what saturation and center_of_mass's min_peak are
+#                 both measured against -- plus mean counts on a right-hand
+#                 axis, since a saturated peak pins at 255 and hides a beam that
+#                 is dimming underneath it.
 function parse_args(args)
     outfile = joinpath(@__DIR__, "..", "spectrum.png")
     timestamp = false
@@ -60,6 +91,7 @@ function parse_args(args)
     fmin  = 0.0     # spectrum min frequency (Hz); 0 = from DC
     fmax  = 0.0     # spectrum max frequency (Hz); 0 = auto (Nyquist)
     xtick = 0.0     # spectrum x-axis tick spacing (Hz); 0 = auto
+    iport = 64733   # raw-frame port for the intensity panel; 0 = disabled
     i = 1
     while i <= length(args)
         a = args[i]
@@ -95,6 +127,11 @@ function parse_args(args)
             xtick = parse(Float64, args[i+1]); i += 2
         elseif startswith(a, "--xtick=")
             xtick = parse(Float64, split(a, "=", limit=2)[2]); i += 1
+        elseif a in ("--iport", "-P")
+            i < length(args) || error("$a needs a PORT argument")
+            iport = parse(Int, args[i+1]); i += 2
+        elseif startswith(a, "--iport=")
+            iport = parse(Int, split(a, "=", limit=2)[2]); i += 1
         elseif a in ("--com", "-c")
             com = true; i += 1
         elseif startswith(a, "-")
@@ -108,10 +145,12 @@ function parse_args(args)
     fmin >= 0 || error("--fmin must be non-negative")
     fmax >= 0 || error("--fmax must be non-negative")
     xtick >= 0 || error("--xtick must be non-negative")
-    return outfile, timestamp, seconds, com, pixel, fmin, fmax, xtick
+    0 <= iport <= 65535 || error("--iport must be a valid port (or 0)")
+    return outfile, timestamp, seconds, com, pixel, fmin, fmax, xtick, iport
 end
 
-const OUTFILE, TIMESTAMP, SECONDS, COM, PIXEL, FMIN, FMAX, XTICK = parse_args(ARGS)
+const OUTFILE, TIMESTAMP, SECONDS, COM, PIXEL, FMIN, FMAX, XTICK, IPORT =
+    parse_args(ARGS)
 # center_of_mass output is normalized to -1:1 across PIXEL px -- the whole image
 # in track mode, the region otherwise; convert to pixels with value*(PIXEL-1)/2
 const PIX_PER_UNIT = (PIXEL - 1) / 2
@@ -329,6 +368,81 @@ acq = @async while true
     end
 end
 
+# --- intensity acquisition (optional second stream) ---------------------
+# Two packet formats are accepted on IPORT, and which one you get is a property
+# of the config, not of this script:
+#
+#   [peak, mean, saturated] as 3 doubles -- a udp_sink with "reduce": "stats".
+#       24 bytes, so this runs UNDECIMATED at the full loop rate. Prefer it.
+#   a raw frame -- a plain udp_sink. Reduced here instead of in the loop, which
+#       costs 61.5 kB per packet on the wire and a full decode in julia, so it
+#       only works decimated. Kept working because bode/probe configs already
+#       have frame sinks lying around.
+#
+# Ring buffers, not push!/deleteat! vectors: at the full loop rate the trimming
+# a growable vector needs is an O(n) memmove per packet, which is precisely the
+# cost that made undecimated intensity look impossible. Sized N like the error
+# rings, so the history covers the same span the time axis shows.
+const int_t    = zeros(N)    # arrival time (s, wall clock)
+const int_peak = zeros(N)    # brightest pixel in the frame (counts)
+const int_mean = zeros(N)    # mean over the frame (counts)
+const int_lock = ReentrantLock()
+const int_widx = Ref(1)      # next write position in the intensity rings
+const int_sat  = Ref(0.0)    # fraction of saturated pixels, newest frame
+const int_dims = Ref((0, 0)) # frame size, for the panel title (0,0 = stats mode)
+const int_npkt = Ref(0)
+
+# How much intensity history to keep: the span the time axis actually shows,
+# which is (N-1)/fs. That equals SECONDS only when the loop runs at the nominal
+# FS -- N is sized from FS, so at the real 3788 Hz the axis is ~4.6x shorter
+# than SECONDS, and trimming to SECONDS would hoard samples the panel clips off
+# anyway. The 1 s floor keeps a usable trace on very short windows.
+hist_span() = max((N - 1) / meas_fs(), 1.0)
+
+isock = nothing
+if IPORT > 0
+    s = UDPSocket()
+    if bind(s, ip"0.0.0.0", IPORT)
+        global isock = s
+        println("listening on ", IPORT, " (intensity: stats or raw frames)")
+    else
+        # not fatal: most configs have no frame sink on this port, and the
+        # error plots are the point of this script
+        @warn "couldn't bind port $IPORT; intensity panel disabled"
+        close(s)
+    end
+end
+
+iacq = isock === nothing ? nothing : @async while true
+    chunk = read(IOBuffer(recv(isock)), AYLPChunk)
+    m = chunk.data
+    length(m) == 0 && continue
+    local pk, mn, sat, dims
+    if eltype(m) === Float64 && length(m) == 3
+        # already reduced in the loop by "reduce": "stats"
+        pk, mn, sat = m[1], m[2], m[3]
+        dims = (0, 0)
+    else
+        # raw frame; sum() widens UInt8 to a machine word, so no overflow.
+        # saturation matters because a pinned peak hides everything above it:
+        # at 255 the centroid weights are clipped and the mean is the only
+        # honest brightness left.
+        pk = Float64(maximum(m))
+        mn = Float64(sum(m)) / length(m)
+        sat = count(==(typemax(eltype(m))), m) / length(m)
+        dims = size(m)
+    end
+    now = time()
+    lock(int_lock) do
+        i = int_widx[]
+        int_t[i] = now; int_peak[i] = pk; int_mean[i] = mn
+        int_widx[] = i == N ? 1 : i + 1
+        int_sat[] = sat
+        int_dims[] = dims
+        int_npkt[] += 1
+    end
+end
+
 const RENDER_PERIOD = 0.2   # seconds between frames (~5 Hz)
 
 let last_save = time()
@@ -347,6 +461,14 @@ let last_save = time()
         nyq  = fs / 2
         freqs = (0:N÷2) .* (fs / N)
         tvec  = range(-(N-1)/fs, 0; length=N)
+        # Left edge of the time-series panels. The ring holds N samples, which
+        # is SECONDS long only at the nominal FS -- at a measured 400 Hz an
+        # `-s 3` window is really 6.1 s of data, and at 3788 Hz it is 0.65 s.
+        # Show the last SECONDS of it, or the whole record when the record is
+        # the shorter of the two, so the axis never runs off past the data.
+        # The spectrum still uses the full N-sample record either way, so
+        # narrowing the view costs no frequency resolution.
+        xlo = max(first(tvec), -SECONDS)
         # spectrum x-axis edges: custom --fmin/--fmax, clamped to [0, Nyquist]
         fmax = FMAX > 0 ? min(FMAX, nyq) : nyq
         fmin = (FMIN > 0 && FMIN < fmax) ? FMIN : 0.0
@@ -378,6 +500,7 @@ let last_save = time()
 
         p1 = plot(tvec, sy .* PIX_PER_UNIT;
                   label="y (tip)", ylabel="error (px)", color=:blue, lw=1,
+                  xlim=(xlo, 0),
                   title="Time series   (fs ≈ $(round(fs, digits=1)) Hz)")
         if show_rms
             hline!(p1, [mean_y_px]; color=:black, ls=:dot, lw=1,
@@ -397,7 +520,8 @@ let last_save = time()
         scatter!(p2, [p[1] for p in peaks_y], [p[2] for p in peaks_y];
                  marker=:circle, ms=4, color=:blue, label=peak_label(peaks_y, ""))
         p3 = plot(tvec, sx .* PIX_PER_UNIT;
-                  label="x (tilt)", xlabel="time (s)", ylabel="error (px)", color=:red, lw=1)
+                  label="x (tilt)", xlabel="time (s)", ylabel="error (px)",
+                  color=:red, lw=1, xlim=(xlo, 0))
         if show_rms
             hline!(p3, [mean_x_px]; color=:black, ls=:dot, lw=1,
                    label="mean = $(round(mean_x_px, sigdigits=3)) px")
@@ -410,7 +534,61 @@ let last_save = time()
                   xlim=(fmin, fmax), xticks=xt, ylim=(-60, 0), legend=:topright)
         scatter!(p4, [p[1] for p in peaks_x], [p[2] for p in peaks_x];
                  marker=:circle, ms=4, color=:red, label=peak_label(peaks_x, ""))
-        pl = plot(p1, p2, p3, p4; layout=(2,2), size=(1200,600))
+
+        # intensity panel, only once samples have actually arrived
+        local it, ip, im, isat, idims, inp
+        lock(int_lock) do
+            i = int_widx[]
+            it = snapshot(int_t, i)
+            ip = snapshot(int_peak, i)
+            im = snapshot(int_mean, i)
+            isat = int_sat[]; idims = int_dims[]; inp = int_npkt[]
+        end
+        # keep the real samples (skipping the zero-prefilled part of the ring)
+        # that fall inside the displayed span; times increase along the tail, so
+        # a binary search finds the left edge
+        nivalid = min(inp, N)
+        tnow = time()
+        if nivalid > 0
+            it = @view it[end-nivalid+1:end]
+            ip = @view ip[end-nivalid+1:end]
+            im = @view im[end-nivalid+1:end]
+            k = searchsortedfirst(it, tnow - hist_span())
+            it = @view it[k:end]; ip = @view ip[k:end]; im = @view im[k:end]
+        end
+        if inp > 0 && !isempty(it)
+            trel = it .- tnow          # newest sample sits at ~0, as in p1/p3
+            # arrival rate over the window, so a stalled or slowed source is
+            # visible rather than silently freezing the trace
+            irate = length(it) > 1 ?
+                (length(it) - 1) / max(it[end] - it[1], 1e-9) : 0.0
+            # no legend box: two traces on two axes are identified by the
+            # colour-matched axis labels, and a box would sit on top of the
+            # data in a panel this short
+            p5 = plot(trel, ip;
+                      xlabel="time (s)", ylabel="peak (counts)",
+                      color=:green, lw=1, legend=false,
+                      yguidefontcolor=:green, ytickfontcolor=:green,
+                      xlim=(xlo, 0), ylim=(0, 255),
+                      title="Intensity   (" *
+                            (idims == (0, 0) ? "in-loop stats" :
+                             "$(idims[1])x$(idims[2]) frames") * ", " *
+                            "$(round(irate, digits=1)) Hz, " *
+                            "sat $(round(100*isat, digits=2))%)")
+            # mean rides a separate axis: on a mostly-dark frame it is a couple
+            # of counts against a peak of ~250, so a shared 0-255 axis would
+            # flatten it onto the x axis and show nothing
+            plot!(twinx(p5), trel, im;
+                  ylabel="mean (counts)", color=:purple, lw=1, legend=false,
+                  yguidefontcolor=:purple, ytickfontcolor=:purple,
+                  xlim=(xlo, 0), right_margin=12Plots.mm)
+            # intensity gets a shorter row: it is a slow, mostly-flat trace, and
+            # an equal third of the figure would come out of the error panels
+            lay = @layout [a b; c d; e{0.22h}]
+            pl = plot(p1, p2, p3, p4, p5; layout=lay, size=(1200,800))
+        else
+            pl = plot(p1, p2, p3, p4; layout=(2,2), size=(1200,600))
+        end
         display(pl)
 
         if time() - last_save >= SAVE_EVERY
@@ -420,6 +598,7 @@ let last_save = time()
 
         # surface a crashed acquisition task instead of rendering stale data
         istaskdone(acq) && wait(acq)
+        iacq !== nothing && istaskdone(iacq) && wait(iacq)
         # yield for the rest of the cadence so acquisition drains whatever
         # queued in the kernel while this frame was drawing
         sleep(RENDER_PERIOD)
@@ -427,3 +606,4 @@ let last_save = time()
 end
 
 close(sock)
+isock === nothing || close(isock)

@@ -118,10 +118,11 @@ function Base.read(io::IO, ::Type{AYLPChunk})
     head = read(io, AYLPHeader)
     size = head.log_dim_y * head.log_dim_x
     if AYLPType(head.aylp_type) in [AYLP_T_VECTOR, AYLP_T_BLOCK, AYLP_T_MATRIX]
+        # one bulk read, not `size` calls to read(): the per-element loop this
+        # replaces cost ~1.2 ms on a 248x248 frame, which is what made a
+        # full-rate stream undecodable in julia
         data = Vector{Float64}(undef, size)
-        for i in 1:size
-            data[i] = read(io, Float64)
-        end
+        read!(io, data)
         return AYLPChunk(head,
             # we have to do this tricky transpose of reshape() because anyloop
             # uses row-major ordering, and julia uses column-major
@@ -129,9 +130,7 @@ function Base.read(io::IO, ::Type{AYLPChunk})
         )
     elseif AYLPType(head.aylp_type) in [AYLP_T_BLOCK_UCHAR, AYLP_T_MATRIX_UCHAR]
         data = Vector{UInt8}(undef, size)
-        for i in 1:size
-            data[i] = read(io, UInt8)
-        end
+        read!(io, data)
         return AYLPChunk(head,
             # same deal with column-major
             Matrix{UInt8}(reshape(data, (head.log_dim_x, head.log_dim_y))')

@@ -133,6 +133,12 @@ int pid_init(struct aylp_device *self)
 			data->start_delay = json_object_get_double(val);
 			if (data->start_delay < 0) data->start_delay = 0;
 			log_trace("start_delay = %G s", data->start_delay);
+		} else if (!strcmp(key, "park_after")) {
+			data->park_after = json_object_get_uint64(val);
+			log_trace("park_after = %zu", data->park_after);
+		} else if (!strcmp(key, "park_value")) {
+			data->park_value = json_object_get_double(val);
+			log_trace("park_value = %G", data->park_value);
 		} else if (!strcmp(key, "clamp")) {
 			data->clamp = json_object_get_double(val);
 			if (data->clamp < 0)
@@ -261,6 +267,69 @@ int pid_init(struct aylp_device *self)
 }
 
 
+/** Empty every piece of controller memory.
+*
+* Called when the output parks: each of these holds a correction derived from
+* measurements the sensor has told us not to believe, so carrying any of it
+* across the outage would put a stale correction on the first good frame. The
+* line oscillators lose their weights but keep their phase, since their phase is
+* a property of the disturbance and of wall-clock time, not of the loop. */
+static void pid_reset_state(struct aylp_pid_data *data)
+{
+	if (data->type == AYLP_T_VECTOR) {
+		if (data->acc_v) gsl_vector_set_zero(data->acc_v);
+		if (data->pre_v) gsl_vector_set_zero(data->pre_v);
+		if (data->dfd_v) gsl_vector_set_zero(data->dfd_v);
+		if (data->lead_in_v) gsl_vector_set_zero(data->lead_in_v);
+		if (data->lead_out_v) gsl_vector_set_zero(data->lead_out_v);
+	} else {
+		if (data->acc_m) gsl_matrix_set_zero(data->acc_m);
+		if (data->pre_m) gsl_matrix_set_zero(data->pre_m);
+		if (data->dfd_m) gsl_matrix_set_zero(data->dfd_m);
+	}
+	for (size_t j = 0; j < 2; j++)
+		for (size_t k = 0; k < data->n_lines[j]; k++)
+			data->line[j][k].a = data->line[j][k].b = 0.0;
+}
+
+
+/** Drive every element of the output to park_value and emit it.
+*
+* Writes into the same result object the normal path uses, so the pipeline sees
+* an ordinary correction of the expected size, type and units -- nothing
+* downstream needs to know that this one came from the park rather than from the
+* controller. */
+static int pid_park(struct aylp_device *self, struct aylp_state *state)
+{
+	struct aylp_pid_data *data = self->device_data;
+	if (data->type == AYLP_T_VECTOR) {
+		gsl_vector *s = state->vector;
+		if (data->res_v->size != s->size) {
+			xfree_type(gsl_vector, data->res_v);
+			data->res_v = xcalloc_type(gsl_vector, s->size);
+		}
+		gsl_vector_set_all(data->res_v, data->park_value);
+		state->vector = data->res_v;
+	} else {
+		gsl_matrix *s = state->matrix;
+		if (data->res_m->size1 != s->size1
+				|| data->res_m->size2 != s->size2) {
+			xfree_type(gsl_matrix, data->res_m);
+			data->res_m = xcalloc_type(gsl_matrix,
+				s->size1, s->size2
+			);
+		}
+		gsl_matrix_set_all(data->res_m, data->park_value);
+		state->matrix = data->res_m;
+	}
+	// deliberately no header housekeeping here: pid's type_out is
+	// AYLP_T_UNCHANGED, so writing it into the header would null the
+	// pipeline type and every device after this one would fail on a park.
+	// The normal path leaves the header alone for the same reason.
+	return 0;
+}
+
+
 int pid_proc(struct aylp_device *self, struct aylp_state *state)
 {
 	int err;
@@ -275,6 +344,41 @@ int pid_proc(struct aylp_device *self, struct aylp_state *state)
 	dt += 1E-9 * (tp1.tv_nsec - data->tp.tv_nsec);
 	data->tp = tp1;
 	log_trace("dt = %G s", dt);
+
+	// --- park on a genuinely lost signal --------------------------------
+	// Count consecutive iterations the sensor flagged as carrying no fresh
+	// measurement. A held error is not an error the controller can act on:
+	// the integrator winds at a constant rate on it, which is how a lost
+	// beam becomes a large excursion rather than simply a stalled one.
+	if (data->park_after) {
+		if (LIKELY(!(state->header.status & AYLP_NO_SIGNAL))) {
+			// log before zeroing the counter, so the message can
+			// say how long the outage actually lasted
+			if (UNLIKELY(data->parked)) {
+				log_info("pid: measurement returned after %zu "
+					"iterations parked; resuming control "
+					"from rest", data->no_signal
+				);
+				data->parked = false;
+			}
+			data->no_signal = 0;
+		} else if (++data->no_signal >= data->park_after) {
+			if (!data->parked) {
+				log_warn("pid: no fresh measurement for %zu "
+					"iterations; parking output at %G and "
+					"resetting controller state",
+					data->no_signal, data->park_value
+				);
+				// empty the accumulator and the filters, so the
+				// loop restarts from rest when the signal comes
+				// back rather than dumping a stale integral
+				// into the first good frame
+				pid_reset_state(data);
+				data->parked = true;
+			}
+			return pid_park(self, state);
+		}
+	}
 
 	switch (data->type) {
 	case AYLP_T_VECTOR: {

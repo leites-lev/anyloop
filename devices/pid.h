@@ -27,6 +27,27 @@ struct aylp_pid_line {
 #define AYLP_PID_MAX_LINES 8
 
 struct aylp_pid_data {
+	// param: consecutive iterations carrying AYLP_NO_SIGNAL after which the
+	// output is parked at park_value and the controller's state is reset.
+	// 0 disables parking, which is the behaviour this device has always had.
+	//
+	// Holding the last command is the right answer to a brief dropout -- it
+	// leaves the loop where the beam last was -- but it is the wrong answer
+	// to a beam that is actually gone: the integrator has no error it can
+	// believe, and whatever DC correction it was holding is now arbitrary.
+	// Past some number of frames the honest move is to stop pretending and
+	// go to a known output. Set it well above the length of an ordinary
+	// dropout so it can only fire on a real loss; measured on this rig,
+	// ordinary dropouts run 1-3 frames while real losses run thousands.
+	size_t park_after;
+	// param: the output every element is driven to while parked (default 0,
+	// which is 0 V through a DAC configured with no offset)
+	double park_value;
+	// consecutive no-signal iterations seen so far, and whether the output
+	// is currently parked (so the transitions log once, not every frame)
+	size_t no_signal;
+	bool parked;
+
 	// param type in ["vector", "matrix"]
 	aylp_type type;
 	// units to output

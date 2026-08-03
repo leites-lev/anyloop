@@ -19,6 +19,69 @@ struct aylp_center_of_mass_data {
 	size_t thread_count;
 	// param: subtract this value from each pixel before computing CoM
 	unsigned char threshold;
+	// param (track mode): the brightest pixel in the window must reach this
+	// for the frame to count as containing the beam. 0 disables the test,
+	// which is the pre-2026-08-02 behaviour: any sum above zero was treated
+	// as a beam, so read noise a few counts above `threshold` produced a
+	// centroid of pure noise. Distinct from `threshold`, which only shapes
+	// the weighting -- this decides whether the frame is used at all.
+	unsigned char min_peak;
+	// param (track mode): reject a frame when its dimmest significant row
+	// falls below this fraction of the frame's own typical row, both
+	// measured against a learned reference profile. 0 disables the test.
+	//
+	// This is the gate for a partially exposed beam. A rolling shutter
+	// reading out across a chopped source produces frames in which only some
+	// rows caught the source's on-window, so the beam comes back cut by a
+	// hard horizontal edge. Neither brightness test sees that: the rows that
+	// were lit are at full brightness, so `min_peak` passes, and a fragment
+	// still carries plenty of flux.
+	//
+	// The test asks the question directly -- are some rows lit while others
+	// are not? -- by keeping a reference row profile of what a whole beam
+	// looks like and dividing this frame's profile by it. On a whole beam
+	// every row comes out at the same ratio, whatever that ratio happens to
+	// be, so the frame's overall brightness divides out exactly rather than
+	// approximately: a dimmer frame is uniformly dimmer. On a cut beam the
+	// ratios split in two, near the frame's level on the rows that were lit
+	// and near zero on the rows that were not, and the gap between them is
+	// what this parameter thresholds. Because the reference is the beam's
+	// own measured profile, no assumption about beam shape or size enters,
+	// and a tight spot is handled the same as a broad one.
+	//
+	// Assumes the shutter rolls along rows, which is how the ASI sensors
+	// read out. The centroid of a cut frame is pulled toward the surviving
+	// rows -- a systematic error along that same axis, not noise that
+	// averages out.
+	double ref_cut;
+	// param: frames used to learn the reference before the gate switches on.
+	// The bootstrap takes the row-wise MAXIMUM over these frames rather than
+	// the mean, because the beam may already be chopping while it runs: a
+	// cut only ever removes light, so the largest value each row reaches
+	// over enough frames is that row's uncut value. A mean would learn a
+	// blend of whole and cut beams and set the reference too low.
+	size_t ref_warmup;
+	// param: EMA rate at which accepted frames update the reference
+	// afterwards, so it follows slow drift in power, focus and alignment.
+	// Only accepted frames contribute, which is what keeps cut frames from
+	// pulling the reference down toward themselves.
+	double ref_rate;
+	// param: rows whose reference is below this fraction of the brightest
+	// reference row are ignored. Their ratio is a small number over a small
+	// number, i.e. noise, and including them would swamp the test. It also
+	// keeps the test off the profile's outer skirts, where beam motion moves
+	// a row's flux the most in relative terms.
+	double ref_floor;
+	// learned reference row profile, region_height entries, in window
+	// coordinates -- the window follows the beam, so the beam sits at a
+	// stable place in it and the profile is stationary there
+	double *ref;
+	// this frame's row profile, and scratch for the per-row ratios
+	double *rows;
+	double *rho;
+	// frames folded into the bootstrap so far, and whether it has finished
+	size_t ref_seen;
+	bool ref_ready;
 
 	// param: confine the sum to a single region that follows the previous
 	// center of mass, ignoring everything outside it
@@ -49,6 +112,26 @@ struct aylp_center_of_mass_data {
 	double last_x;
 	// consecutive frames with no signal inside the window
 	size_t lost;
+	// whether the previous frame was judged to hold the beam, so the
+	// lost/reacquired transitions are logged once instead of every frame
+	bool had_beam;
+	// frames seen and frames whose centroid was held (track mode), so fini
+	// can report the reject rate. A gate meant to drop chopped frames trips
+	// by design, and the fraction it drops is the number that decides
+	// whether gating is viable at all: every held frame feeds the loop a
+	// stale error that the integrator keeps acting on, which reads
+	// downstream as added delay.
+	size_t n_frames;
+	size_t n_held;
+	// number of distinct loss episodes, including the ones whose log line
+	// was suppressed by the rate limiter
+	size_t n_episodes;
+	// CLOCK_MONOTONIC time of the last beam-lost/beam-back log line (s).
+	// Those transitions are once-per-episode, which is quiet for a beam that
+	// occasionally drops out and a flood for a chopped one -- at a few
+	// hundred episodes a second the logging alone would cost more than the
+	// centroid. Rate-limited to COM_LOG_INTERVAL.
+	double last_log_t;
 	// array of threads
 	pthread_t *threads;
 	// array of tasks
