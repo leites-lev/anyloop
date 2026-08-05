@@ -25,6 +25,8 @@ project_source_files = [
 	'libaylp/xalloc.c',
 	'libaylp/profile.c',
 	'devices/center_of_mass.c',
+	'devices/wfs_com.c',
+	'devices/fit_com.c',
 	'devices/kdc101.c',
 	'devices/tic_t834.c',
 	'devices/clamp.c',
@@ -67,6 +69,22 @@ parport_dac_range_test = executable('parport_dac_range_test',
 	include_directories: include_directories('.'))
 test('parport_dac_range', parport_dac_range_test)
 
+fit_com_test = executable('fit_com_test',
+	['test/fit_com_test.c', 'devices/fit_com.c', 'libaylp/logging.c',
+		'libaylp/xalloc.c'],
+	install: false,
+	dependencies: [dependency('gsl'), dependency('json-c')],
+	include_directories: [incdir, include_directories('devices')])
+test('fit_com', fit_com_test)
+
+wfs_com_test = executable('wfs_com_test',
+	['test/wfs_com_test.c', 'devices/wfs_com.c', 'libaylp/logging.c',
+		'libaylp/xalloc.c'],
+	install: false,
+	dependencies: [dependency('gsl'), dependency('json-c')],
+	include_directories: [incdir, include_directories('devices')])
+test('wfs_com', wfs_com_test)
+
 shared_library('plugin_example', 'contrib/plugin_example.c',
 	name_prefix: '',
 	install: true,
@@ -86,6 +104,13 @@ executable('dac_square', 'contrib/dac_square.c',
 	install: false,
 	dependencies: [c.find_library('m', required: false)]
 )
+
+executable('test_wfs_com_rolling_shutter',
+	['contrib/test_wfs_com_rolling_shutter.c', 'devices/wfs_com.c',
+		'libaylp/logging.c', 'libaylp/xalloc.c'],
+	install: false,
+	dependencies: [dependency('gsl'), dependency('json-c')],
+	include_directories: [incdir, include_directories('devices')])
 
 asi_sdk_dir = '/home/fsl/ASIStudio/lib'
 asi_lib = c.find_library('ASICamera2', dirs: [asi_sdk_dir], required: false)

@@ -2,6 +2,8 @@
 #define AYLP_DEVICES_DEVICE_H_
 
 #include "devices/center_of_mass.h"
+#include "devices/wfs_com.h"
+#include "devices/fit_com.h"
 #include "devices/kdc101.h"
 #include "devices/tic_t834.h"
 #include "devices/clamp.h"
@@ -31,6 +33,8 @@ static const struct {
 	int (*init_fun)(struct aylp_device *);
 } init_map [] = {
 	{ "anyloop:center_of_mass", center_of_mass_init },
+	{ "anyloop:wfs_com", wfs_com_init },
+	{ "anyloop:fit_com", fit_com_init },
 	{ "anyloop:kdc101", kdc101_init },
 	{ "anyloop:tic_t834", tic_t834_init },
 	{ "anyloop:clamp", clamp_init },
@@ -60,4 +64,3 @@ static const struct {
 int init_device(struct aylp_device *dev);
 
 #endif
-

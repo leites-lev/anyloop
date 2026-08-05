@@ -52,6 +52,13 @@ enum {
 	 * last measurement for continuity while still exposing this validity
 	 * state to downstream safety logic. */
 	AYLP_BEAM_LOST	= 1 << 1,
+	/** This frame's measurement was rejected as distorted (e.g. by rolling-
+	 * shutter shear) rather than lost. Devices may hold the last
+	 * measurement for continuity while still exposing this validity state
+	 * to downstream safety logic. Unlike AYLP_BEAM_LOST, this is not meant
+	 * to drive a device's own reacquire/reset logic: the signal itself is
+	 * still present, only this frame's reading is untrustworthy. */
+	AYLP_FRAME_REJECTED	= 1 << 2,
 	// add more as necessary
 };
 

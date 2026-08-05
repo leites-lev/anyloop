@@ -1956,6 +1956,7 @@ int fsp_proc(struct aylp_device *self, struct aylp_state *state)
 	double now = tp.tv_sec + 1e-9 * tp.tv_nsec;
 	if (UNLIKELY(!data->t0)) data->t0 = now;
 	bool sensor_lost = state->header.status & AYLP_BEAM_LOST;
+	bool sensor_rejected = state->header.status & AYLP_FRAME_REJECTED;
 	if (UNLIKELY(sensor_lost && !data->beam_lost)) {
 		data->beam_lost = true;
 		data->beam_recover_start = 0.0;
@@ -2135,6 +2136,54 @@ int fsp_proc(struct aylp_device *self, struct aylp_state *state)
 			ax->ucmd[slot_older] = 0.0;
 			ax->uhead = (ax->uhead + 1) % ring_len;
 			r->data[j * r->stride] = 0.0;
+			continue;
+		}
+		if (UNLIKELY(sensor_rejected)) {
+			// Upstream deliberately held its last coordinate because this
+			// frame was distorted, not because the beam disappeared. Hold the
+			// actuator command too and advance only the command-delay model;
+			// do not train observers or correct modal state with the duplicated
+			// measurement. Time still advanced, so propagate the autonomous
+			// modal state and pad the broadband history with its slow baseline;
+			// freezing those states would leave every oscillator one frame late.
+			// Advance the Bode-shaped plant model on the delayed command even
+			// though there is no measurement from which to form phi_meas.
+			if (ax->plant_shaped)
+				(void)fsp_biquad(ax->ucmd[slot], ax->plant_b, ax->plant_a,
+					&ax->plant_z1, &ax->plant_z2);
+			for (size_t i = 0; i < ax->n_modes; i++) {
+				double p0 = ax->a1[i] * ax->xhat[2*i]
+					+ ax->a2[i] * ax->xhat[2*i+1];
+				ax->xhat[2*i+1] = ax->xhat[2*i];
+				ax->xhat[2*i] = p0;
+			}
+			if (data->broad_order) {
+				double phi_pad = ax->phi_dc - ax->drift_hat;
+				double phi_bl = phi_pad;
+				if (data->broad_lp) {
+					ax->broad_lpbuf[ax->broad_lphead] = phi_pad;
+					ax->broad_lphead = (ax->broad_lphead + 1)
+						% data->broad_lp;
+					double sum = 0.0;
+					for (size_t i = 0; i < data->broad_lp; i++)
+						sum += ax->broad_lpbuf[i];
+					phi_bl = sum / (double)data->broad_lp;
+				}
+				ax->broad_head = (ax->broad_head + 1)
+					% ax->broad_hist_len;
+				ax->broad_hist[ax->broad_head] = phi_bl;
+				ax->broad_seen++;
+			}
+			double u_held = ax->frac_x1;
+			double a_frac = (1.0 - ax->delay_frac)
+				/ (1.0 + ax->delay_frac);
+			double u_frac = a_frac*u_held + ax->frac_x1
+				- a_frac*ax->frac_y1;
+			ax->frac_x1 = u_held;
+			ax->frac_y1 = u_frac;
+			ax->ucmd[slot_older] = u_frac;
+			ax->uhead = (ax->uhead + 1) % ring_len;
+			r->data[j * r->stride] = u_held;
 			continue;
 		}
 		if (data->broad_order) {
