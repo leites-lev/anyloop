@@ -1,0 +1,39 @@
+{
+	"_comment": {
+		"1": "OPEN-LOOP capture for contrib/com_survey: one minute of raw ROI frames, same camera configuration as steering_par_fsp_wfs_com.json, with NO tracker, NO fsp and NO DAC in the pipeline. Nothing is actuated, so whatever the beam does here is the beam, not a loop.",
+		"2": "Run it with the FSM parked at its normal bias, exactly as contrib/probe_frame.json expects. Let the coarse channels settle (~30 s) before starting, or the drift during settling will show up as beam motion.",
+		"3": "Writes com_survey.aylp: 40-byte header per frame (magic u32, version/status/type/units u8 at 4..7, log_dim.y/x u64 at 8/16, pitch.y/x double at 24/32), then height*width uint8. At 32x32 and fs~3788 one minute is ~227k frames and ~236 MB. Check you have the disk space.",
+		"4": "count = 60 s * 3788 fps. If your achieved fs differs, scale it -- the analyser reads the real frame count from the file and only needs --fs to convert to Hz.",
+		"5": "Then: ./build/com_survey com_survey.aylp --fs 3788   (add --row-time once you have measured it; it does not affect the recommendation)."
+	},
+	"pipeline": [
+		{
+			"uri": "file:/home/fsl/anyloop_levfork/anyloop/build/asi_source.so",
+			"params": {
+				"camera_name": "ASI290MM",
+				"width": 32,
+				"height": 32,
+				"start_x": 1832,
+				"start_y": 706,
+				"exposure": 50,
+				"gain": 100,
+				"bandwidth": 100,
+				"high_speed": 1,
+				"die_on_stall": 0
+			}
+		},
+		{
+			"_comment": "Live view while it captures; decimated so it cannot back-pressure the loop.",
+			"uri": "anyloop:udp_sink",
+			"params": { "ip": "127.0.0.1", "port": "64730", "decimation": 256 }
+		},
+		{
+			"uri": "anyloop:file_sink",
+			"params": { "filename": "com_survey.aylp" }
+		},
+		{
+			"uri": "anyloop:stop_after_count",
+			"params": { "count": 227280 }
+		}
+	]
+}

@@ -105,6 +105,14 @@ executable('dac_square', 'contrib/dac_square.c',
 	dependencies: [c.find_library('m', required: false)]
 )
 
+executable('com_survey',
+	['contrib/com_survey.c', 'devices/fit_com.c', 'devices/wfs_com.c',
+		'libaylp/logging.c', 'libaylp/xalloc.c'],
+	install: false,
+	dependencies: [dependency('gsl'), dependency('json-c'),
+		c.find_library('m', required: false)],
+	include_directories: [incdir, include_directories('devices')])
+
 executable('test_wfs_com_rolling_shutter',
 	['contrib/test_wfs_com_rolling_shutter.c', 'devices/wfs_com.c',
 		'libaylp/logging.c', 'libaylp/xalloc.c'],
