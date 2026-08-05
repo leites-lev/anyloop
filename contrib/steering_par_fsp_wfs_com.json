@@ -1,0 +1,235 @@
+{
+	"_comment": {
+		"1": "WFS matched-filter variant of steering_par_fsp.json for the 32x32 ASI290MM ROI.",
+		"2": "The 3x3 grid has 6x6 px cells and a 2 px search margin: a 22x22 tracked window, leaving 5 px guard on each side of the ROI when centred.",
+		"3": "Rolling shutter is handled by anyloop:fit_com's motion model, not by detect-and-reject. A shear threshold is necessarily a velocity threshold, so it drops frames at the fast part of every oscillation and keeps the turning points -- phase-correlated dropout that leaves the loop open exactly when the beam is moving fastest and biases fsp's identified model. Fitting the slope removes that failure mode rather than tuning it.",
+		"4": "Catastrophic frames are contained, not guessed: a fit whose amplitude collapses or whose sigma hits a bound is rejected, the last output is held, and FSP holds its previous command without learning from the held coordinate. Frames are NOT rejected for shear.",
+		"5": "FSP K/delay are inherited from the 2026-07-31 CoM parport Bodes: the image-normalized scale is unchanged, so small-signal gain and phase carry over. The DC setpoint DOES now match center_of_mass, unlike the wfs_com variant: fit_com reports absolute position, so init_y/init_x only seed the search and no pointing offset is absorbed. Treat K/delay as bring-up values: re-run full-band Bodes with this sensor before unattended closure.",
+		"6": "Safety: verify both feedback signs with a push test. Normal FSP authority is +/-1 V; +/-10 V is available only to transient recovery and is matched by the downstream backstop."
+	},
+	"pipeline": [
+		{
+			"uri": "file:/home/fsl/anyloop_levfork/anyloop/build/asi_source.so",
+			"params": {
+				"camera_name": "ASI290MM",
+				"width": 32,
+				"height": 32,
+				"start_x": 1832,
+				"start_y": 706,
+				"exposure": 50,
+				"gain": 100,
+				"bandwidth": 100,
+				"high_speed": 1,
+				"die_on_stall": 0
+			}
+		},
+		{
+			"uri": "anyloop:udp_sink",
+			"params": {
+				"ip": "127.0.0.1",
+				"port": "64730",
+				"decimation": 64
+			}
+		},
+		{
+			"_comment": "20x20 joint spatio-temporal beam fit centred in the 32x32 ROI. Replaces anyloop:wfs_com: the intra-frame motion is a fitted parameter rather than something detected and rejected, so no frame is ever discarded for moving and the reported position is absolute (no acquisition-time offset absorbed). Measured on the same synthetic sheared scene at 3 px/60 Hz: 0.0043 px RMS with zero bias at 62 us/frame, against wfs_com's 0.6602 px raw / 0.1099 debiased with +0.46 px bias. Output remains normalized [y,x] in [-1,1].",
+			"_tuning": "sigma_init 2.5 and window 20 assume a sigma~2.5 px spot: the window must comfortably hold +/-4 sigma, and sigma_init also sets the local box used to seed sigma at acquisition. MEASURE both on real frames before trusting this (doc/devices/fit_com.md). max_iter 4 and the 20x20 window are what bound worst-case latency to ~62 us against the 264 us period -- raise either and re-check the timing, because latency jitter feeds fsp's fixed-delay model.",
+			"_row_time": "8.25e-6 = 264 us frame period / 32 rows, i.e. ASSUMES readout spans the full period. This is a guess and has not been measured on the ASI290MM. It is safe to be wrong: row_time does not enter the position fit at all, only the reported velocity units and the epoch bookkeeping.",
+			"uri": "anyloop:fit_com",
+			"params": {
+				"window_height": 20,
+				"window_width": 20,
+				"sigma_init": 2.5,
+				"sigma_min": 0.8,
+				"sigma_max": 8.0,
+				"min_amplitude": 20.0,
+				"max_residual": 0.0,
+				"max_iter": 4,
+				"tol": 0.0001,
+				"robust_k": 2.5,
+				"robust_iter": 1,
+				"fit_slope": true,
+				"row_time": 8.25e-06,
+				"init_y": 16,
+				"init_x": 16,
+				"reacquire_after": 10
+			}
+		},
+		{
+			"uri": "anyloop:udp_sink",
+			"params": {
+				"ip": "127.0.0.1",
+				"port": "64731",
+				"decimation": 64
+			}
+		},
+		{
+			"uri": "anyloop:udp_sink",
+			"params": {
+				"ip": "127.0.0.1",
+				"port": "64732"
+			}
+		},
+		{
+			"_delay_warning": "Inherited CoM bring-up estimate: x 2.763 frames, y 2.624 frames at fs~3788. A WFS-specific 5-300 Hz Bode is required before treating these values as measured; never estimate delay from a 10-30 Hz small-signal sweep.",
+			"_K_warning": "Inherited small-signal gains at the same ROI and normalized coordinate convention: Kx=4.05, Ky=3.646. Re-measure if the WFS/CoM response ratio is not unity in a push test or Bode plateau.",
+			"uri": "anyloop:fsp",
+			"params": {
+				"type": "vector",
+				"units": "V",
+				"delay": 2,
+				"delay_frac": 0.76,
+				"fs": 3788,
+				"broad_order": 512,
+				"broad_mu": 0.03,
+				"broad_mu_init": 0.5,
+				"broad_mu_tau": 60.0,
+				"broad_lp": 5,
+				"broad_freeze_closed": false,
+				"wiener_out": "steering_par_wfs_weights.dat",
+				"wiener_trace": "steering_par_wfs_wtrace.dat",
+				"wiener_trace_period": 5.0,
+				"clamp_min": -1.0,
+				"clamp_max": 1.0,
+				"start_delay": 10.0,
+				"ramp": 5.0,
+				"adapt_period": 8.0,
+				"adapt_df_max": 0.5,
+				"adapt_tau": 5.0,
+				"guard_ratio": 4.0,
+				"guard_floor": 0.008,
+				"guard_hold": 0.25,
+				"guard_ramp": 1.0,
+				"guard_tick": 10.0,
+				"trip_error": 0.8,
+				"trip_command": 0.8,
+				"trip_frames": 8,
+				"beam_recover_ramp": 0.5,
+				"transient_sigma": 6.0,
+				"transient_floor": 0.03,
+				"transient_controller": "modal",
+				"transient_modal_q_scale": 100.0,
+				"transient_modal_ab": false,
+				"transient_kp": 0.15,
+				"transient_tau": 5.0,
+				"transient_hold": 0.1,
+				"transient_ramp": 0.25,
+				"transient_clamp": 10.0,
+				"transient_trip_command": 10.0,
+				"transient_max_duration": 0.0,
+				"transient_arm_delay": 450.0,
+				"transient_shadow_mu": 0.01,
+				"transient_shadow_tau": 0.5,
+				"transient_shadow_min_duration": 2.0,
+				"transient_shadow_hold": 1.0,
+				"transient_shadow_ratio": 0.7,
+				"transient_shadow_norm_ratio": 1.0,
+				"transient_log": "steering_par_wfs_transient.csv",
+				"y": {
+					"delay": 2,
+					"delay_frac": 0.62,
+					"K": 3.646,
+					"r": 1.0,
+					"freqs": [
+						5.64,
+						11.3,
+						21.1,
+						29.6,
+						57.5,
+						20.0
+					],
+					"zeta": [
+						0.002,
+						0.002,
+						0.002,
+						0.002,
+						0.003,
+						0.3
+					],
+					"q": [
+						1e-05,
+						1.5e-05,
+						1.5e-05,
+						1e-05,
+						5e-06,
+						1e-05
+					]
+				},
+				"x": {
+					"K": 4.05,
+					"r": 1.0,
+					"freqs": [
+						9.8,
+						12.0,
+						21.7,
+						24.9,
+						57.5,
+						83.3,
+						20.0
+					],
+					"zeta": [
+						0.002,
+						0.002,
+						0.002,
+						0.002,
+						0.003,
+						0.003,
+						0.3
+					],
+					"q": [
+						1e-05,
+						1e-05,
+						2e-05,
+						1.5e-05,
+						5e-06,
+						3e-06,
+						1e-05
+					]
+				}
+			}
+		},
+		{
+			"uri": "anyloop:clamp",
+			"params": {
+				"type": "vector",
+				"min": -10,
+				"max": 10
+			}
+		},
+		{
+			"_comment": "Same zero-bias parport mapping used to measure the inherited plant model: y positive on DACA, x negative on DACB.",
+			"uri": "anyloop:parport_dac",
+			"params": {
+				"pci": "0000:05:00.2",
+				"backend": "mmio",
+				"link": "spi",
+				"channel": [
+					0,
+					1
+				],
+				"index": [
+					0,
+					1
+				],
+				"scale": [
+					1,
+					-1
+				],
+				"offset": [
+					0,
+					0
+				],
+				"range": "+-5",
+				"range_max": "+-10",
+				"verify": false,
+				"skip_unchanged": false,
+				"sync_update": false,
+				"start_delay": [
+					2.0,
+					2.0
+				],
+				"reset_at_init": true
+			}
+		}
+	]
+}

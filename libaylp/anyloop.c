@@ -226,9 +226,9 @@ int main(int argc, char **argv)
 
 	// test the DONE bit, not the whole word: `status ^ AYLP_DONE` was
 	// equivalent only while DONE was the only flag that existed. With any
-	// second flag set (AYLP_NO_SIGNAL), status becomes 0b11, the xor gives
-	// 0b10, and the loop would refuse to exit on a device that had just
-	// asked it to.
+	// second flag set (AYLP_BEAM_LOST, AYLP_NO_SIGNAL, ...), status becomes
+	// 0b11, the xor gives 0b10, and the loop would refuse to exit on a
+	// device that had just asked it to.
 	while (!sigint_received && !(state.header.status & AYLP_DONE)) {
 		for (size_t d=0; !sigint_received && d<conf.n_devices; d++) {
 			struct aylp_device *dev = &conf.devices[d];
@@ -276,4 +276,3 @@ int main(int argc, char **argv)
 	log_info("Exiting now!");
 	return EXIT_SUCCESS;
 }
-

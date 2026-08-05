@@ -48,14 +48,28 @@ typedef uint8_t aylp_status;
 enum {
 	/** Signals that we are done with the loop. */
 	AYLP_DONE	= 1 << 0,
+	/** Sensor has lost the controlled optical signal. Devices may hold the
+	 * last measurement for continuity while still exposing this validity
+	 * state to downstream safety logic. */
+	AYLP_BEAM_LOST	= 1 << 1,
+	/** This frame's measurement was rejected as distorted (e.g. by rolling-
+	 * shutter shear) rather than lost. Devices may hold the last
+	 * measurement for continuity while still exposing this validity state
+	 * to downstream safety logic. Unlike AYLP_BEAM_LOST, this is not meant
+	 * to drive a device's own reacquire/reset logic: the signal itself is
+	 * still present, only this frame's reading is untrustworthy. */
+	AYLP_FRAME_REJECTED	= 1 << 2,
 	/** Set by a sensor when this iteration carries no fresh measurement --
 	* the data in the pipeline is a repeat of the previous iteration's,
 	* held because the sensor did not believe what it saw. Downstream
 	* devices can use this to stop acting on stale data; an integrator that
 	* keeps winding on a held error is the usual way a lost beam turns into
 	* a large excursion. Cleared again as soon as a real measurement
-	* arrives, so it describes THIS iteration, not a latched condition. */
-	AYLP_NO_SIGNAL	= 1 << 1,
+	* arrives, so it describes THIS iteration, not a latched condition.
+	* Distinct from AYLP_BEAM_LOST, which a sensor only raises once it has
+	* held for long enough to give up and re-acquire: every BEAM_LOST frame
+	* is a NO_SIGNAL frame, but the first held frames are NO_SIGNAL only. */
+	AYLP_NO_SIGNAL	= 1 << 3,
 	// add more as necessary
 };
 
@@ -292,4 +306,3 @@ const char *aylp_units_to_string(aylp_units units);
 
 
 #endif	// include guard
-

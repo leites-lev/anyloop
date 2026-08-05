@@ -26,6 +26,8 @@ project_source_files = [
 	'libaylp/xalloc.c',
 	'libaylp/profile.c',
 	'devices/center_of_mass.c',
+	'devices/wfs_com.c',
+	'devices/fit_com.c',
 	'devices/kdc101.c',
 	'devices/tic_t834.c',
 	'devices/clamp.c',
@@ -47,6 +49,7 @@ project_source_files = [
 	'devices/vonkarman_stream.c',
 	'devices/piplate_bridge.c',
 	'devices/parport_dac.c',
+	'devices/parport_dac_range.c',
 	'devices/bode_plot.c',
 	'devices/latency_test.c',
 	'devices/attenuation_test.c'
@@ -93,6 +96,28 @@ test_pid_park = executable('test_pid_park',
 )
 test('pid_park', test_pid_park)
 
+parport_dac_range_test = executable('parport_dac_range_test',
+	['test/parport_dac_range.c', 'devices/parport_dac_range.c'],
+	install: false,
+	include_directories: include_directories('.'))
+test('parport_dac_range', parport_dac_range_test)
+
+fit_com_test = executable('fit_com_test',
+	['test/fit_com_test.c', 'devices/fit_com.c', 'libaylp/logging.c',
+		'libaylp/xalloc.c'],
+	install: false,
+	dependencies: [dependency('gsl'), dependency('json-c')],
+	include_directories: [incdir, include_directories('devices')])
+test('fit_com', fit_com_test)
+
+wfs_com_test = executable('wfs_com_test',
+	['test/wfs_com_test.c', 'devices/wfs_com.c', 'libaylp/logging.c',
+		'libaylp/xalloc.c'],
+	install: false,
+	dependencies: [dependency('gsl'), dependency('json-c')],
+	include_directories: [incdir, include_directories('devices')])
+test('wfs_com', wfs_com_test)
+
 shared_library('plugin_example', 'contrib/plugin_example.c',
 	name_prefix: '',
 	install: true,
@@ -119,6 +144,21 @@ executable('dac_square', 'contrib/dac_square.c',
 executable('parport_pins', 'contrib/parport_pins.c',
 	install: false
 )
+
+executable('com_survey',
+	['contrib/com_survey.c', 'devices/fit_com.c', 'devices/wfs_com.c',
+		'libaylp/logging.c', 'libaylp/xalloc.c'],
+	install: false,
+	dependencies: [dependency('gsl'), dependency('json-c'),
+		c.find_library('m', required: false)],
+	include_directories: [incdir, include_directories('devices')])
+
+executable('test_wfs_com_rolling_shutter',
+	['contrib/test_wfs_com_rolling_shutter.c', 'devices/wfs_com.c',
+		'libaylp/logging.c', 'libaylp/xalloc.c'],
+	install: false,
+	dependencies: [dependency('gsl'), dependency('json-c')],
+	include_directories: [incdir, include_directories('devices')])
 
 asi_sdk_dir = '/home/fsl/ASIStudio/lib'
 asi_lib = c.find_library('ASICamera2', dirs: [asi_sdk_dir], required: false)
@@ -153,4 +193,3 @@ if alsa_dep.found() and fs.exists('contrib/aylp_alsa.c')
 else
 	message('alsa-lib not found; aylp_alsa will not be built')
 endif
-

@@ -6,6 +6,14 @@
 
 #include "anyloop.h"
 
+enum aylp_fsp_transient_controller {
+	AYLP_FSP_TRANSIENT_PROPORTIONAL = 0,
+	AYLP_FSP_TRANSIENT_INTEGRAL,
+	AYLP_FSP_TRANSIENT_PI,
+	AYLP_FSP_TRANSIENT_MODAL,
+	AYLP_FSP_TRANSIENT_HYBRID,
+};
+
 // Adaptive Filtered Smith Predictor / adaptive LQG for tip-tilt beam
 // stabilization. This is a COMPLETE controller: it takes the [y, x] error
 // (center-of-mass output) and emits the [y, x] command, so it REPLACES both
@@ -209,6 +217,12 @@ struct aylp_fsp_axis {
 	// across frames while adapt_solving is set; the previous gain keeps
 	// running until the new one converges.
 	bool adapt_solving;
+	// The normal and event-only Riccati solves share the same workspace and run
+	// serially.  adapt_transient_solving identifies the second phase; modal
+	// event entry stays inhibited until transient_gain_current is restored.
+	bool adapt_transient_solving;
+	bool transient_gain_current;
+	double adapt_q_scale;
 	size_t adapt_it;			// current Riccati iteration
 	double adapt_prev_trace;		// trace of P at the last iteration
 	double adapt_A[AYLP_FSP_MAX_DIM * AYLP_FSP_MAX_DIM];
@@ -246,6 +260,11 @@ struct aylp_fsp_axis {
 	double *broad_hist;
 	double *broad_w;
 	double *broad_w_next;
+	// Event-time shadow learner. The production weights above remain frozen;
+	// these candidates are evaluated prequentially and are promoted only after
+	// sustained held-out improvement with bounded coefficient motion.
+	double *shadow_w;
+	double *shadow_w_next;
 	double *broad_xbuf;
 	// second scratch regressor: the delay+1 predictor's tap window is the
 	// delay predictor's window shifted by one sample (they share broad_
@@ -261,14 +280,43 @@ struct aylp_fsp_axis {
 	// separately as a constant-over-the-horizon component.  This keeps a
 	// large DC/random-walk component from consuming FIR dynamic range.
 	double drift_hat;
-	// Large-innovation recovery path.  The normal predictor is cross-faded
-	// to a bounded delayed proportional servo while transient_active is set;
-	// learning is frozen until the recovery ramp completes.
+	// Large-innovation recovery path. The normal command is cross-faded to a
+	// bounded proportional/modal command while transient_active is set. The
+	// broadband NLMS weights freeze for the event and return cross-fade, leaving
+	// an independent stationary model for release detection, then resume on the
+	// first fully normal frame.
 	double transient_var;
+	double transient_threshold;
 	bool transient_active;
 	bool transient_recovering;
+	bool transient_blocked;	// timeout: wait for quiet before re-arming
 	double transient_t_event;
 	size_t transient_events;
+	// Event-only physical-model observer gain.  It is computed from the same
+	// damped modes as the normal observer, but with increased process noise so
+	// a newly-started ring-down is acquired quickly.
+	double transient_L[AYLP_FSP_MAX_DIM];
+	enum aylp_fsp_transient_controller transient_controller;
+	bool transient_modal;		// selected mode uses the fast modal observer
+	double transient_i;		// event-local integral command contribution (V)
+	double transient_i_prev;	// rollback point for actuator anti-windup
+	double transient_i_step;	// most recent state increment (V)
+	double transient_peak_i;
+	double transient_start;
+	double transient_error_t_last;
+	double transient_peak_error;
+	double transient_peak_command;
+	double transient_error2;
+	size_t transient_frames;
+	bool shadow_active;
+	bool shadow_promoted;
+	bool transient_saturated;
+	double shadow_primary_e2;
+	double shadow_e2;
+	double shadow_advantage_start;
+	double shadow_error_ratio;
+	size_t shadow_frames;
+	size_t shadow_promotions;
 	// First-order Thiran all-pass state for the fractional command delay:
 	// y(k) = a*u(k) + u(k-1) - a*y(k-1).
 	double frac_x1, frac_y1;
@@ -279,6 +327,7 @@ struct aylp_fsp_axis {
 	// magnitude with the learned open-loop magnitude plus trip_error.
 	double trip_center;
 	size_t trip_count;
+	bool trip_warned;
 	// Burst guard (see header comment). Band-pass biquad at this axis's
 	// regeneration frequency fs/(2*(delay+delay_frac)), DF2T state, fast
 	// envelope and slow baseline of the band POWER, and the recovery state
@@ -441,28 +490,67 @@ struct aylp_fsp_data {
 	double drift_tau;
 	double drift_beta;	// derived from drift_tau and fs
 	// Innovation-triggered transient/reacquisition path. transient_sigma <= 0
-	// disables it.  During an event, a stable bounded P servo
-	// u=-(drift_hat+transient_kp*e)/K replaces vibration prediction without
-	// releasing the slow correction, then cross-fades back after
-	// transient_hold quiet seconds over transient_ramp seconds.
+	// disables it.  By default a bounded P servo replaces prediction.  With
+	// transient_modal_q_scale > 0, a high-process-noise copy of the damped-mode
+	// observer estimates and predicts ring-down motion through the plant delay;
+	// transient_kp remains as a small correction for model error.
 	double transient_sigma;
 	double transient_floor;
+	// Output-error band used only for event scoring (not event detection).
+	double transient_settle_error;
 	double transient_kp;
+	double transient_ki;		// integral gain (1/s)
+	double transient_i_leak;	// integrator leakage rate (1/s); 0 = pure
+	double transient_i_limit;	// integral contribution limit (command units)
+	enum aylp_fsp_transient_controller transient_controller;
+	bool transient_controller_set;
+	double transient_modal_q_scale;
+	// Alternate P/modal recovery on successive per-axis events for a same-run
+	// push A/B. Requires transient_modal_q_scale > 0.
+	bool transient_modal_ab;
 	double transient_tau;
 	double transient_beta;	// quiet innovation-variance EWMA weight
 	double transient_hold;
 	double transient_ramp;
-	// Identification is safest under a known zero command. When true, NLMS
-	// weights freeze as soon as the startup hold ends.
+	// Optional wider command envelope used only while transient_active. NAN
+	// means inherit the normal clamp. The separate trip threshold and hard
+	// timeout keep this authority out of the continuously running predictor.
+	double transient_clamp_lo, transient_clamp_hi;
+	double transient_trip_command;
+	double transient_max_duration;
+	// Inhibit event detection until this many seconds after the startup hold.
+	// Baseline variance and the closed-loop predictor continue learning during
+	// this warm-up; only the trigger is gated.
+	double transient_arm_delay;
+	// Optional event-time shadow NLMS. The main FIR stays frozen. A shadow copy
+	// learns conservatively and can replace it only after sustained pre-update
+	// prediction improvement, bounded coefficient drift, no guard suppression,
+	// and no event saturation. <=0 mu disables shadow learning/promotion.
+	double transient_shadow_mu;
+	double transient_shadow_tau;
+	double transient_shadow_min_duration;
+	double transient_shadow_hold;
+	double transient_shadow_ratio;
+	double transient_shadow_norm_ratio;
+	double transient_shadow_beta;
+	size_t shadow_promotions;
+	// Optional one-row-per-event CSV summary for push/ring-down trials.
+	char *transient_log;
+	FILE *transient_log_fp;
+	// Legacy optional mode: when true, NLMS weights freeze as soon as the
+	// startup hold ends. Closed-loop-adaptive configurations set this false.
 	bool broad_freeze_closed;
-	// Latched safety trip. While authority is nonzero, either error magnitude
-	// exceeding the learned open-loop magnitude by trip_error, or an excessive
-	// requested command, for trip_frames consecutive samples opens the loop
-	// (zero command) until process restart.
+	// Non-latching limit diagnostics. While authority is nonzero, either error
+	// magnitude exceeding the learned open-loop magnitude by trip_error, or an
+	// excessive requested command, for trip_frames consecutive samples emits a
+	// warning. The configured clamps remain authoritative. AYLP_BEAM_LOST holds
+	// output at zero until the sensor clears it, then authority ramps back in.
 	double trip_error;
 	double trip_command;
 	size_t trip_frames;
-	bool tripped;
+	bool beam_lost;
+	double beam_recover_ramp;
+	double beam_recover_start;
 	// Burst guard tuning (see header comment). guard_ratio is an AMPLITUDE
 	// ratio: trigger when the band envelope exceeds guard_ratio times the
 	// quiet baseline (or the guard_floor, whichever is larger; floor is in

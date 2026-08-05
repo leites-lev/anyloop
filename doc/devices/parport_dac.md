@@ -1,7 +1,7 @@
 anyloop:parport_dac
 ===================
 
-Types and units: `[T_VECTOR, U_MINMAX] -> [T_UNCHANGED, U_UNCHANGED]`.
+Types and units: `[T_VECTOR, U_MINMAX|U_V] -> [T_UNCHANGED, U_UNCHANGED]`.
 
 Drives a TI DAC81404 (quad 16-bit, high-voltage output) through a PCIe
 parallel-port card — the fast replacement for the `piplate_bridge` /
@@ -518,6 +518,11 @@ Parameters
       contains the voltage and lies inside the `[range, range_max]` window. So
       `range: "0-5"`, `range_max: "0-10"` goes 0-5 → 0-6 → 0-10 as needed;
       0-10 is a ceiling, not a jump.
+    - The selection boundaries have a standalone regression test in
+      `test/parport_dac_range.c`. For an end-to-end hardware check, use
+      `contrib/conf_parport_dac_autorange.json` only with the mirror/FSM input
+      disconnected: its slow ±7 V command deliberately exercises
+      ±5 → ±6 → ±10 and the hysteretic return path.
     - The window also fixes the ladder's **polarity**: `0-10` does not contain
       `-5..+5`, so a unipolar base with a unipolar ceiling never wanders into
       a bipolar range. If a channel does need to go below ground, name a
@@ -551,6 +556,9 @@ Parameters
       0.5–0.75 V of margin, and a nominal 12 V rail at −5 % (11.4 V) **fails**
       the 15 mA case — meter the rails under load rather than trusting the
       label.
+    - Runtime range changes require `link: "spi"`. The Pico sample protocol
+      does not carry DACRANGE commands, so initialization rejects auto-ranging
+      on that link instead of silently sending an invalid frame.
     - The 1.25–1.5 V output headroom/footroom figure is **not** a floor on the
       output: 7.5 conditions it on `−10 mA ≤ load ≤ 10 mA` (1.25 V) or ±15 mA
       (1.5 V). Unloaded — the EC table's own condition — zero code sits within

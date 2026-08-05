@@ -38,11 +38,15 @@ Kulcsár 2006, Petit 2008, Meimon 2010, Correia 2010:
 4. **Optional drift/transient split.** With `drift_tau > 0`, a slow EWMA state
    carries DC/random-walk pointing drift and the modal/FIR predictor sees only
    the remaining vibration. With `transient_sigma > 0`, an unexpectedly large
-   prediction innovation freezes learning and cross-fades from predictive
+   prediction innovation cross-fades from predictive
    cancellation to a bounded proportional recentering servo. After the
    innovation remains quiet for `transient_hold`, the predictor is blended
-   back over `transient_ramp`. This gives bumps a direct feedback path without
-   permanently placing a second controller around the predictive loop.
+   back over `transient_ramp`. With `transient_modal_q_scale > 0`, recovery
+   instead uses a high-gain copy of the configured damped-mode observer to
+   estimate displacement and velocity and predict the released ring-down,
+   retaining a small proportional correction for model error. This gives bumps
+   a direct event path without permanently placing a second controller around
+   the predictive loop.
 
 This is the one in-loop mechanism that beats the delay-limited crossover on the
 **predictable** (modal) part of the disturbance. It does nothing for the
@@ -52,7 +56,10 @@ Adaptation (`adapt_period > 0`): every `adapt_period` s, refresh each mode's
 `q` from its recent estimated energy, `r` from the innovation floor, nudge each
 center frequency toward the locally demodulated line (capped at `adapt_df_max`
 Hz/update, sized to the ~0.5 Hz/run wander), rebuild coefficients, and recompute
-the gain. Set `adapt_period <= 0` for a fixed FSP while first validating.
+both the normal and event-only modal gains. The two Riccati solves are
+amortized serially across frames; modal event entry is briefly inhibited until
+the event gain matches the updated model. Set `adapt_period <= 0` for a fixed
+FSP while first validating.
 
 Parameters
 ----------
@@ -167,16 +174,170 @@ Parameters
   innovation threshold to
   `max(transient_sigma * quiet_innovation_rms, transient_floor)`, in normalized
   error units. `transient_sigma <= 0` disables the path. The quiet variance is
-  learned with time constant `transient_tau` and is not updated during events.
-- `transient_kp`: proportional gain for the fallback command
-  `u = -(drift_hat + transient_kp * error) / K`; it must satisfy
-  `0 < transient_kp < 1`. Preserving `drift_hat` prevents a bump from releasing
-  the existing slow pointing correction. Keeping the feedback gain below one
-  makes the scalar fixed-delay fallback stable while the clamp bounds command.
+  learned with time constant `transient_tau` whenever no event is active.
+- `transient_settle_error`: absolute raw-error band used to score output
+  settling in `transient_log` (default 0.03 normalized). It does not affect the
+  detector or recovery state machine. The event's output settling time is the
+  last crossing of this band, while its innovation-quiet time separately says
+  how long the underlying reconstructed disturbance remained unexpected.
+- `transient_controller`: event recovery law. Supported values are:
+  - `proportional`: `u = -(drift_hat + Kp*error)/K`.
+  - `integral`: `u = -drift_hat/K + I`, a pure event-local integrator.
+  - `pi`: proportional plus the event-local integrator.
+  - `modal`: fast event-only modal Kalman prediction plus proportional
+    correction (the previously implemented modal recovery).
+  - `hybrid`: modal prediction plus proportional and integral correction.
+  The default is `proportional`. For backward compatibility, an unnamed
+  controller with `transient_modal_q_scale > 0` selects `modal`.
+- `transient_kp`: proportional gain used by every mode except `integral`; it
+  must satisfy `0 < transient_kp < 1`. Preserving `drift_hat` in every mode
+  prevents an event from releasing the existing slow pointing correction.
+- `transient_ki`: integral gain in 1/s (default 5). The integral contribution
+  is stored directly in command units and obeys
+  `dI/dt = -transient_ki*error/K - transient_i_leak*I`.
+- `transient_i_leak`: integral leakage rate in 1/s (default 0). Zero gives a
+  mathematically pure integrator; a positive value provides a leaky integrator.
+- `transient_i_limit`: absolute bound on the integral command contribution
+  (default 1 command unit). Integral modes require a positive value. The state
+  resets at event entry/completion, timeout, and beam loss. It stops integrating
+  during the return cross-fade, and conditional-integration anti-windup rolls
+  back any update that would push an already clamped actuator farther into
+  saturation.
+- `transient_modal_q_scale`: enable an event-only physical ring-down observer
+  by multiplying the configured modal process-noise variances by this factor
+  when its Kalman gain is solved (`0` disables, preserving the proportional
+  fallback). The normal modal gain and the full-band predictor are unchanged.
+  During an event, the higher-gain observer estimates each damped AR(2) mode's
+  displacement/velocity state, propagates it through `delay + delay_frac`, and
+  uses
+  `u = -(drift_hat + modal_prediction + transient_kp * error) / K`.
+  Thus a repeatable push-excited sinusoid is anticipated rather than integrated,
+  while the small P term covers motion outside the physical model. Start around
+  10--100 and compare event settling; excessive values make measurement noise
+  look like modal state. There is no separate transient plant calibration:
+  Smith reconstruction, modal prediction, burst-guard placement, and event
+  command scaling all use the same per-axis `K`, `delay`, and `delay_frac` as
+  normal operation. After a new Bode fit, update those fields once. Online
+  modal adaptation refreshes both the normal and event-only Kalman gains.
+- `transient_modal_ab`: when the selected controller is `modal` or `hybrid`,
+  alternate recovery per axis between proportional (odd-numbered events) and
+  the selected controller (even-numbered events). The selected recovery is
+  written to `transient_log`. This preserves the same-run manual-push A/B.
 - `transient_tau`, `transient_hold`, `transient_ramp`: quiet innovation-variance
   time constant, required quiet time after the most recent threshold crossing,
-  and bumpless cross-fade time back to predictive cancellation. NLMS and modal
-  adaptation statistics are frozen throughout the event and return ramp.
+  and bumpless cross-fade time back to predictive cancellation. The broadband
+  NLMS weights freeze from event entry through the return cross-fade and resume
+  on the first fully normal frame, so a push cannot rewrite the stationary
+  predictor or teach the release detector its own event. Slow modal covariance
+  and frequency statistics also remain frozen until recovery completes.
+- `transient_shadow_mu`, `transient_shadow_tau`,
+  `transient_shadow_min_duration`, `transient_shadow_hold`,
+  `transient_shadow_ratio`, `transient_shadow_norm_ratio`: optional escape from
+  a genuinely changed stationary environment while preserving the event-time
+  freeze. At event entry FSP clones both broadband FIR horizons into a private
+  shadow. The production weights remain fixed; the shadow learns with
+  `transient_shadow_mu`, and its pre-update (prequential) squared error is
+  averaged over `transient_shadow_tau`. It may replace the production model
+  only after the event is at least `transient_shadow_min_duration` old, its RMS
+  error remains below `transient_shadow_ratio` times the frozen model for
+  `transient_shadow_hold`, and its coefficient change is no more than
+  `transient_shadow_norm_ratio` times the production norm. Any event command
+  saturation or burst-guard suppression disqualifies the candidate. After
+  promotion, conservative shadow updates are copied into the active model until
+  the ordinary innovation-quiet criterion releases recovery. Thus an impulse
+  ring-down cannot contaminate normal NLMS, while a persistent predictable
+  regime cannot deadlock forever against a frozen obsolete model. Set
+  `transient_shadow_mu <= 0` to disable (the default). Each event CSV row records
+  `shadow_promoted` and its held-out `shadow_error_ratio`.
+- `transient_clamp` (or `transient_clamp_min`/`transient_clamp_max`): optional
+  command envelope used only while an event is active. It must contain the
+  normal `clamp` window. Outside an event, the normal clamp still applies. Any
+  downstream backstop must match this wider envelope or it will silently break
+  FSP's command echo during recovery.
+- `transient_trip_command`: pre-clamp command trip used during an event. It
+  defaults to the normal `trip_command`. Keep it no higher than the actuator's
+  physical limit.
+- `transient_max_duration`: hard event-authority timeout in seconds. If an
+  event remains active longer than this, FSP returns that axis to its normal
+  command envelope and inhibits another event until the innovation becomes
+  quiet. It does not latch zero. Zero disables the wall-clock criterion, so an
+  active event then ends only after innovation remains below the learned model
+  threshold for `transient_hold` plus the `transient_ramp` handoff, or when the
+  upstream sensor reports beam loss. Temporary authority reductions do not
+  count as quiet innovation.
+- `transient_arm_delay`: seconds after the startup hold ends (i.e. after
+  `start_delay`) before event detection is enabled (default 0). During this
+  interval the closed-loop predictor continues learning and the residual-
+  variance EWMA is calibrated continuously; only triggering is inhibited.
+  Exists because a cold (zero-weight) full-band predictor's own convergence
+  transient looks exactly like the event this path is meant to catch: `pe` is
+  large right at close simply because the filter hasn't learned the
+  disturbance yet, and depending on what fed the predictor during the hold,
+  the detector needs a post-close warm-up so the threshold is based on the
+  converged closed-loop residual rather than an artificially quiet hold (e.g.
+  a zeroed input during `attenuation_test`'s open phase). A run with
+  `broad_order=512`,
+  the `broad_mu_init`/`broad_mu_tau` schedule and this rig's disturbance
+  spectrum was verified offline (replaying a recorded open-phase disturbance
+  through the same filter) to reach steady prediction-error character by
+  `t=300 s` after real data starts reaching the predictor; `transient_arm_delay`
+  should be set with margin above that for production scoring. Because NLMS is
+  intentionally frozen during an event, this warm-up must be long enough that
+  a cold predictor cannot false-trigger before it has converged. Note this
+  delay is measured from `start_delay` (the
+  hold), not from process start -- if nothing feeds the predictor real data
+  until close (e.g. `attenuation_test` with `pass_open: false`), those are the
+  same instant anyway.
+- `transient_log`: optional CSV path. One row is flushed after every completed
+  axis-event with its recovery type, start time, output-error settling time,
+  innovation-quiet time, full recovery/handoff time, peak absolute error, event
+  RMS error, peak absolute clamped command, peak absolute integral contribution,
+  and sample count. This is intended for repeatable manual push/ring-down trials;
+  unlike an attenuation PSD, it scores the transient directly.
+
+The full-rate error and applied-command records from
+`contrib/push_event_par_fsp.json` can also validate whether the modal frequencies
+survive a move to a new environment:
+
+```sh
+python3 contrib/analyze_push_events.py push_modal_events.csv \
+  --frequency-test --error-aylp push_modal_error.aylp \
+  --command-aylp push_modal_command.aylp \
+  --config contrib/push_event_par_fsp.json --strict
+```
+
+For every detected push, the analyzer uses the same `K`, integer/fractional
+delay, and optional plant biquad as FSP to reconstruct
+`disturbance = measured_error - K H(z) D(z) applied_command`. It estimates each
+configured line in a fixed post-trigger window, then reports the median and MAD
+across pushes. Frequency is the invariant here: push amplitude, direction and
+duration primarily change modal amplitude and are handled by the per-event
+line-prominence gate. `UNTESTED` means too few pushes visibly excited that mode;
+it is not a pass. A repeatable strong residual line is a failure and a candidate
+mode to add or substitute. Use `--help` to tune window, tolerance, excitation,
+and residual thresholds. Error and command streams must start on the same loop
+frame, as they do in the supplied push pipeline.
+
+For primary modal identification, use the open phase of a completed attenuation
+run instead. The fitter reads the pre-FSP AYLP record and obtains the open-window
+boundaries and sample rate from the run configuration:
+
+```sh
+python3 contrib/fit_fsp_modes.py atten_par_err6.aylp \
+  --config contrib/attenuation_par_fsp.json \
+  --output fitted_fsp_modes.json
+```
+
+It prints per-axis `freqs`, `zeta`, and `q` with `r` normalized to 1 (only the
+`q/r` ratio affects the Kalman gain). Candidate lines are selected by open-loop
+power and prominence; each is fit to a Lorentzian PSD, and its fitted modal
+variance is converted to the AR(2) drive variance expected by FSP using the same
+stationary `Gv` formula as the controller. A `zeta resolution-limited` warning
+means the open record/FFT cannot resolve that line's damping: retain a
+conservative prior or obtain damping from a longer record/released ring-down
+rather than treating the reported lower bound as exact. Review and copy the
+fragment into attenuation, steering and push configs; the tool deliberately
+does not rewrite production configurations automatically.
 
 A conservative first hardware trial (all values remain opt-in unless included):
 
@@ -184,6 +345,7 @@ A conservative first hardware trial (all values remain opt-in unless included):
 "drift_tau":       2.0,
 "transient_sigma": 6.0,
 "transient_floor": 0.03,
+"transient_controller": "proportional",
 "transient_kp":    0.25,
 "transient_tau":   5.0,
 "transient_hold":  0.10,
@@ -195,18 +357,27 @@ it should sit above ordinary single-frame centroid scatter but below the event
 size that needs direct recovery. Count/logged activations should be rare.
 
 - `broad_freeze_closed`: freeze full-band identification when the startup hold
-  ends (default true). This is required for safe feedback operation: identify
-  while command is known to be zero, then apply a fixed observer. Continuous
-  closed-loop NLMS can identify leaked command as disturbance when `K` or the
+  ends (default true, retained as a conservative legacy option). Set false for
+  a continuously adaptive closed-loop observer; the supplied parport steering,
+  attenuation and push configurations all do this and do not depend on fixed
+  open-loop weights. Continuous closed-loop NLMS can identify leaked command as
+  disturbance when `K` or the
   delay model is imperfect and thereby create positive feedback.
-- `trip_error`, `trip_command`, `trip_frames`: latched safety limits. During
+- `trip_error`, `trip_command`, `trip_frames`: non-latching diagnostics. During
   the startup hold FSP learns each axis's ordinary open-loop operating point.
-  After closing, it trips if error magnitude exceeds the learned open-loop
+  After closing, it warns if error magnitude exceeds the learned open-loop
   magnitude by `trip_error`, or if requested (pre-clamp) command exceeds
-  `trip_command`, for `trip_frames` consecutive samples. FSP then commands
-  zero until restart. This magnitude-envelope test permits successful motion
-  from a static offset toward zero without mistaking the offset for runaway.
-  The current configs use 0.05 error units, 0.65 command units, and 8 frames.
+  `trip_command`, for `trip_frames` consecutive samples. The normal or event
+  clamp still contains the command. This magnitude-envelope test permits
+  successful motion from a static offset toward zero without mistaking the
+  offset for runaway. Only the upstream `AYLP_BEAM_LOST` validity flag holds
+  FSP at zero; tracked center-of-mass asserts it after `reacquire_after`
+  consecutive frames without signal and clears it when the beam is found.
+- `beam_recover_ramp`: seconds over which normal authority returns after
+  `AYLP_BEAM_LOST` clears (default 0.5). On loss, dynamic observer, command-ring,
+  and filter state is cleared while learned FIR weights are retained. Stale held
+  centroids are neither predicted nor used for adaptation. Reacquisition then
+  rebuilds live history and ramps from zero without a command step.
 - `guard_ratio`, `guard_floor`, `guard_hold`, `guard_ramp`, `guard_tick`:
   non-latching **burst guard** (default ON: 4 / 0.008 / 0.25 s / 1 s / 10 s;
   `guard_ratio <= 0` disables). Any mismatch between the configured plant
@@ -247,8 +418,8 @@ size that needs direct recovery. Count/logged activations should be rare.
   input history reset so it never predicts or trains across the hole, Smith
   command ring rewritten with the held command — then **blends from the
   held command to the live controller command** over `guard_ramp` s.
-  Learning stays frozen until the blend completes; the safety-trip latch
-  overrides the blend. Works even with the burst detector disabled. Gap
+  Learning stays frozen until the blend completes; an active upstream beam-loss
+  hold overrides the blend. Works even with the burst detector disabled. Gap
   events are counted and logged separately from burst events: **bursts mean
   re-measure `K`; gaps mean the camera stalled** (check the asi_source
   recovery lines).

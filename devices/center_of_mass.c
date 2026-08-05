@@ -704,6 +704,7 @@ int center_of_mass_proc_track(struct aylp_device *self, struct aylp_state *state
 			data->had_beam = true;
 		}
 		data->lost = 0;
+		state->header.status &= (aylp_status)~AYLP_BEAM_LOST;
 	} else {
 		// No beam: hold the last good output rather than emitting a
 		// centroid we do not believe. Reporting the noise centroid would
@@ -746,6 +747,7 @@ int center_of_mass_proc_track(struct aylp_device *self, struct aylp_state *state
 			data->had_beam = false;
 		}
 		if (++data->lost >= data->reacquire_after) {
+			state->header.status |= AYLP_BEAM_LOST;
 			if (data->lost == data->reacquire_after) {
 				log_warn("center_of_mass: no signal in window "
 					"for %zu frames; re-acquiring",
@@ -895,4 +897,3 @@ int center_of_mass_fini_threaded(struct aylp_device *self)
 	xfree(self->device_data);
 	return 0;
 }
-

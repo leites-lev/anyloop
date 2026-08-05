@@ -46,6 +46,8 @@
 
 struct asi_source_data {
 	int camera_id;
+	int opened;
+	int capturing;
 	int width;
 	int height;
 	long buf_size;
@@ -212,11 +214,12 @@ int asi_source_proc(struct aylp_device *self, struct aylp_state *state)
 int asi_source_fini(struct aylp_device *self)
 {
 	struct asi_source_data *data = self->device_data;
+	if (!data) return 0;
 	log_info("asi_source: %ld stream stall(s) recovered by capture "
 		"restart this run", data->stall_recoveries);
-	ASIStopVideoCapture(data->camera_id);
-	ASICloseCamera(data->camera_id);
-	xfree_type(gsl_matrix_uchar, data->matrix);
+	if (data->capturing) ASIStopVideoCapture(data->camera_id);
+	if (data->opened) ASICloseCamera(data->camera_id);
+	if (data->matrix) xfree_type(gsl_matrix_uchar, data->matrix);
 	xfree(data);
 	return 0;
 }
@@ -228,6 +231,7 @@ int asi_source_init(struct aylp_device *self)
 	self->fini = &asi_source_fini;
 	self->device_data = xcalloc(1, sizeof(struct asi_source_data));
 	struct asi_source_data *data = self->device_data;
+	data->camera_id = -1;
 
 	// parameter defaults
 	const char *camera_name = "ASI290MM";
@@ -288,6 +292,11 @@ int asi_source_init(struct aylp_device *self)
 	data->cur_timeout_ms = data->stall_timeout_ms > 0
 		? data->stall_timeout_ms : 500;
 
+	if (width <= 0 || height <= 0) {
+		log_error("width and height must be positive (got %dx%d)",
+			width, height);
+		return -1;
+	}
 	if (width % 8 != 0) {
 		log_error("width must be a multiple of 8 (got %d)", width);
 		return -1;
@@ -301,7 +310,6 @@ int asi_source_init(struct aylp_device *self)
 	}
 	log_info("Found %d ASI camera(s)", n_cams);
 
-	data->camera_id = -1;
 	long sensor_w = 0, sensor_h = 0;
 	for (int i = 0; i < n_cams; i++) {
 		ASI_CAMERA_INFO info;
@@ -325,6 +333,13 @@ int asi_source_init(struct aylp_device *self)
 		start_x = (int)((sensor_w - width)  / 2) & ~7;  // align to 8px
 	if (start_y < 0)
 		start_y = (int)((sensor_h - height) / 2) & ~1;  // align to 2px
+	if (start_x < 0 || start_y < 0
+			|| (long)start_x + width > sensor_w
+			|| (long)start_y + height > sensor_h) {
+		log_error("ROI %dx%d @ (%d,%d) is outside sensor %ldx%ld",
+			width, height, start_x, start_y, sensor_w, sensor_h);
+		return -1;
+	}
 
 	ASI_ERROR_CODE err;
 	err = ASIOpenCamera(data->camera_id);
@@ -332,16 +347,27 @@ int asi_source_init(struct aylp_device *self)
 		log_error("ASIOpenCamera failed (%d)", err);
 		return -1;
 	}
+	data->opened = 1;
 	err = ASIInitCamera(data->camera_id);
 	if (err != ASI_SUCCESS) {
 		log_error("ASIInitCamera failed (%d)", err);
 		return -1;
 	}
 
-	ASISetControlValue(data->camera_id, ASI_BANDWIDTHOVERLOAD, bandwidth, ASI_FALSE);
-	ASISetControlValue(data->camera_id, ASI_GAIN,              gain,      ASI_FALSE);
-	ASISetControlValue(data->camera_id, ASI_EXPOSURE,          exposure,  ASI_FALSE);
-	ASISetControlValue(data->camera_id, ASI_HIGH_SPEED_MODE,   high_speed, ASI_FALSE);
+	err = ASISetControlValue(data->camera_id, ASI_BANDWIDTHOVERLOAD,
+		bandwidth, ASI_FALSE);
+	if (err == ASI_SUCCESS)
+		err = ASISetControlValue(data->camera_id, ASI_GAIN, gain, ASI_FALSE);
+	if (err == ASI_SUCCESS)
+		err = ASISetControlValue(data->camera_id, ASI_EXPOSURE,
+			exposure, ASI_FALSE);
+	if (err == ASI_SUCCESS)
+		err = ASISetControlValue(data->camera_id, ASI_HIGH_SPEED_MODE,
+			high_speed, ASI_FALSE);
+	if (err != ASI_SUCCESS) {
+		log_error("ASISetControlValue failed (%d)", err);
+		return -1;
+	}
 
 	err = ASISetROIFormat(data->camera_id, width, height, 1, ASI_IMG_RAW8);
 	if (err != ASI_SUCCESS) {
@@ -365,12 +391,18 @@ int asi_source_init(struct aylp_device *self)
 		log_error("ASIStartVideoCapture failed (%d)", err);
 		return -1;
 	}
+	data->capturing = 1;
 
 	// allocate the frame buffer (gsl_matrix_uchar is contiguous when tda==size2)
 	data->width    = width;
 	data->height   = height;
 	data->buf_size = (long)height * width;
 	data->matrix   = xmalloc_type(gsl_matrix_uchar, (size_t)height, (size_t)width);
+	if (data->matrix->tda != (size_t)width) {
+		log_error("ASI frame buffer is unexpectedly non-contiguous "
+			"(tda=%zu width=%d)", data->matrix->tda, width);
+		return -1;
+	}
 
 	// start the first latency-diagnostic window
 	clock_gettime(CLOCK_MONOTONIC, &data->diag_t0);

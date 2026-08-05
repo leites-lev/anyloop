@@ -76,7 +76,9 @@ Parameters
     the window is acquired from the brightest pixel of the first frame.
 - `reacquire_after` (integer) (optional)
   - Consecutive frames of zero signal inside the window before re-acquiring from
-    the brightest pixel of the whole image. Defaults to 10.
+    the brightest pixel of the whole image. Defaults to 10. At that point the
+    device also asserts the `AYLP_BEAM_LOST` pipeline-status flag. A valid
+    centroid clears the flag so downstream control can resume.
 - `acquire_seconds` (float) (optional)
   - Run with a wide acquisition window for this long before narrowing to
     `region_height`/`region_width`. Defaults to 0 (no acquisition phase). Also
@@ -147,9 +149,13 @@ Behaviour worth knowing:
   are not by more than `ref_cut` allows, the last valid output is held rather
   than reporting `(0, 0)` — which downstream reads as "perfectly centred",
   not "no signal", and would let an integrator park and then lurch when the beam
-  reappears. After `reacquire_after` such frames the window re-acquires from the
-  brightest pixel of the whole image, so a stranded window can recover. Note that
-  this can lock onto a reflection if the beam is genuinely gone.
+  reappears. Every held frame carries `AYLP_NO_SIGNAL`, which is what `pid`'s
+  `park_after` counts. After `reacquire_after` such frames the window
+  additionally asserts `AYLP_BEAM_LOST` and re-acquires from the brightest pixel
+  of the whole image, so a stranded window can recover. FSP uses that explicit
+  status, rather than a large error or command, to hold output at zero only while
+  the beam remains missing. Note that reacquisition can lock onto a reflection if
+  the beam is genuinely gone.
 - **Why `threshold` alone is not a beam test.** Without `min_peak` the test for
   "is the beam here" is just "is the thresholded sum nonzero", which a dark
   sensor passes trivially whenever its read noise runs a few counts above
@@ -241,4 +247,3 @@ since it describes a beam at the old position.
 Without `track`, the device behaves exactly as before: the region grid starts at
 the top-left of the image and tiles across it, and the output is normalized per
 region.
-
