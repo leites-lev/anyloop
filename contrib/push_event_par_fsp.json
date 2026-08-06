@@ -6,12 +6,12 @@
 		{
 			"uri": "file:/home/fsl/anyloop_levfork/anyloop/build/asi_source.so",
 			"params": {
-				"camera_name": "ASI662MM",
-				"width": 160,
-				"height": 160,
-				"start_x": 596,
-				"start_y": 270,
-				"exposure": 32,
+				"camera_name": "ASI290MM",
+				"width": 64,
+				"height": 64,
+				"start_x": 644,
+				"start_y": 318,
+				"exposure": 400,
 				"gain": 0,
 				"bandwidth": 100,
 				"high_speed": 1,
@@ -41,7 +41,7 @@
 			"params": { "ip": "127.0.0.1", "port": "64732" }
 		},
 		{
-			"_comment": "Raw position history used to inspect each detected ring-down; normalized units times 79.5 = pixels at this 160x160 ROI.",
+			"_comment": "Raw position history used to inspect each detected ring-down; normalized units times 31.5 = pixels at this 160x160 ROI.",
 			"uri": "anyloop:file_sink",
 			"params": { "filename": "push_modal_error.aylp" }
 		},

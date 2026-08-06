@@ -18,14 +18,14 @@
 	},
 	"pipeline": [
 		{
-			"_comment": "CALIBRATE: camera_name matches supervisor.py's STEERING camera (ASI662MM, CAMERA_CONFIGS index 1). width/height default to 256 (must be a multiple of 8) with start_x/start_y auto-centred; set explicit start_x/start_y once the beam's sensor position is known so the ROI tracks it instead of the raw sensor centre. exposure/gain are ASI SDK defaults (1000 us / 100), not tuned for this beam's brightness.",
+			"_comment": "CALIBRATE: camera_name matches supervisor.py's STEERING camera (ASI290MM, CAMERA_CONFIGS index 1 -- CHECK the index still points at this camera). width/height are 64 here (must be a multiple of 8) with start_x/start_y auto-centred, which puts the ROI at the SENSOR centre (968, 548) -- about 300 px from where the other configs place the beam (676, 350); set explicit start_x/start_y once the beam's sensor position is known so the ROI tracks it instead of the raw sensor centre. exposure/gain are ASI SDK defaults (1000 us / 100), not tuned for this beam's brightness.",
 			"uri": "file:/home/fsl/anyloop_levfork/anyloop/build/asi_source.so",
 			"params": {
-				"camera_name": "ASI662MM",
-				"width": 256,
-				"height": 256,
-				"exposure": 1000,
-				"gain": 100,
+				"camera_name": "ASI290MM",
+				"width": 64,
+				"height": 64,
+				"exposure": 400,
+				"gain": 0,
 				"bandwidth": 80,
 				"high_speed": 1,
 				"die_on_stall": 1
@@ -44,8 +44,9 @@
 			"_comment": "Whole-frame CoM, normalised to [-1, 1]. CALIBRATE threshold against real background/sensor noise (5 is a placeholder). region_height/width must match the camera's width/height above.",
 			"uri": "anyloop:center_of_mass",
 			"params": {
-				"region_height": 256,
-				"region_width": 256,
+				"_size_clamp": "64x64, matching the camera width/height above as this device requires (whole-frame CoM). Follows the ROI automatically only if you keep the two in step -- change one and change this.",
+				"region_height": 64,
+				"region_width": 64,
 				"threshold": 5,
 				"track": false
 			}

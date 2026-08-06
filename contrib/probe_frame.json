@@ -9,8 +9,8 @@
 		"7": "  (parse: 40-byte header per frame -- magic u32, 4x u8, log_dim y/x u64 at offset 8 -- then y*x uint8s)",
 		"8": "start_x = round(beam_x) - 28, start_y = round(beam_y) - 16.",
 		"9": "",
-		"10": "camera_name/width/height are the ASI662MM's full sensor (1920x1080),",
-		"11": "updated 2026-08-02 from the ASI290MM's 1936x1096. When run through",
+		"10": "camera_name/width/height are the ASI290MM's full sensor (1936x1096),",
+		"11": "restored 2026-08-06 from the ASI662MM's 1920x1080. When run through",
 		"12": "contrib/find_roi.py these three are OVERRIDDEN: find_roi takes the",
 		"13": "camera from steering_par_fsp.json and reads the full-sensor size off",
 		"14": "the camera itself, so they only matter when this config is run by hand."
@@ -19,13 +19,13 @@
 		{
 			"uri": "file:/home/fsl/anyloop_levfork/anyloop/build/asi_source.so",
 			"params": {
-				"camera_name": "ASI662MM",
-				"width": 1920,
-				"height": 1080,
+				"camera_name": "ASI290MM",
+				"width": 1936,
+				"height": 1096,
 				"start_x": 0,
 				"start_y": 0,
-				"exposure": 200,
-				"gain": 100,
+				"exposure": 400,
+				"gain": 0,
 				"bandwidth": 100,
 				"high_speed": 1
 			}
