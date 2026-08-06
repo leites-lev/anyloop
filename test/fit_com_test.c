@@ -11,6 +11,7 @@
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 #include <gsl/gsl_matrix.h>
 #include <json-c/json.h>
 
@@ -46,12 +47,18 @@ static void render(gsl_matrix_uchar *img, double y0, double x0,
 	}
 }
 
+// These are convergence tests, so they turn the latency guard off (max_us 0)
+// and let the solver iterate: what they check is that the model, the jacobian
+// and the robust weighting are right, which is a different question from how
+// much of that fits in a loop period. The guard's own behaviour -- and the
+// price it charges on a scene that needs many iterations -- is checked
+// separately, in test_latency below.
 static json_object *cfg(const char *extra)
 {
 	char buf[1024];
 	snprintf(buf, sizeof buf, "{\"sigma_init\":2.5,\"sigma_min\":0.5,"
 		"\"sigma_max\":10.0,\"max_iter\":30,\"min_amplitude\":5.0,"
-		"\"reacquire_after\":5%s%s}",
+		"\"max_us\":0,\"reacquire_after\":5%s%s}",
 		extra && *extra ? "," : "", extra ? extra : "");
 	json_object *p = json_tokener_parse(buf);
 	if (!p) { printf("FAIL: bad test json: %s\n", buf); failures++; }
@@ -348,6 +355,84 @@ static void test_no_beam(void)
 	gsl_matrix_uchar_free(img);
 }
 
+// ---- 7. the latency guard actually bounds latency ----------------------
+//
+// The device exists to fit inside a loop period, so the bound is a behaviour to
+// test rather than a hope. What a specific microsecond count would test is the
+// machine, so this runs the same hungry scene twice -- guard off, guard on --
+// and checks that the guard is what ends the fit: fewer iterations, less time,
+// and never all of max_iter. That holds whether or not the wide kernels were
+// selected, which a threshold in microseconds would not.
+static void run_big(double max_us, double *mean_us, size_t *last_iter,
+	size_t *capped
+) {
+	const size_t BIG = 248;
+	gsl_matrix_uchar *img = gsl_matrix_uchar_alloc(BIG, BIG);
+	// A stray reflection is the case that genuinely wants many iterations,
+	// so it is the case that shows what the guard costs and buys.
+	render(img, 124.0, 124.0, 0.0, 0.0, 2.5, 200.0, 5.0);
+	for (size_t r = 0; r < BIG; r++)
+		for (size_t c = 0; c < BIG; c++) {
+			double dy = (double)r-124.0, dx = (double)c-131.0;
+			double v = img->data[r*img->tda+c]
+				+ 170.0*exp(-(dy*dy+dx*dx)/(2*2.0*2.0));
+			img->data[r*img->tda+c] = (unsigned char)(v > 255 ? 255 : v);
+		}
+	char buf[256];
+	snprintf(buf, sizeof buf, "{\"sigma_init\":2.5,\"sigma_max\":10.0,"
+		"\"max_iter\":50,\"max_us\":%g}", max_us);
+	json_object *p = json_tokener_parse(buf);
+	struct aylp_device self = {0};
+	self.params = p;
+	if (fit_com_init(&self)) { CHECK(0, "init failed"); return; }
+	struct aylp_fit_com_data *d = self.device_data;
+	struct aylp_state st = {0};
+
+	double tot = 0.0;
+	size_t n = 120, warm = 4, hit = 0;
+	for (size_t f = 0; f < n; f++) {
+		st.matrix_uchar = img;
+		st.header.status = 0;
+		struct timespec a, b;
+		clock_gettime(CLOCK_MONOTONIC, &a);
+		fit_com_proc(&self, &st);
+		clock_gettime(CLOCK_MONOTONIC, &b);
+		if (f < warm) continue;	// acquisition is not the steady state
+		tot += (double)(b.tv_sec-a.tv_sec)*1e6
+			+ (double)(b.tv_nsec-a.tv_nsec)*1e-3;
+		if (d->budget_hit) hit++;
+	}
+	*mean_us = tot/(double)(n-warm);
+	*last_iter = d->n_iter_last;
+	*capped = hit;
+	fit_com_fini(&self);
+	json_object_put(p);
+	gsl_matrix_uchar_free(img);
+}
+
+static void test_latency(void)
+{
+	printf("\n=== latency guard bounds a full-frame fit ===\n");
+	double free_us, cap_us;
+	size_t free_it, cap_it, free_hit, cap_hit;
+	run_big(0.0, &free_us, &free_it, &free_hit);
+	run_big(10.0, &cap_us, &cap_it, &cap_hit);
+	printf("248x248 whole frame, stray reflection, max_iter 50:\n");
+	printf("  guard off: %6.2f us/frame, %zu iterations\n", free_us, free_it);
+	printf("  guard 10us: %6.2f us/frame, %zu iterations, stopped %zu frames\n",
+		cap_us, cap_it, cap_hit);
+	CHECK(free_it < 50, "even unguarded the solver must converge before "
+		"max_iter on this scene (used %zu)", free_it);
+	CHECK(free_hit == 0, "max_us 0 must not stop anything (%zu frames)",
+		free_hit);
+	CHECK(cap_it <= free_it, "the guard must not make the solver iterate "
+		"more (%zu vs %zu)", cap_it, free_it);
+	CHECK(cap_hit > 0, "the guard must actually stop this scene");
+	CHECK(cap_us <= free_us, "the guard must not make a frame slower "
+		"(%.2f vs %.2f us)", cap_us, free_us);
+}
+
+
 int main(void)
 {
 	test_jacobian();
@@ -356,6 +441,7 @@ int main(void)
 	test_static();
 	test_stray();
 	test_no_beam();
+	test_latency();
 	if (failures) {
 		printf("\n%d CHECK(S) FAILED\n", failures);
 		return 1;

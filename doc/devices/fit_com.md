@@ -52,8 +52,13 @@ Measured against `wfs_com` on the same synthetic sheared scene (3 px @ 60 Hz,
 
 | | raw RMS | debiased RMS | bias | us/frame |
 |---|---|---|---|---|
-| `fit_com` | 0.0043 px | 0.0043 px | (-0.000, -0.000) | 62 |
+| `fit_com` | 0.0043 px | 0.0043 px | (-0.000, -0.000) | 7.7 |
 | `wfs_com` | 0.6602 px | 0.1099 px | (+0.456, +0.465) | 13 |
+
+The accuracy columns are from the original survey. `fit_com`'s timing was 62
+us/frame when that survey was run and is re-stated here for the current
+implementation, measured as described under *Performance*; `wfs_com`'s is
+unchanged code and unchanged number.
 
 The bias column is the second structural difference. `wfs_com` measures
 displacement relative to a reference captured at acquisition, so whatever
@@ -97,20 +102,92 @@ with it.
 Performance
 -----------
 
-The inner loop evaluates a gaussian per pixel, which would be a transcendental
-per pixel per pass. Since `exp(-(d+1)²/2s²) = exp(-d²/2s²)·exp(-(2d+1)/2s²)`
-and the second factor itself advances by a constant ratio, a gaussian sampled
-on a unit grid costs two multiplies per pixel instead. The recurrence walks
-*outward* from the sample nearest the centre so every ratio stays ≤ 1 and
-nothing can overflow, which a left-to-right sweep would do for a narrow sigma.
-Trial steps write residuals to a spare buffer and swap on acceptance rather
-than re-walking the window.
+At 248x248, whole frame, on a Coffee Lake i9 (measured over a ring of
+pre-rendered frames large enough to fall out of last-level cache, which is what
+the device actually sees -- a frame just DMAed in by the camera, cold, while its
+own scratch stays warm):
 
-Together with a bounded iteration count these took the 32x32 case from 1463
-us/frame — over five times the 264 us budget at fs 3788 — to 62 us. **Set
-`max_iter` and a `window_*` deliberately**: they are the two knobs that bound
-worst-case latency, and jitter in measurement latency feeds straight into
-`fsp`'s fixed-delay model.
+| | p50 | p90 | position rms |
+|---|---|---|---|
+| before | 7401 us | 7819 us | 0.0216 px |
+| now | 6.3 us | 7.2 us | 0.0212 px |
+
+Same answer, about 1200x less time. Four things get it there.
+
+**The solver iterates on a core box, not on the window.** Past a few sigma the
+model is flat to well below one count, so those pixels say nothing about
+position, width or amplitude -- only about the background. And there the model
+*is* a constant, so `sum((bg - I)^2)` over them is `n*bg^2 - 2*bg*sum(I) +
+sum(I^2)`: three numbers, gathered once per frame, that stand in for every one
+of those pixels at every iteration, exactly. This is what decouples cost from
+sensor size -- a 248x248 frame and a 32x32 one now do the same solver work --
+and it is the single biggest factor. The box is re-planned every frame from the
+warm-started sigma and slopes, including the widening a sheared beam needs, so
+it always contains the beam.
+
+**Those three background numbers are sampled, not swept.** A background taken
+from a few thousand pixels is good to a twentieth of a count, finer than the
+quantisation it is estimated from. Sweeping all 61504 instead cost several
+microseconds of memory traffic on a cold frame -- most of the budget, spent
+refining a number that was already exact enough. The sampled rows are taken in
+a few contiguous bands rather than every d-th row: same bytes, but a band is a
+sequential run the prefetcher will follow where a 2 kB stride is not.
+
+**The frame is prefetched.** Everything the device will read is known before any
+of it is needed, so it is all asked for at once and the misses overlap each
+other instead of each stalling the loop that wants it.
+
+**The kernels are vectorised, and the normal equations are built as a Gram
+matrix.** The gaussian is sampled by recurrence in both axes -- the centre moves
+linearly with row index, so `dy` and each row's first `dx` advance by a
+constant, and the whole 2D core costs nine `exp()` calls per pass instead of one
+per pixel. The jacobian pass is the expensive one, and the obvious way to write
+it wants 36 vector accumulators live against sixteen registers; every one spills,
+and each multiply-add becomes a load, a multiply, an add and a store. Instead,
+each row of the design matrix and its residual are scaled by `sqrt(w)` -- which
+a Tukey weight already has, being a square by construction -- and then `JtJ`,
+`Jtr` and the cost are all just the upper triangle of the Gram matrix of
+`[J | r]`, accumulated one column at a time with its accumulators in registers.
+That alone was 1.8x.
+
+The wide kernels are selected at load time by an ifunc, so the binary still runs
+where AVX2 and FMA are absent -- about 2.5x slower there, which the latency
+guard below then bounds instead.
+
+Bounding the latency
+--------------------
+
+`max_us` (default 10) is a hard cap on the whole call. Before each iteration the
+solver predicts the next one from the last, with margin, and stops if it would
+overrun; `budget_hit` in the device data records that it did.
+
+**This trades convergence for punctuality, and on a hard scene the trade is
+real.** Measured on a stray reflection 7 px from the beam -- the case that most
+wants iterations -- the robust weighting needs about four LM iterations to
+redescend it and nine to settle:
+
+| iterations | centre error |
+|---|---|
+| 3 | 2.34 px |
+| 4 | 0.39 px |
+| 6 | 0.28 px |
+| 9 | 0.27 px |
+
+At roughly 2 us an iteration those nine do not fit in 10 us, so with the guard
+on that scene lands nearer 3 iterations than 9. On an ordinary scene it costs
+nothing -- the warm-started fit converges in two iterations and the guard never
+fires. Set `max_us` to 0 to let the solver run to `max_iter` instead, which is
+the right choice if a late measurement is cheaper for you than a less converged
+one. It is the wrong choice for a fixed-delay model downstream, which is why the
+default is the cap.
+
+One invariant is not negotiable to the guard: **a fit that has never been
+reweighted has not converged**, it has converged to the unweighted problem. The
+solver will not declare convergence before the robust weighting has run at
+least once, whatever the cost improvement says. Without that it could stop at
+the first iteration and never reweight at all -- the cost is dominated by
+background pixels the fit cannot improve, so the relative improvement is tiny
+however far the centre still has to move.
 
 What this does **not** do
 --------------------------
@@ -127,8 +204,13 @@ What this does **not** do
 - **Survive two comparable blobs in the window.** Robust weighting has a
   breakdown point. The defence is the window — keep it tight enough to exclude
   known stray reflections rather than relying on the weighting.
-- **Guarantee a fixed iteration count.** LM is iterative. `max_iter` bounds it,
-  but the cost genuinely varies frame to frame.
+- **Guarantee a fixed iteration count.** LM is iterative. `max_iter` and
+  `max_us` bound it, but the count genuinely varies frame to frame -- what is
+  bounded is the time, not the number of steps.
+- **Meet 10 us without AVX2 and FMA.** The figures above are with the wide
+  kernels; the baseline path an older CPU takes is about 2.5x slower, and there
+  `max_us` will be cutting the solver off at one or two iterations rather than
+  bounding something that already fits.
 - **Resolve shear finer than the model.** The motion model is linear in row
   index — constant velocity within one readout. Genuinely curved intra-frame
   motion is not captured, and neither is a bottom-up or column-wise rolling
@@ -151,11 +233,41 @@ Parameters
 - `max_residual` (default 0, disabled): rms residual in counts above which the
   frame is rejected. Set it from the residual you actually measure, plus
   headroom, or leave it off.
-- `max_iter` (default 10): LM iteration cap. Bounds worst-case latency.
-- `tol` (default 1e-4): relative cost improvement at which to stop.
+- `max_iter` (default 10): LM iteration cap.
+- `max_us` (default 10): latency cap for the whole call, in microseconds. 0
+  disables it and leaves `max_iter` as the only bound. See *Bounding the
+  latency* above for what it costs on a scene that wants more iterations.
+- `tol` (default 1e-4): relative cost improvement at which to stop. Note this is
+  relative to the *whole window's* cost, which on a large frame is dominated by
+  background pixels the fit cannot improve, so it fires earlier than its face
+  value suggests.
+- `fit_radius` (default 3.5): half-width, in sigmas, of the box the solver
+  actually iterates on. Everything outside it is treated as flat background,
+  exactly (see *Performance*). At 3.5 sigma the truncated model is 0.4 counts
+  for a 200-count beam -- below the quantisation. Cost scales as its square, so
+  this is the knob to turn if you need latency and can afford a coarser tail;
+  measured position rms was unchanged from 2.5 to 4.0 sigma on a clean beam.
+- `max_core` (default 64): hard cap on either side of that box, so a runaway
+  sigma cannot buy an unbounded pass. A beam wider than about 9 sigma-pixels is
+  truncated by this rather than by `fit_radius`.
+- `tail_rows` (default 32): how many window rows the background sample is taken
+  from. Only affects the precision of `bg` and of the reported rms, both of
+  which are far finer than needed at the default; lower it if the frame is very
+  large and you want the gather cheaper still.
 - `robust_k` (default 2.5): Tukey cutoff in residual sigmas. 0 disables
   reweighting. Smaller rejects more aggressively.
-- `robust_iter` (default 1): plain iterations before reweighting begins.
+- `robust_iter` (default 1): plain iterations before reweighting begins. The
+  weighting needs residuals from a model that is already close, or a
+  redescending weight rejects the beam rather than the artifact. Setting it to 0
+  reweights straight from the warm-started residuals, which on a clean synthetic
+  stray rejects it in one iteration rather than four -- but those residuals also
+  carry the frame's noise, and cutting on them before the fit has seated
+  down-weights one flank of the beam more than the other: measured over a
+  moving, noisy scene it cost a factor of five in position rms. Leave it at 1.
+  Regardless of the setting, the first iteration is forced to run unweighted on
+  the frame that just acquired, and on any frame whose opening residual says the
+  previous solution no longer describes it -- in both cases there is no warm
+  start to trust.
 - `fit_slope` (default true): fit the intra-frame motion. False freezes both
   slopes at zero, reducing this to a static 5-parameter beam fit.
 - `row_time` (default 0): seconds per image row of readout. **The position fit

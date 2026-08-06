@@ -4,15 +4,16 @@
 #include <stdbool.h>
 #include "anyloop.h"
 
-// Number of model parameters: y0, x0, slope_y, slope_x, sigma, amplitude,
-// background. Fixed, so the normal equations live on the stack.
-#define AYLP_FIT_COM_NP 7
+// Number of model parameters: y0, x0, slope_y, slope_x, sigma_y, sigma_x,
+// amplitude, background. Fixed, so the normal equations live on the stack.
+#define AYLP_FIT_COM_NP 8
 enum {
 	AYLP_FIT_P_Y0 = 0,
 	AYLP_FIT_P_X0,
 	AYLP_FIT_P_SY,		// px of y motion per image row of readout
 	AYLP_FIT_P_SX,		// px of x motion per image row of readout
-	AYLP_FIT_P_SIGMA,
+	AYLP_FIT_P_SIGMA_Y,	// beam width along the row axis
+	AYLP_FIT_P_SIGMA_X,	// beam width along the column axis
 	AYLP_FIT_P_AMP,
 	AYLP_FIT_P_BG,
 };
@@ -51,9 +52,35 @@ struct aylp_fit_com_data {
 	size_t win_y, win_x;		// window centre, image coords
 	long init_y, init_x;		// <0 => acquire from the brightest pixel
 
+	// --- core box: the part of the window the solver actually iterates on
+	// Past a few sigma the model is flat to well below one count, so those
+	// pixels say nothing about position, width or amplitude -- only about
+	// the background, and that contribution is summable in closed form
+	// (tail_* below). Iterating on the core instead of the window is what
+	// decouples per-frame cost from sensor size: a 248x248 frame and a
+	// 32x32 one do the same solver work. Re-planned every frame from the
+	// warm-started sigma and slopes, so it always contains the beam.
+	size_t core_y, core_x;		// origin, image coords
+	size_t core_h, core_w;		// extent
+	size_t core_stride;		// core_w padded up to a vector width
+	size_t core_cap;		// allocated doubles per buffer
+	size_t core_cap_stride;		// stride the scratch was sized for
+	double fit_radius;		// core half-width in sigmas
+	size_t max_core;		// hard cap on either core dimension
+
+	// Window minus core, which enters the fit only through bg: with the
+	// model flat there, sum((bg-I)^2) = n*bg^2 - 2*bg*sum(I) + sum(I^2),
+	// so three numbers gathered once per frame stand in for every one of
+	// those pixels at every iteration. Sampled over tail_rows rows and
+	// scaled, so the gather costs the same on a 248x248 frame as on a
+	// 32x32 one.
+	double tail_n, tail_s, tail_s2;
+	size_t tail_rows;
+
 	// --- solver tuning ---
 	size_t max_iter;
 	double tol;			// relative cost improvement to stop at
+	double max_us;			// latency guard; 0 = bounded by max_iter
 	double lambda;			// carried between frames as a warm start
 	double robust_k;		// Tukey biweight cutoff in residual
 					// sigmas; 0 = no reweighting
@@ -82,13 +109,26 @@ struct aylp_fit_com_data {
 	double last_y, last_x;
 	double last_rms;		// residual rms of the last accepted fit
 	size_t n_iter_last;
+	bool budget_hit;		// max_us cut the last frame short
 
-	// --- scratch, allocated at init ---
-	double *weights;		// per-pixel robust weights, win_h*win_w
-	double *resid;			// per-pixel residual, win_h*win_w
+	// --- scratch, core-sized, 32-byte aligned, row stride core_stride ---
+	// The pad columns beyond core_w carry pixel 0 and weight 0 so the
+	// kernels can run whole vectors off the end of a row without a tail
+	// loop and without contributing anything.
+	double *pix;			// core pixels as doubles, gathered once
+	// The ROOT of each robust weight, not the weight. A weighted
+	// least-squares problem is the unweighted one on rows scaled by
+	// sqrt(w), which is what lets eval_jac build the normal equations as a
+	// plain Gram matrix; and the Tukey weight is a square by construction,
+	// so its root costs nothing to keep instead.
+	double *weights;
+	double *resid;			// per-pixel residual, core_h*core_stride
 	// spare residual buffer: a trial step writes here and, if accepted,
-	// swaps rather than recomputing what it already walked the window for
+	// swaps rather than recomputing what it already walked the core for
 	double *resid_alt;
+	// whitened design matrix for one block of core rows, NCOL*JAC_BLOCK
+	// rows' worth; see eval_jac
+	double *scratch;
 
 	gsl_vector *com;		// output [y, x]
 };
