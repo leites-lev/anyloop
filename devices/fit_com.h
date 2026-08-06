@@ -4,16 +4,22 @@
 #include <stdbool.h>
 #include "anyloop.h"
 
-// Number of model parameters: y0, x0, slope_y, slope_x, sigma_y, sigma_x,
-// amplitude, background. Fixed, so the normal equations live on the stack.
-#define AYLP_FIT_COM_NP 8
+// Number of model parameters: y0, x0, slope_y, slope_x, sigma, amplitude,
+// background. Fixed, so the normal equations live on the stack.
+//
+// The beam is modelled as CIRCULAR: one sigma, shared by both axes. Splitting
+// it into sigma_y/sigma_x means a real elliptical fit -- separate decay
+// constants through the rowwalk recurrences and a second sigma column in the
+// Jacobian -- not just two enumerators. NP also sizes NGRAM, JtJ and the
+// Cholesky, so bumping it alone widens the normal equations by a parameter
+// nothing fits.
+#define AYLP_FIT_COM_NP 7
 enum {
 	AYLP_FIT_P_Y0 = 0,
 	AYLP_FIT_P_X0,
 	AYLP_FIT_P_SY,		// px of y motion per image row of readout
 	AYLP_FIT_P_SX,		// px of x motion per image row of readout
-	AYLP_FIT_P_SIGMA_Y,	// beam width along the row axis
-	AYLP_FIT_P_SIGMA_X,	// beam width along the column axis
+	AYLP_FIT_P_SIGMA,
 	AYLP_FIT_P_AMP,
 	AYLP_FIT_P_BG,
 };
