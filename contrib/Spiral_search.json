@@ -1,0 +1,98 @@
+{
+	"_comment": {
+		"1": "Real steering pipeline for fsl-supervisor. Open-loop actuation:",
+		"2": "camera -> raw-frame sink (BRIGHTNESS_PORT) -> CoM -> telemetry sink",
+		"3": "(TELEMETRY_PORT) -> setpoint source (COMMAND_PORT) -> clamp -> SPI DAC.",
+		"4": "The setpoint source OVERWRITES the pipeline state with the last UDP",
+		"5": "command (see devices/udp_source.c), which is why it sits AFTER the",
+		"6": "telemetry sink -- the sink must tap the real measured CoM before it",
+		"7": "gets clobbered by the commanded setpoint. The raw-frame sink is used",
+		"8": "by supervisor.py's spiral search to hill-climb on total frame",
+		"9": "brightness (same tap pattern camera_view.py already uses for the",
+		"10": "MJPEG viewers -- a sink only observes, it does not alter the frame",
+		"11": "that reaches center_of_mass downstream).",
+		"12": "Plumbing (ports, ordering) verified 2026-08-06 against a pure-builtin",
+		"13": "stand-in pipeline run on the anyloop binary. camera ROI/exposure/gain",
+		"14": "and DAC channel/scale/offset/range below are UNVERIFIED placeholders --",
+		"15": "calibrate against the real optics/amplifier before running at power."
+	},
+	"pipeline": [
+		{
+			"_comment": "CALIBRATE: camera_name matches supervisor.py's STEERING camera (ASI662MM, CAMERA_CONFIGS index 1). width/height default to 256 (must be a multiple of 8) with start_x/start_y auto-centred; set explicit start_x/start_y once the beam's sensor position is known so the ROI tracks it instead of the raw sensor centre. exposure/gain are ASI SDK defaults (1000 us / 100), not tuned for this beam's brightness.",
+			"uri": "file:/home/fsl/anyloop_levfork/anyloop/build/asi_source.so",
+			"params": {
+				"camera_name": "ASI662MM",
+				"width": 256,
+				"height": 256,
+				"exposure": 1000,
+				"gain": 100,
+				"bandwidth": 80,
+				"high_speed": 1,
+				"die_on_stall": 1
+			}
+		},
+		{
+			"_comment": "Raw frame tap for supervisor.py's brightness-hill-climb spiral search (BRIGHTNESS_PORT). A sink only observes/forwards -- center_of_mass below still gets the unmodified frame.",
+			"uri": "anyloop:udp_sink",
+			"params": {
+				"ip": "127.0.0.1",
+				"port": "64733",
+				"decimation": 1
+			}
+		},
+		{
+			"_comment": "Whole-frame CoM, normalised to [-1, 1]. CALIBRATE threshold against real background/sensor noise (5 is a placeholder). region_height/width must match the camera's width/height above.",
+			"uri": "anyloop:center_of_mass",
+			"params": {
+				"region_height": 256,
+				"region_width": 256,
+				"threshold": 5,
+				"track": false
+			}
+		},
+		{
+			"_comment": "CoM telemetry -> supervisor.py TelemetryReceiver (TELEMETRY_PORT). Must precede the udp_source below.",
+			"uri": "anyloop:udp_sink",
+			"params": {
+				"ip": "127.0.0.1",
+				"port": "64731",
+				"decimation": 1
+			}
+		},
+		{
+			"_comment": "Setpoint / spiral-search commands from supervisor.py CommandSender (COMMAND_PORT). Open-loop: no PID in this pipeline, so this vector goes straight to clamp + the DAC.",
+			"uri": "anyloop:udp_source",
+			"params": {
+				"port": "64732",
+				"n": 2,
+				"units": "minmax"
+			}
+		},
+		{
+			"_comment": "Bound the command to the DAC's valid range before it reaches hardware.",
+			"uri": "anyloop:clamp",
+			"params": {
+				"type": "vector",
+				"min": -1.0,
+				"max": 1.0
+			}
+		},
+		{
+			"_comment": "Fast steering-mirror DAC (TI DAC81404) over the parallel-port SPI link (devices/parport_dac.c) -- link/pci/bar/offsets/sclk_bit/sdin_bit/sync_bit below are that file's own documented defaults, not guesses. CALIBRATE channel/index/scale/offset/range against the real mirror amplifier: channel 0/1 assumed to be DACA=y, DACB=x; scale/offset/range are the device defaults (1.0 V/unit, 0 V at zero, unipolar 0-10 V) and very likely wrong for this mirror's driver -- verify polarity and range on the bench (DAC output disconnected from the mirror) before connecting it.",
+			"uri": "anyloop:parport_dac",
+			"params": {
+				"backend": "mmio",
+				"link": "spi",
+				"pci": "0000:05:00.2",
+				"channel": [0, 1],
+				"index": [0, 1],
+				"scale": [1.0, 1.0],
+				"offset": [0.0, 0.0],
+				"range": "0-10",
+				"verify": false,
+				"skip_unchanged": false,
+				"sync_update": true
+			}
+		}
+	]
+}

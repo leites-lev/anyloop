@@ -360,11 +360,16 @@ int main(int argc, char **argv)
 
 		// residual-map autocorrelation at several lags: does the part
 		// of the beam the gaussian cannot explain stay put, or boil?
+		// The device only keeps residuals for the core box it actually
+		// iterates on, and re-plans that box every frame; a frame whose
+		// box came out a different size is not comparable to the ring's
+		// and is skipped rather than folded in.
 		if (!ring) {
-			nlag = fd->win_h*fd->win_w;
+			nlag = fd->core_h*fd->core_stride;
 			if (!nlag) continue;
 			ring = calloc(MAXLAG*nlag, sizeof(double));
 		}
+		if (fd->core_h*fd->core_stride != nlag) continue;
 		double *slot = ring + (k % MAXLAG)*nlag;
 		memcpy(slot, fd->resid, nlag*sizeof(double));
 		for (int L = 0; L < 4; L++) {

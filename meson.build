@@ -110,6 +110,14 @@ fit_com_test = executable('fit_com_test',
 	include_directories: [incdir, include_directories('devices')])
 test('fit_com', fit_com_test)
 
+fit_com_bench = executable('fit_com_bench',
+	['test/fit_com_bench.c', 'devices/fit_com.c', 'libaylp/logging.c',
+		'libaylp/xalloc.c'],
+	install: false,
+	dependencies: [dependency('gsl'), dependency('json-c'),
+		c.find_library('m', required: false)],
+	include_directories: [incdir, include_directories('devices')])
+
 wfs_com_test = executable('wfs_com_test',
 	['test/wfs_com_test.c', 'devices/wfs_com.c', 'libaylp/logging.c',
 		'libaylp/xalloc.c'],
