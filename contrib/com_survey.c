@@ -84,24 +84,55 @@ int main(int argc, char **argv)
 	const char *path = 0;
 	double fs = 3788.0, row_time = 0.0;
 	size_t max_frames = 0;
+	// wfs_com geometry/gate overrides. The defaults below are derived from
+	// the measured spot further down; these exist because those heuristics
+	// are only a starting point and the rejection rate is the thing that
+	// tells you they were wrong. A grid whose outer cells hold almost no
+	// light cannot meet min_valid_subaps no matter how good the tracker is,
+	// and the resulting 90%+ rejection reads as "wfs_com loses" when it is
+	// really "wfs_com was asked for consensus among cells that are dark".
+	// Any value left at 0 keeps the derived default.
+	size_t o_cell = 0, o_grid = 0, o_minvalid = 0, o_fitwin = 0;
+	long o_sr = -1, o_edge = -1;
+	double o_minconf = -1.0, o_fluxfloor = -1.0;
+	static const char *usage =
+		"usage: %s CAPTURE.aylp [--fs HZ] [--row-time S] "
+		"[--max-frames N]\n"
+		"  wfs_com overrides (0/unset = derive from the beam):\n"
+		"    --wfs-cell PX        subaperture size\n"
+		"    --wfs-grid N         N by N subapertures\n"
+		"    --wfs-min-valid N    subapertures required per frame\n"
+		"    --wfs-min-conf F     NCC confidence threshold\n"
+		"    --wfs-search-radius PX  correlation search half-width\n"
+		"    --wfs-edge 0|1       reject boundary matches\n"
+		"    --wfs-flux-floor F   per-cell flux gate\n"
+		"    --fit-window PX      fit_com window size\n";
 	for (int i = 1; i < argc; i++) {
 		if (!strcmp(argv[i], "--fs") && i+1 < argc) fs = atof(argv[++i]);
 		else if (!strcmp(argv[i], "--row-time") && i+1 < argc)
 			row_time = atof(argv[++i]);
 		else if (!strcmp(argv[i], "--max-frames") && i+1 < argc)
 			max_frames = strtoull(argv[++i], 0, 0);
+		else if (!strcmp(argv[i], "--wfs-cell") && i+1 < argc)
+			o_cell = strtoull(argv[++i], 0, 0);
+		else if (!strcmp(argv[i], "--wfs-grid") && i+1 < argc)
+			o_grid = strtoull(argv[++i], 0, 0);
+		else if (!strcmp(argv[i], "--wfs-min-valid") && i+1 < argc)
+			o_minvalid = strtoull(argv[++i], 0, 0);
+		else if (!strcmp(argv[i], "--wfs-min-conf") && i+1 < argc)
+			o_minconf = atof(argv[++i]);
+		else if (!strcmp(argv[i], "--wfs-search-radius") && i+1 < argc)
+			o_sr = strtol(argv[++i], 0, 0);
+		else if (!strcmp(argv[i], "--wfs-edge") && i+1 < argc)
+			o_edge = strtol(argv[++i], 0, 0);
+		else if (!strcmp(argv[i], "--wfs-flux-floor") && i+1 < argc)
+			o_fluxfloor = atof(argv[++i]);
+		else if (!strcmp(argv[i], "--fit-window") && i+1 < argc)
+			o_fitwin = strtoull(argv[++i], 0, 0);
 		else if (argv[i][0] != '-') path = argv[i];
-		else {
-			fprintf(stderr, "usage: %s CAPTURE.aylp [--fs HZ] "
-				"[--row-time S] [--max-frames N]\n", argv[0]);
-			return 2;
-		}
+		else { fprintf(stderr, usage, argv[0]); return 2; }
 	}
-	if (!path) {
-		fprintf(stderr, "usage: %s CAPTURE.aylp [--fs HZ] "
-			"[--row-time S] [--max-frames N]\n", argv[0]);
-		return 2;
-	}
+	if (!path) { fprintf(stderr, usage, argv[0]); return 2; }
 	FILE *f = fopen(path, "rb");
 	if (!f) { perror(path); return 1; }
 
@@ -233,6 +264,7 @@ int main(int argc, char **argv)
 
 	// ---------------- pass 2: run both trackers over the same frames --
 	char fitcfg[700], wfscfg[700];
+	if (o_fitwin) sugg_win = o_fitwin;
 	snprintf(fitcfg, sizeof fitcfg,
 		"{\"window_height\":%zu,\"window_width\":%zu,\"sigma_init\":%.3f,"
 		"\"sigma_min\":%.3f,\"sigma_max\":%.3f,\"min_amplitude\":%.2f,"
@@ -243,22 +275,37 @@ int main(int argc, char **argv)
 	// wfs geometry sized from the measured spot: cells about one FWHM so
 	// each lit cell contains curvature rather than a bare gradient, which
 	// is the regime its correlation peak goes degenerate in.
-	size_t cell = (size_t)ceil(2.0*sigma);
+	size_t cell = o_cell ? o_cell : (size_t)ceil(2.0*sigma);
 	if (cell < 3) cell = 3;
-	size_t rows = 3, cols = 3, sr = 2;
+	size_t rows = o_grid ? o_grid : 3, cols = o_grid ? o_grid : 3;
+	size_t sr = o_sr >= 0 ? (size_t)o_sr : 2;
 	while (rows*cell + 2*sr > H && rows > 1) rows--;
 	while (cols*cell + 2*sr > W && cols > 1) cols--;
+	size_t minvalid = o_minvalid ? o_minvalid : (rows*cols+1)/2;
+	if (minvalid > rows*cols) minvalid = rows*cols;
+	double minconf = o_minconf >= 0.0 ? o_minconf : 0.55;
+	double fluxfloor = o_fluxfloor >= 0.0 ? o_fluxfloor
+		: (amp_mean*0.5 > 5 ? amp_mean*0.5 : 5.0);
 	snprintf(wfscfg, sizeof wfscfg,
 		"{\"subap_height\":%zu,\"subap_width\":%zu,\"subap_rows\":%zu,"
 		"\"subap_cols\":%zu,\"search_radius\":%zu,"
-		"\"reject_edge_matches\":true,\"threshold\":%d,\"ref_beta\":0.01,"
+		"\"reject_edge_matches\":%s,\"threshold\":%d,\"ref_beta\":0.01,"
 		"\"ref_beta_init\":0.25,\"ref_beta_tau\":2.0,"
-		"\"min_confidence\":0.55,\"flux_floor\":%.1f,"
+		"\"min_confidence\":%.3f,\"flux_floor\":%.1f,"
 		"\"min_valid_subaps\":%zu,\"rolling_shutter\":false,"
 		"\"max_row_shear\":2.5,\"reacquire_after\":10}",
-		cell, cell, rows, cols, sr, sugg_thresh,
-		amp_mean*0.5 > 5 ? amp_mean*0.5 : 5.0,
-		(rows*cols+1)/2);
+		cell, cell, rows, cols, sr,
+		o_edge == 0 ? "false" : "true", sugg_thresh, minconf,
+		fluxfloor, minvalid);
+	printf("\n--- tracker configuration used -------------------------------\n");
+	printf("  fit_com  window %zux%zu  sigma_init %.2f\n",
+		sugg_win, sugg_win, sigma);
+	printf("  wfs_com  %zux%zu cells of %zux%zu px  search_radius %zu"
+		"  reject_edge %s\n"
+		"           min_valid_subaps %zu  min_confidence %.2f  "
+		"flux_floor %.1f\n",
+		rows, cols, cell, cell, sr, o_edge == 0 ? "false" : "true",
+		minvalid, minconf, fluxfloor);
 
 	struct aylp_device fit_dev = {0}, wfs_dev = {0};
 	json_object *fp = json_tokener_parse(fitcfg);

@@ -24,8 +24,30 @@
 
 include("anyloop.jl")
 using .Anyloop
+using ArgParse
 using Plots; gr()
 using Sockets
+
+argset = ArgParseSettings()
+@add_arg_table argset begin
+    "--autoscale", "-a"
+        help = "rescale the colour axis to each frame instead of holding it " *
+               "fixed; useful for finding a faint spot, but makes background " *
+               "noise look like signal and hides saturation"
+        action = :store_true
+    "--cmin"
+        help = "low end of the fixed colour axis"
+        arg_type = Float64
+        default = 0.0
+    "--cmax"
+        help = "high end of the fixed colour axis"
+        arg_type = Float64
+        default = 250.0
+end
+args = parse_args(argset)
+
+# :auto lets Plots pick limits per frame; a tuple pins them for the whole run
+const CLIMS = args["autoscale"] ? :auto : (args["cmin"], args["cmax"])
 
 const SOL_SOCKET = Cint(1)
 const SO_RCVBUF = Cint(8)
@@ -123,9 +145,10 @@ for i in 1:100000
         px = (com_x + 1) / 2 * (ncols - 1) + 1
         py = (com_y + 1) / 2 * (nrows - 1) + 1
 
-        # fixed colour limits: autoscaling per frame makes the background noise
-        # look like signal whenever the spot dims, and hides saturation
-        heatmap(data0.data, aspect_ratio=:equal, size=(800,800), clims=(0,250))
+        # colour limits are fixed by default: autoscaling per frame makes the
+        # background noise look like signal whenever the spot dims, and hides
+        # saturation. Pass --autoscale when you want the updating scale back.
+        heatmap(data0.data, aspect_ratio=:equal, size=(800,800), clims=CLIMS)
         display(scatter!([px], [py],
             marker=:cross, markersize=10, color=:magenta, label="CoM"
         ))

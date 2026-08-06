@@ -2,21 +2,24 @@
 	"_comment": {
 		"1": "OPEN-LOOP capture for contrib/com_survey: one minute of raw ROI frames, same camera configuration as steering_par_fsp_wfs_com.json, with NO tracker, NO fsp and NO DAC in the pipeline. Nothing is actuated, so whatever the beam does here is the beam, not a loop.",
 		"2": "Run it with the FSM parked at its normal bias, exactly as contrib/probe_frame.json expects. Let the coarse channels settle (~30 s) before starting, or the drift during settling will show up as beam motion.",
-		"3": "Writes com_survey.aylp: 40-byte header per frame (magic u32, version/status/type/units u8 at 4..7, log_dim.y/x u64 at 8/16, pitch.y/x double at 24/32), then height*width uint8. At 32x32 and fs~3788 one minute is ~227k frames and ~236 MB. Check you have the disk space.",
-		"4": "count = 60 s * 3788 fps. If your achieved fs differs, scale it -- the analyser reads the real frame count from the file and only needs --fs to convert to Hz.",
-		"5": "Then: ./build/com_survey com_survey.aylp --fs 3788   (add --row-time once you have measured it; it does not affect the recommendation)."
+		"3": "Writes com_survey.aylp: 40-byte header per frame (magic u32, version/status/type/units u8 at 4..7, log_dim.y/x u64 at 8/16, pitch.y/x double at 24/32), then height*width uint8. At 248x248 and fs~381 one minute is ~22.9k frames and ~1.4 GB. Check you have the disk space.",
+		"4": "count = 60 s * 381 fps = 22860. 381 Hz is the MEASURED rate at this 248x248 ROI (2026-08-04), not the 3788 Hz of the old 32x32 ROI -- a 10x drop, so the old count of 227280 would have run for 10 minutes and written 14 GB. Re-measure and rescale if the ROI changes; the analyser reads the real frame count from the file and only needs --fs to convert to Hz.",
+		"5": "Then: ./build/com_survey com_survey.aylp --fs 381   (add --row-time once you have measured it; it does not affect the recommendation).",
+		"6": "MEASURED 2026-08-05 from a 57.6 s capture at this ROI: fs 397-398 Hz (NOT 3788 -- that was the old 32x32), background 3.21 counts sigma 0.40, beam amplitude 251.6, beam sigma 15.83 px / FWHM 37.27 px, saturation 0.02% over the whole record.",
+		"7": "THE SOURCE IS CHOPPED at 4.411 Hz (autocorrelation lag 90 frames = 226.7 ms, r 0.69) with ~12% duty at half maximum -- ON 27.7 ms, OFF 186.4 ms, dark/bright flux 2202/208869 counts = 100:1. Verified NOT an alias: the same 8.79/13.38/17.57 Hz harmonics appear at fs 397, 653 and 990 Hz, and an alias would move with the sample rate. CONSEQUENCE: ~90% of frames in a raw capture are dark, which makes both trackers look broken (fit_com 79% rejected, wfs_com 97%) and makes the residual look 'boiling' when it is only dark-frame noise. Analyse the illuminated frames only, or capture CW."
 	},
 	"pipeline": [
 		{
 			"uri": "file:/home/fsl/anyloop_levfork/anyloop/build/asi_source.so",
 			"params": {
-				"camera_name": "ASI290MM",
-				"width": 32,
-				"height": 32,
-				"start_x": 1832,
-				"start_y": 706,
-				"exposure": 50,
-				"gain": 100,
+				"camera_name": "ASI662MM",
+				"_roi": "248x248 for this survey, not the 160x160 the loop configs run at: the survey is where the beam's SHAPE is being characterised, and fit_com's gaussian fit and wfs_com's template both want the wings inside the frame rather than clipped by the ROI edge. Centred on the 2026-08-04 find_roi probe, full-sensor beam (1064, 536), so start = 1064-124 / 536-124.",
+				"width": 248,
+				"height": 248,
+				"start_x": 552,
+				"start_y": 226,
+				"exposure": 32,
+				"gain": 0,
 				"bandwidth": 100,
 				"high_speed": 1,
 				"die_on_stall": 0
@@ -25,15 +28,23 @@
 		{
 			"_comment": "Live view while it captures; decimated so it cannot back-pressure the loop.",
 			"uri": "anyloop:udp_sink",
-			"params": { "ip": "127.0.0.1", "port": "64730", "decimation": 256 }
+			"params": {
+				"ip": "127.0.0.1",
+				"port": "64730",
+				"decimation": 256
+			}
 		},
 		{
 			"uri": "anyloop:file_sink",
-			"params": { "filename": "com_survey.aylp" }
+			"params": {
+				"filename": "com_survey.aylp"
+			}
 		},
 		{
 			"uri": "anyloop:stop_after_count",
-			"params": { "count": 227280 }
+			"params": {
+				"count": 22860
+			}
 		}
 	]
 }
