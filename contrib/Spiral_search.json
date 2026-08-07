@@ -1,20 +1,23 @@
 {
 	"_comment": {
-		"1": "Real steering pipeline for fsl-supervisor. Open-loop actuation:",
-		"2": "camera -> raw-frame sink (BRIGHTNESS_PORT) -> CoM -> telemetry sink",
-		"3": "(TELEMETRY_PORT) -> setpoint source (COMMAND_PORT) -> clamp -> SPI DAC.",
-		"4": "The setpoint source OVERWRITES the pipeline state with the last UDP",
-		"5": "command (see devices/udp_source.c), which is why it sits AFTER the",
-		"6": "telemetry sink -- the sink must tap the real measured CoM before it",
-		"7": "gets clobbered by the commanded setpoint. The raw-frame sink is used",
-		"8": "by supervisor.py's spiral search to hill-climb on total frame",
-		"9": "brightness (same tap pattern camera_view.py already uses for the",
-		"10": "MJPEG viewers -- a sink only observes, it does not alter the frame",
-		"11": "that reaches center_of_mass downstream).",
-		"12": "Plumbing (ports, ordering) verified 2026-08-06 against a pure-builtin",
-		"13": "stand-in pipeline run on the anyloop binary. camera ROI/exposure/gain",
-		"14": "and DAC channel/scale/offset/range below are UNVERIFIED placeholders --",
-		"15": "calibrate against the real optics/amplifier before running at power."
+		"1": "Fully self-contained beam finder -- run `anyloop contrib/Spiral_search.json`",
+		"2": "and it drives the fast steering mirror in an outward square spiral,",
+		"3": "hill-climbs on total (background-subtracted) frame brightness across",
+		"4": "coarse-to-fine passes, parks the SPI DAC at the brightest point found,",
+		"5": "and exits (AYLP_DONE) -- no Python/supervisor.py driver needed.",
+		"6": "Pipeline: camera -> anyloop:spiral_search (devices/spiral_search.c,",
+		"7": "new device) -> clamp -> SPI DAC. spiral_search takes the raw frame",
+		"8": "directly (same input type as center_of_mass) and outputs the",
+		"9": "commanded [y, x] vector each iteration; no udp_source/udp_sink or CoM",
+		"10": "device is needed for the search itself. The udp_sink below is an",
+		"11": "OPTIONAL monitor tap so you can watch progress externally; delete it",
+		"12": "if you don't need that.",
+		"13": "Unit-tested 2026-08-06 against a synthetic beam that is invisible",
+		"14": "(background only) except within a few sigma of an unknown target,",
+		"15": "confirming the coarse-to-fine passes actually converge and AYLP_DONE",
+		"16": "fires. camera ROI/exposure/gain and DAC channel/scale/offset/range",
+		"17": "below are UNVERIFIED placeholders -- calibrate against the real",
+		"18": "optics/amplifier before running at power."
 	},
 	"pipeline": [
 		{
@@ -32,41 +35,24 @@
 			}
 		},
 		{
-			"_comment": "Raw frame tap for supervisor.py's brightness-hill-climb spiral search (BRIGHTNESS_PORT). A sink only observes/forwards -- center_of_mass below still gets the unmodified frame.",
-			"uri": "anyloop:udp_sink",
+			"_comment": "Self-contained spiral search (devices/spiral_search.c). step/radius set the initial grid (normalised setpoint units per ring, rings outward -- ±step*radius is the first pass's reach). passes is the number of coarse-to-fine refinements (step/radius halve each pass). settle_frames is how many camera frames to wait after each move before trusting the brightness reading (covers camera exposure + mirror response); raise it if the mirror is slow to settle. threshold is subtracted from every pixel before summing -- CALIBRATE against real background/sensor noise (5 is a placeholder, same as the old center_of_mass config used).",
+			"uri": "anyloop:spiral_search",
 			"params": {
-				"ip": "127.0.0.1",
-				"port": "64733",
-				"decimation": 1
-			}
-		},
-		{
-			"_comment": "Whole-frame CoM, normalised to [-1, 1]. CALIBRATE threshold against real background/sensor noise (5 is a placeholder). region_height/width must match the camera's width/height above.",
-			"uri": "anyloop:center_of_mass",
-			"params": {
-				"_size_clamp": "64x64, matching the camera width/height above as this device requires (whole-frame CoM). Follows the ROI automatically only if you keep the two in step -- change one and change this.",
-				"region_height": 64,
-				"region_width": 64,
+				"step": 0.05,
+				"radius": 10,
+				"passes": 4,
+				"settle_frames": 5,
 				"threshold": 5,
-				"track": false
+				"units": "minmax"
 			}
 		},
 		{
-			"_comment": "CoM telemetry -> supervisor.py TelemetryReceiver (TELEMETRY_PORT). Must precede the udp_source below.",
+			"_comment": "OPTIONAL: mirrors supervisor.py's TELEMETRY_PORT so you can watch the search's commanded [y, x] live while it runs. Not required for the search itself -- delete this device if you don't need external monitoring.",
 			"uri": "anyloop:udp_sink",
 			"params": {
 				"ip": "127.0.0.1",
 				"port": "64731",
 				"decimation": 1
-			}
-		},
-		{
-			"_comment": "Setpoint / spiral-search commands from supervisor.py CommandSender (COMMAND_PORT). Open-loop: no PID in this pipeline, so this vector goes straight to clamp + the DAC.",
-			"uri": "anyloop:udp_source",
-			"params": {
-				"port": "64732",
-				"n": 2,
-				"units": "minmax"
 			}
 		},
 		{

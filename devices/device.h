@@ -27,6 +27,7 @@
 #include "devices/bode_plot.h"
 #include "devices/latency_test.h"
 #include "devices/attenuation_test.h"
+#include "devices/spiral_search.h"
 
 static const struct {
 	const char *uri;
@@ -58,6 +59,7 @@ static const struct {
 	{ "anyloop:bode_plot", bode_plot_init },
 	{ "anyloop:latency_test", latency_test_init },
 	{ "anyloop:attenuation_test", attenuation_test_init },
+	{ "anyloop:spiral_search", spiral_search_init },
 };
 
 // match an aylp_device with its initializer function and initialize it

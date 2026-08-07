@@ -52,7 +52,8 @@ project_source_files = [
 	'devices/parport_dac_range.c',
 	'devices/bode_plot.c',
 	'devices/latency_test.c',
-	'devices/attenuation_test.c'
+	'devices/attenuation_test.c',
+	'devices/spiral_search.c'
 ]
 
 incdir = include_directories('libaylp')
