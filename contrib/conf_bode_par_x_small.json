@@ -39,8 +39,8 @@
 				"camera_name": "ASI290MM",
 				"width": 64,
 				"height": 64,
-				"start_x": 644,
-				"start_y": 318,
+				"start_x": 1084,
+				"start_y": 418,
 				"exposure": 400,
 				"gain": 0,
 				"bandwidth": 100,
@@ -53,14 +53,27 @@
 			"params": { "ip": "127.0.0.1", "port": "64730", "decimation": 64 }
 		},
 		{
-			"uri": "anyloop:center_of_mass",
+			"_choice": "fit_com CHOSEN 2026-08-06 on measured data, re-confirmed on the stable centred beam. Same 60 s capture: fit_com hf 0.271 px / 11.4% rejected, wfs_com hf 0.814 / 79.9%, thresholded center_of_mass hf 0.639 / 22.9%. hf is the frame-to-frame difference, i.e. what the loop must reject -- fit_com is 3x quieter than wfs_com. wfs_com's rejection is NOT a geometry error: re-run at 3x3 and 5x5 grids with 6/8/14 px cells it stayed 82-88%, and only reached 35.9% with every quality gate disabled. Cost p50 17.4 us / p99 27.0 us against a 433 us frame period. The 11.4% rejection is the 4.7 Hz source modulation, not the tracker -- see com_survey.json.",
+			"_provenance": "MEASURED 2026-08-06 by contrib/com_survey_run.sh over a 60 s / 138600-frame capture at 64x64, exp 400, gain 0, fs 2310 Hz, with the ROI auto-centred first (find_roi put it at 1088/406, beam landing at (28.39, 29.95) against a 31.5 centre -- the residual is the 4-px/2-px ASI ROI grid, not an error): beam sigma 6.55 px / FWHM 15.43, amplitude 213.9 over background 1.74, saturation 2.68%. window 55 = +/-4 sigma; sigma_min/max and min_amplitude are 0.3x/4x/0.1x of measured, which is how com_survey derives its own suggestions. RE-RUN contrib/com_survey_run.sh AND RE-DERIVE after any refocus or source change -- these are beam properties. An EARLIER set (sigma 6.31, window 53) was taken while the beam was being moved by hand and is superseded.",
+			"_shutter": "NOTE ON THE CHOPPED SOURCE: the center_of_mass this replaces used ref_cut to drop frames the rolling shutter cuts through the source's on-window. fit_com has no ref_cut. It handles those frames through robust (Tukey) reweighting and the min_amplitude gate instead, and the 20.8% rejection above ALREADY INCLUDES them -- that number was measured on these same chopped frames. Watch it if the chop duty changes.",
+			"_replaced": "Replaced this center_of_mass block, kept for reversibility: {\"region_height\":20,\"region_width\":20,\"threshold\":5,\"_min_peak\":\"hold the centroid instead of updating it when no beam is in frame; 40 against a measured beamless window peak of 5-6 and a saturating beam -- see steering_tuned.json for the full derivation\",\"min_peak\":40,\"track\":true}",
+			"uri": "anyloop:fit_com",
 			"params": {
-				"region_height": 20,
-				"region_width": 20,
-				"threshold": 5,
-				"_min_peak": "hold the centroid instead of updating it when no beam is in frame; 40 against a measured beamless window peak of 5-6 and a saturating beam -- see steering_tuned.json for the full derivation",
-				"min_peak": 40,
-				"track": true
+				"_budget": "max_us 25 is ABOVE the measured p99 of 27.2 us only just -- expect the guard to bite on the slowest few percent of frames, truncating those fits to fewer LM iterations. The survey's numbers were taken at the 10 us DEFAULT, so 25 lets the fit converge FURTHER than what was benchmarked, not less. Set 0 to remove the cap entirely, at the cost of a variable measurement latency that a fixed-delay model downstream will read as a wobbling loop delay.",
+				"window_height": 55,
+				"window_width": 55,
+				"sigma_init": 6.55,
+				"sigma_min": 1.965,
+				"sigma_max": 26.2,
+				"min_amplitude": 21.39,
+				"_reacquire": "reacquire_after 300 frames = 130 ms at 2310 Hz, NOT the 10 that com_survey's benchmark harness uses. This is the difference between the two failure paths downstream. A rejected frame (fsp.c:2141) holds the actuator command and advances the delay and modal state without training the observer -- correct for a frame the beam was briefly too dim to fit. BEAM_LOST (fsp.c:1960) zeroes the output, calls fsp_reset_after_beam_loss (xhat, the ucmd delay ring, plant and drift states, all transient state) and ramps back over beam_recover_ramp 0.5 s. MEASURED 2026-08-06: the 4.70 Hz source modulation produces 6 dark stretches per second, median 3 frames but p90 49 and max 201 (87 ms). At reacquire_after 10 every stretch over 4.3 ms takes the catastrophic path -- about 9 full observer resets per second, each starting a 0.5 s recovery that the next reset interrupts, so the loop never converges and the log fills with 'fit failed'. 300 sits above the longest observed stretch, so modulation routes to the hold path and BEAM_LOST means the beam is actually gone. Cost: a genuine loss takes 130 ms to declare instead of 4.3 ms. RE-DERIVE THIS from the dark-stretch distribution if the source changes; on a CW source it can go back down.",
+				"max_iter": 4,
+				"max_us": 25,
+				"robust_k": 2.5,
+				"robust_iter": 1,
+				"fit_slope": true,
+				"row_time": 0,
+				"reacquire_after": 300
 			}
 		},
 		{
