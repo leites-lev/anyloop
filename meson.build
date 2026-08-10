@@ -52,6 +52,8 @@ project_source_files = [
 	'devices/parport_dac_range.c',
 	'devices/bode_plot.c',
 	'devices/latency_test.c',
+	'devices/gain_test.c',
+	'devices/prbs_test.c',
 	'devices/attenuation_test.c',
 	'devices/spiral_search.c'
 ]
@@ -96,6 +98,32 @@ test_pid_park = executable('test_pid_park',
 	include_directories: [incdir, include_directories('devices')]
 )
 test('pid_park', test_pid_park)
+
+test_gain_test = executable('test_gain_test',
+	[
+		'tests/test_gain_test.c',
+		'devices/gain_test.c',
+		'libaylp/logging.c',
+		'libaylp/xalloc.c'
+	],
+	install: false,
+	dependencies: deps,
+	include_directories: [incdir, include_directories('devices')]
+)
+test('gain_test', test_gain_test)
+
+test_prbs_test = executable('test_prbs_test',
+	[
+		'tests/test_prbs_test.c',
+		'devices/prbs_test.c',
+		'libaylp/logging.c',
+		'libaylp/xalloc.c'
+	],
+	install: false,
+	dependencies: deps,
+	include_directories: [incdir, include_directories('devices')]
+)
+test('prbs_test', test_prbs_test)
 
 parport_dac_range_test = executable('parport_dac_range_test',
 	['test/parport_dac_range.c', 'devices/parport_dac_range.c'],

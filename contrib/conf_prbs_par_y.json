@@ -1,0 +1,115 @@
+{
+	"_comment": {
+		"1": "LOOP DELAY of the y/tip axis, from PRBS bursts: command -> FSM ->",
+		"2": "camera -> CoM, cross-correlated against the command that went out.",
+		"3": "Same tau conf_bode_par_y.json fits from its 5-200 Hz phase slope,",
+		"4": "measured in ~5 s of drive instead of several minutes of sweep.",
+		"5": "WHAT TO COPY OUT: the logged PHASE SLOPE line. It is the same",
+		"6": "estimator over the same band as bode's fit_tau_ms, so it is what goes",
+		"7": "into fsp's y delay/delay_frac pair (delay = whole frames, delay_frac =",
+		"8": "the remainder). Peak brackets it from below and onset reads ~0.8",
+		"9": "chips EARLY, so quote neither. Do NOT add a",
+		"10": "hidden frame here the way bode needs -- this device correlates the",
+		"11": "command and the response exactly as the loop sees them: COMPARE IN",
+		"11b": "FRAMES against bode fit_frames, never in ms against fit_tau_ms,",
+		"11c": "which is one frame (0.26 ms) short by construction.",
+		"12": "EXPECT about 2.6 frames: steering_par_fsp.json carries 2+0.62 for y",
+		"13": "from fsm_bodey_par2.dat. A result below 1 frame is not a fast loop,",
+		"14": "it is a failed measurement (the device says so).",
+		"15": "DRIVE: +-50 mV, i.e. +-6 px at Ky 3.646 and 31.5 px/unit -- small",
+		"16": "enough to stay in the linear region and inside the 20x20 tracking",
+		"17": "window, since SNR here comes from averaging 64 bursts, not from",
+		"18": "amplitude. One frame per chip on purpose: a chip is a boxcar, and a",
+		"19": "chip longer than the delay smears the onset by its own length.",
+		"20": "127 chips + 128 quiet = 255 frames per burst, x64 = ~4.3 s at 3.8 kHz.",
+		"21": "See conf_prbs_par_x.json for the x/tilt twin, and conf_gain_par_y.json",
+		"22": "for the gain half of the same plant."
+	},
+	"pipeline": [
+		{
+			"uri": "file:/home/fsl/anyloop_levfork/anyloop/build/asi_source.so",
+			"params": {
+				"camera_name": "ASI290MM",
+				"width": 64,
+				"height": 64,
+				"start_x": 644,
+				"start_y": 318,
+				"_roi_note": "ROI and exposure copied from steering_par_fsp.json so this measures the plant the loop actually runs against. Exposure is part of the delay being measured: change it and this number changes.",
+				"exposure": 400,
+				"gain": 0,
+				"bandwidth": 100,
+				"high_speed": 1,
+				"die_on_stall": 0
+			}
+		},
+		{
+			"_comment": "frame -> UDP viewer",
+			"uri": "anyloop:udp_sink",
+			"params": { "ip": "127.0.0.1", "port": "64730", "decimation": 64 }
+		},
+		{
+			"uri": "anyloop:center_of_mass",
+			"params": {
+				"_note": "tracked 20x20, threshold 5, min_peak 40 -- the steering configuration exactly. The centroid computation is inside the delay being measured, so it has to be the same one the loop uses.",
+				"region_height": 20,
+				"region_width": 20,
+				"threshold": 5,
+				"min_peak": 40,
+				"track": true,
+				"reacquire_after": 10
+			}
+		},
+		{
+			"_comment": "CoM -> UDP viewer",
+			"uri": "anyloop:udp_sink",
+			"params": { "ip": "127.0.0.1", "port": "64731", "decimation": 64 }
+		},
+		{
+			"_note1": "THE TEST. Drives element 0 (y) and watches element 0 of the CoM ([y, x]); x stays at 0 command, i.e. parked at 0 V.",
+			"_note2": "quiet_frames 128 is both the rest between bursts (so each one starts from the same state) and the room the correlator needs: it must be at least max_lag, or one burst's tail overlaps the next burst's start.",
+			"_note3": "neg_lags 24 buys the noise floor. Nothing can respond before the command, so the scatter over those acausal lags is what the onset threshold and the peak/noise ratio are judged against. It is not just sensor noise -- the linear autocorrelation of a finite 127-chip m-sequence has sidelobes of a few percent.",
+			"_phase_band": "20-200 Hz. The top matches the freq_end of the x sweep (conf_bode_par_y.json's own sweep stops at 100 Hz; 200 keeps both axes' tau fit over one band), so this tau and that one are fit over the same band and are directly comparable. Raising phase_f_hi past the plant's own roll-off starts fitting noise, not delay.",
+			"uri": "anyloop:prbs_test",
+			"params": {
+				"index_cmd": 0,
+				"index_err": 0,
+				"out_size": 2,
+				"amplitude": 0.05,
+				"bias": 0.0,
+				"order": 7,
+				"chip_frames": 1,
+				"n_bursts": 64,
+				"quiet_frames": 128,
+				"warmup": 10.0,
+				"max_lag": 48,
+				"neg_lags": 24,
+				"onset_frac": 0.2,
+				"phase_f_lo": 20.0,
+				"phase_f_hi": 200.0,
+				"volts_per_unit": 1.0,
+				"pixel_scale": 31.5,
+				"config": "y/tip loop delay through the PARPORT DAC (DAC81404, spi link, mmio, +-5 V range, mirror parked at 0 V), no coarse stage, ch0=y driven at scale 1.0 V/unit / ch1=x parked. 64x64 ROI 644/318, exp 400, gain 0, tracked 20x20 thr 5 min_peak 40. Compare the phase-slope tau IN FRAMES against fsm_bodey_par2.dat's 2.624 fr (that file's 0.4288 ms EXCLUDES bode's hidden frame and is not what this device reports) and against the fsp delay/delay_frac in steering_par_fsp.json.",
+				"output_file": "fsm_prbsy_par.pdf"
+			}
+		},
+		{
+			"_note": "PARPORT DAC, wired exactly as steering_par_fsp.json: ch0 = y/tip, ch1 = x/tilt, scale [1, -1], offset 0. skip_unchanged stays off -- a PRBS changes the code every frame anyway, and a skipped write would be a missing edge in the very stimulus being correlated.",
+			"_range": "+-5 fixed, no auto-ranging: a range change mid-burst would put a one-frame glitch into the response and land in the correlogram as a spurious lag.",
+			"uri": "anyloop:parport_dac",
+			"params": {
+				"pci": "0000:05:00.2",
+				"backend": "mmio",
+				"link": "spi",
+				"channel": [0, 1],
+				"index": [0, 1],
+				"scale": [1, -1],
+				"offset": [0, 0],
+				"range": "+-5",
+				"verify": false,
+				"skip_unchanged": false,
+				"sync_update": false,
+				"reset_at_init": true
+			}
+		}
+	]
+}
