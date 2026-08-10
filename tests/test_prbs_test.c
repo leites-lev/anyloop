@@ -54,6 +54,13 @@ struct plant {
 	size_t n;
 	double y;
 	unsigned seed;
+	// A chopped source, modelled the way a centroid stage behaves on one:
+	// for `chop_dark` frames out of every `chop_period` the sensor cannot
+	// fit the beam, so it re-publishes its previous coordinate and raises
+	// AYLP_FRAME_REJECTED. 0 = the source is CW.
+	size_t chop_period, chop_dark;
+	size_t frames;
+	double held;
 };
 
 static double plant_step(struct plant *p, double u)
@@ -81,12 +88,19 @@ static size_t run(struct aylp_device *dev, struct plant *p, size_t max_iter)
 	double u = 0.0;
 	size_t i = 0;
 	for (; i < max_iter; i++) {
+		double y = plant_step(p, u);
+		bool dark = p->chop_period
+			&& p->frames % p->chop_period < p->chop_dark;
+		if (dark) y = p->held;
+		else p->held = y;
+		p->frames++;
 		gsl_vector *in = gsl_vector_alloc(2);
-		gsl_vector_set(in, 0, plant_step(p, u));
+		gsl_vector_set(in, 0, y);
 		gsl_vector_set(in, 1, 0.0);
 		struct aylp_state state = {0};
 		state.header.type = AYLP_T_VECTOR;
 		state.header.units = AYLP_U_MINMAX;
+		if (dark) state.header.status |= AYLP_FRAME_REJECTED;
 		state.vector = in;
 		int err = dev->proc(dev, &state);
 		CHECK(!err, "proc returned %d at iteration %zu", err, i);
@@ -354,6 +368,128 @@ static void test_all_orders_are_maximal(void)
 	}
 }
 
+/** The reason the masking exists. A chopped source makes the sensor hold its
+ * last coordinate through the dark frames, so a quarter of the stream carries
+ * values several frames old.
+ *
+ * What that costs, measured over this simulation at 25% dark in 13-frame
+ * streaks: the PEAK barely moves (+0.013 fr) but the phase slope -- the number
+ * this device exists to hand to an fsp delay/delay_frac pair -- reads short,
+ * and the correlation drops from 0.865 to 0.836. At 51% dark it is 0.66 frames
+ * short at rho 0.73. Short, not long: held samples have a spread of ages, so
+ * they decorrelate the response rather than shifting it coherently, and what a
+ * decorrelated high-frequency end does to a phase-slope fit is flatten it.
+ * (Below ~10% dark the sign is not even stable, for the same reason: at that
+ * point it is all decorrelation and no shift.)
+ *
+ * How far short depends on where [phase_f_lo, phase_f_hi] sits in the spectrum,
+ * which moves with the loop rate the machine happens to manage -- 0.09 frames
+ * at this harness's rate, 0.24 at a faster one. So the thresholds below check
+ * a direction and a floor, not a value.
+ *
+ * So the test is two-sided. Masked, the answer has to match what the same
+ * plant reads on a CW source; unmasked, it has to be visibly worse, or the
+ * masking would be a no-op nobody could check. */
+static void test_chop_does_not_bias_lag(void)
+{
+	current_test = "chop_does_not_bias_lag";
+	// 13 dark frames in every 51 = 25% held, the duty this rig measured.
+	// 51 is coprime with the 223-frame window, so the chop walks across
+	// the burst instead of dimming the same positions every time.
+	struct plant base = { .gain = 4.0, .delay = 3, .pole = 0.5,
+		.noise = 0.01, .seed = 11 };
+	struct plant clean = base, chopped = base, biased = base;
+	chopped.chop_period = biased.chop_period = 51;
+	chopped.chop_dark = biased.chop_dark = 13;
+
+	struct aylp_device dev;
+	CHECK(!make(&dev, BURSTS "}"), "init failed");
+	run(&dev, &clean, 100000);
+	struct aylp_prbs_test_data *d = dev.device_data;
+	CHECK(d->have_result, "no result on a CW source");
+	double cw_peak = d->lag_peak, cw_rho = d->rho_peak;
+	double cw_cent = d->lag_centroid;
+	double cw_tau = d->tau_phase_ms / (1e3 / d->fs);
+	CHECK(d->n_live == d->n_frames,
+		"a CW source reported %zu of %zu frames live",
+		d->n_live, d->n_frames);
+	unmake(&dev);
+
+	CHECK(!make(&dev, BURSTS "}"), "init failed");
+	run(&dev, &chopped, 100000);
+	d = dev.device_data;
+	CHECK(d->have_result, "no result through the chop");
+	// the duty cycle is measured, not assumed: 38/51 frames are live
+	double live = (double)d->n_live / (double)d->n_frames;
+	CHECK(fabs(live - 38.0/51.0) < 0.02,
+		"tracked live fraction %g, want the %g the harness chopped",
+		live, 38.0/51.0);
+	CHECK(!d->n_holes, "%zu holes from a chop that walks the window",
+		d->n_holes);
+	// the chop should leave no trace at all: the ensemble mean is built
+	// from live samples only, and 16 bursts of a walking chop cover every
+	// window position many times over
+	CHECK(fabs(d->lag_peak - cw_peak) < 0.05,
+		"masked peak %g frames against %g on a CW source",
+		d->lag_peak, cw_peak);
+	double tau = d->tau_phase_ms / (1e3 / d->fs);
+	CHECK(fabs(tau - cw_tau) < 0.15,
+		"masked phase-slope tau %g frames against %g on a CW source",
+		tau, cw_tau);
+	CHECK(fabs(d->rho_peak - cw_rho) < 0.02,
+		"masked correlation %g against %g on a CW source -- the chop "
+		"should not cost peak height either", d->rho_peak, cw_rho);
+	unmake(&dev);
+
+	// same data correlated the old way, so the bias being guarded against
+	// is exercised rather than assumed
+	CHECK(!make(&dev, BURSTS ",\"use_rejected\":true}"), "init failed");
+	run(&dev, &biased, 100000);
+	d = dev.device_data;
+	CHECK(d->have_result, "no result with use_rejected");
+	// The two checks that do not depend on the loop rate: lags are counted
+	// in frames and rho is a correlation, so neither moves with whatever
+	// speed the machine managed. The phase slope shifts as well, but by an
+	// amount set by where the fit band lands in the spectrum, so asserting
+	// on it here would be asserting on the test machine.
+	CHECK(d->lag_centroid - cw_cent > 0.01,
+		"correlating held samples put the lobe centroid at %g frames "
+		"against the CW %g; the bias this guards against did not "
+		"reproduce, so the guard is untested",
+		d->lag_centroid, cw_cent);
+	CHECK(cw_rho - d->rho_peak > 0.01,
+		"correlating held samples gave rho %g against the CW %g; the "
+		"decorrelation this guards against did not reproduce",
+		d->rho_peak, cw_rho);
+	unmake(&dev);
+}
+
+/** A chop locked to the burst period is the case the ensemble mean cannot
+ * repair: the same window positions are dark in every burst. Those become
+ * holes, the run says so, and the correlogram skips them rather than
+ * correlating an interpolated guess. */
+static void test_chop_locked_to_window_is_reported(void)
+{
+	current_test = "chop_locked_to_window_is_reported";
+	struct aylp_device dev;
+	CHECK(!make(&dev, BURSTS "}"), "init failed");
+	// window is 127 + 96 = 223 frames; a chop of exactly that period dims
+	// the same 13 positions in every burst
+	struct plant p = { .gain = 4.0, .delay = 3, .pole = 0.5,
+		.noise = 0.01, .seed = 12, .chop_period = 223, .chop_dark = 13 };
+	run(&dev, &p, 100000);
+	struct aylp_prbs_test_data *d = dev.device_data;
+	CHECK(d->n_holes == 13,
+		"%zu window positions with no live sample, want the 13 dimmed "
+		"in every burst", d->n_holes);
+	CHECK(d->worst_cnt == 0, "worst position had %zu live bursts",
+		d->worst_cnt);
+	CHECK(d->have_result, "no result with 13 of 223 positions dark");
+	CHECK(d->lag_peak > 2.5 && d->lag_peak < 7.0,
+		"peak %g frames with a locked chop", d->lag_peak);
+	unmake(&dev);
+}
+
 /** Configuration that cannot produce a measurement is refused at init. */
 static void test_rejects_bad_config(void)
 {
@@ -388,6 +524,8 @@ int main(void)
 	test_negative_gain();
 	test_survives_noise();
 	test_dead_plant_is_reported();
+	test_chop_does_not_bias_lag();
+	test_chop_locked_to_window_is_reported();
 	test_all_orders_are_maximal();
 	test_rejects_bad_config();
 

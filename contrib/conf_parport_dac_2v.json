@@ -82,7 +82,7 @@
     "_range": "0-5, matching the steering/bode par configs; 76 uV/LSB instead of the +-10 range's 305 uV, which matters for a DC park-and-measure check. `offset` is the voltage under test and is left at 3.0 V rather than moved to the 2.5 V bias -- it is this file's whole parameter. Anything in 0..5 V is valid.",
     "range": "+-5",
     "scale": [0, 0],				
-	"offset": [0, 0],
+	"offset": [2, 2],
     "verify": false
    }
   },

@@ -1,6 +1,6 @@
-# fsp full-band predictor weights saved 2026-08-02 21:04:24
-# broad_order=512 broad_mu=0.03 broad_lp=5 broad_gd=2 fs=3788
-# horizon y 2+0.62 / x 2+0.76 frames; K y 3.646 / x 4.05
+# fsp full-band predictor weights saved 2026-08-07 19:53:06
+# broad_order=512 broad_mu=0.03 broad_lp=7 broad_gd=3 fs=2310
+# horizon y 3+0.13 / x 3+0.02 frames; K y 0.8156 / x 0.579
 # frames closed=0; ||w|| y 0 / x 0; ||w_next|| y 0 / x 0
 # freeze_closed=false init=zeros (cold start)
 # reload with "wiener_file", but ONLY into a run with the same broad_order, horizon, broad_lp and drift_tau

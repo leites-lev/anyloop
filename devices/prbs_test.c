@@ -31,6 +31,19 @@
 // Per-burst estimates are made as well; their median absolute deviation is the
 // honest uncertainty on the ensemble numbers.
 //
+// Only frames the sensor says it measured are correlated. A centroid stage
+// that cannot fit a frame -- a chopped or blinking source, a beam that dims --
+// re-publishes its previous coordinate and raises AYLP_FRAME_REJECTED, so the
+// stream contains samples carrying an older frame's value. Those are not
+// missing data but wrong data, and correlating them pulls the apparent lag
+// toward the age of what was held: at a 25% hold rate with holds averaging 7
+// frames old, the lag reads roughly 1.5 frames long. Every frame's flag is
+// recorded and the held ones are dropped from the ensemble mean and from every
+// correlation, so no duty cycle is assumed and none has to be periodic. What
+// makes this cheap is that the chop is not locked to the burst period: a
+// window position dark in one burst is live in others, so the ensemble mean
+// fills in. `use_rejected` restores the old behaviour for comparison.
+//
 // A lag of L frames means the response appeared L iterations after the command
 // was emitted. L = 0 is physically impossible -- the sensor value read in an
 // iteration was captured before that iteration's command went out -- so a
@@ -179,58 +192,103 @@ static void pt_median_mad(double *arr, size_t n, double *med, double *mad)
 /** Cross-correlate one response window against the command, over lags
  * [-neg_lags, max_lag]. Every lag is evaluated over the same set of command
  * samples, so the correlogram's shape is exact rather than tapering at the
- * ends, and all lags share one normalization, so rho is comparable across
- * them. The acausal lags cannot carry any real response, so their scatter is
+ * ends. The acausal lags cannot carry any real response, so their scatter is
  * the noise floor everything else is judged against.
+ *
+ * `live` marks which response samples the sensor actually measured; the rest
+ * are values it held through a dark frame and are skipped. A held sample is
+ * not missing data, it is WRONG data -- it carries a value from some earlier
+ * frame, so correlating it drags the apparent lag toward that frame's age.
+ * Skipping means each lag sees a different subset of the response, so each is
+ * normalized over its own subset (a plain Pearson r) rather than all sharing
+ * one. With every sample live that is the same correlogram as before, up to
+ * the per-lag mean removal. `live` may be null, meaning every sample counts.
  *
  * Returns 0 if a peak was found, -1 if the correlation never leaves the noise.
  * rho may be null if only the summary numbers are wanted. */
 static int pt_correlate(struct aylp_prbs_test_data *data, const double *r,
-	double *rho_out, double *peak_rho, double *lag_peak, double *lag_onset,
-	double *lag_cent, double *noise_out)
+	const unsigned char *live, double *rho_out, double *peak_rho,
+	double *lag_peak, double *lag_onset, double *lag_cent,
+	double *noise_out, size_t *n_thin)
 {
 	size_t nl = data->neg_lags + data->max_lag + 1;
 	size_t k0 = data->neg_lags, k1 = data->win - data->max_lag;
 	const double *c = data->cmd_win;
 
-	double rmean = 0.0;
-	for (size_t k = 0; k < data->win; k++) rmean += r[k];
-	rmean /= data->win;
-
-	double ce = 0.0, re = 0.0;
-	for (size_t k = k0; k < k1; k++) {
-		ce += c[k] * c[k];
-		re += (r[k] - rmean) * (r[k] - rmean);
-	}
-	double norm = sqrt(ce * re);
-	if (!(norm > 0.0)) return -1;
+	// a lag fit over a handful of surviving samples is noise dressed as a
+	// correlation, so it is dropped rather than allowed to win the peak
+	size_t span = k1 - k0;
+	size_t need = (size_t)(data->min_pair_frac * (double)span);
+	if (need < 8) need = 8;
 
 	double *rho = rho_out ? rho_out : xmalloc(nl * sizeof *rho);
+	unsigned char *fit = xcalloc(nl, sizeof *fit);
+	size_t n_ok = 0, thin = 0;
 	for (size_t i = 0; i < nl; i++) {
 		long lag = (long)i - (long)data->neg_lags;
-		double sum = 0.0;
-		for (size_t k = k0; k < k1; k++)
-			sum += c[k] * (r[(size_t)((long)k + lag)] - rmean);
-		rho[i] = sum / norm;
+		double sc = 0, sr = 0, scc = 0, srr = 0, scr = 0;
+		size_t n = 0;
+		for (size_t k = k0; k < k1; k++) {
+			size_t j = (size_t)((long)k + lag);
+			if (live && !live[j]) continue;
+			double cv = c[k], rv = r[j];
+			sc += cv; sr += rv;
+			scc += cv*cv; srr += rv*rv; scr += cv*rv;
+			n++;
+		}
+		rho[i] = 0.0;
+		if (n < need) { thin++; continue; }
+		double dn = (double)n;
+		double cov = scr - sc*sr/dn;
+		double vc = scc - sc*sc/dn, vr = srr - sr*sr/dn;
+		if (vc > 0.0 && vr > 0.0) {
+			rho[i] = cov / sqrt(vc * vr);
+			fit[i] = 1;
+			n_ok++;
+		} else {
+			thin++;
+		}
+	}
+	if (n_thin) *n_thin = thin;
+	if (!n_ok) {
+		xfree(fit);
+		if (!rho_out) xfree(rho);
+		return -1;
 	}
 
-	// noise floor: the acausal half, which by causality holds no response
+	// noise floor: the acausal half, which by causality holds no response.
+	// Lags that were dropped for want of live pairs are left out of it --
+	// their rho is 0 by convention, not by measurement, and averaging those
+	// zeros in would report a quieter floor than the run actually had.
 	double nsum = 0.0;
-	for (size_t i = 0; i < data->neg_lags; i++) nsum += rho[i]*rho[i];
-	double noise = data->neg_lags ? sqrt(nsum / data->neg_lags) : 0.0;
+	size_t nn = 0;
+	for (size_t i = 0; i < data->neg_lags; i++) {
+		if (!fit[i]) continue;
+		nsum += rho[i]*rho[i];
+		nn++;
+	}
+	double noise = nn ? sqrt(nsum / nn) : 0.0;
 
-	// peak of |rho| over the causal lags
-	size_t zero = data->neg_lags, ipk = zero;
+	// peak of |rho| over the causal lags that were actually fit
+	size_t zero = data->neg_lags, ipk = nl;
 	for (size_t i = zero; i < nl; i++)
-		if (fabs(rho[i]) > fabs(rho[ipk])) ipk = i;
+		if (fit[i] && (ipk == nl || fabs(rho[i]) > fabs(rho[ipk])))
+			ipk = i;
+	if (ipk == nl) {
+		xfree(fit);
+		if (!rho_out) xfree(rho);
+		return -1;
+	}
 	double sign = rho[ipk] < 0.0 ? -1.0 : 1.0;
 	double peak = rho[ipk];
 	int ret = -1;
 	if (fabs(peak) > 4.0 * noise && fabs(peak) > 1e-9) {
 		ret = 0;
-		// parabolic refinement on the three points around the peak
+		// parabolic refinement on the three points around the peak,
+		// but only if both neighbours were fit -- a dropped lag reads
+		// 0 and would pull the refinement toward itself
 		double dl = 0.0;
-		if (ipk > 0 && ipk + 1 < nl) {
+		if (ipk > 0 && ipk + 1 < nl && fit[ipk-1] && fit[ipk+1]) {
 			double ym = sign*rho[ipk-1], y0 = sign*rho[ipk];
 			double yp = sign*rho[ipk+1];
 			double den = ym - 2.0*y0 + yp;
@@ -269,6 +327,7 @@ static int pt_correlate(struct aylp_prbs_test_data *data, const double *r,
 	}
 	*peak_rho = peak;
 	*noise_out = noise;
+	xfree(fit);
 	if (!rho_out) xfree(rho);
 	return ret;
 }
@@ -373,6 +432,12 @@ static int pt_write_dat(struct aylp_prbs_test_data *data, const char *path,
 					* (data->dt_sum/data->dt_cnt)))
 			: 0.0),
 		data->volts_per_unit, data->pixel_scale);
+	fprintf(f, "# sensor_live %.4f (%zu of %zu frames) holes %zu "
+		"min_live_bursts %zu thin_lags %zu use_rejected %d\n",
+		data->n_frames
+			? (double)data->n_live / (double)data->n_frames : 0.0,
+		data->n_live, data->n_frames, data->n_holes, data->worst_cnt,
+		data->n_thin_lags, data->use_rejected ? 1 : 0);
 	if (data->have_result) {
 		fprintf(f, "# onset %.3f fr = %.4f ms\n",
 			data->lag_onset, data->lag_onset * dt_ms);
@@ -415,10 +480,13 @@ static int pt_write_dat(struct aylp_prbs_test_data *data, const char *path,
 	}
 	fprintf(f, "# prbs_test ensemble-averaged traces over %zu bursts\n",
 		data->n_bursts);
-	fprintf(f, "# frame t_ms command resp_mean resp_sem\n");
+	fprintf(f, "# resp_n is how many bursts were live at that position; 0 "
+		"means resp_mean is interpolated, not measured\n");
+	fprintf(f, "# frame t_ms command resp_mean resp_sem resp_n\n");
 	for (size_t k = 0; k < data->win; k++)
-		fprintf(f, "%zu %g %g %g %g\n", k, k * dt_ms,
-			data->cmd_win[k], data->rbar[k], data->rsem[k]);
+		fprintf(f, "%zu %g %g %g %g %zu\n", k, k * dt_ms,
+			data->cmd_win[k], data->rbar[k], data->rsem[k],
+			data->rcnt[k]);
 	fclose(f);
 	log_info("prbs_test: averaged traces saved to %s", traces_path);
 	return 0;
@@ -469,6 +537,31 @@ static int pt_plot(struct aylp_prbs_test_data *data, const char *dat_path,
 	return ok ? 0 : -1;
 }
 
+/** Fill window positions no burst was live at, by linear interpolation between
+ * the nearest live positions on either side (edge-held at the ends). Only the
+ * phase slope and the plot use these: `rlive` still marks them dead, so the
+ * correlogram never sees an invented sample. */
+static void pt_fill_holes(struct aylp_prbs_test_data *data)
+{
+	size_t win = data->win;
+	size_t prev = win;	// last live position seen, win = none yet
+	for (size_t k = 0; k < win; k++) {
+		if (data->rlive[k]) { prev = k; continue; }
+		size_t next = k;
+		while (next < win && !data->rlive[next]) next++;
+		double a = prev < win ? data->rbar[prev] : 0.0;
+		double b = next < win ? data->rbar[next] : a;
+		if (prev >= win) a = b;
+		for (size_t j = k; j < next; j++) {
+			double f = next > prev && prev < win
+				? (double)(j - prev) / (double)(next - prev)
+				: 0.0;
+			data->rbar[j] = a + f * (b - a);
+		}
+		k = next - 1;
+	}
+}
+
 /** Average the bursts, correlate, fit, log, and write the files. */
 static void pt_analyze(struct aylp_prbs_test_data *data)
 {
@@ -479,24 +572,50 @@ static void pt_analyze(struct aylp_prbs_test_data *data)
 	}
 	data->fs = data->dt_cnt ? data->dt_cnt / data->dt_sum : 0.0;
 
-	// ensemble mean and its standard error, frame by frame
+	// Ensemble mean and its standard error, frame by frame, over the bursts
+	// in which the sensor was live at that window position. This is where
+	// most of the repair happens: the chop is not locked to the burst
+	// period, so a position that was dark in one burst is nearly always
+	// live in others, and the mean is built from real samples rather than
+	// from a mixture of real ones and stale ones.
+	data->worst_cnt = nb;
+	data->n_holes = 0;
 	for (size_t k = 0; k < win; k++) {
 		double s = 0.0, s2 = 0.0;
+		size_t n = 0;
 		for (size_t b = 0; b < nb; b++) {
+			if (!data->use_rejected && !data->live[b*win + k])
+				continue;
 			double v = data->resp[b*win + k];
 			s += v;
 			s2 += v * v;
+			n++;
 		}
-		double m = s / nb;
-		double var = s2/nb - m*m;
+		data->rcnt[k] = n;
+		data->rlive[k] = n > 0;
+		if (n < data->worst_cnt) data->worst_cnt = n;
+		if (!n) {
+			data->n_holes++;
+			data->rbar[k] = 0.0;
+			data->rsem[k] = 0.0;
+			continue;
+		}
+		double m = s / n;
+		double var = s2/n - m*m;
 		if (var < 0.0) var = 0.0;
 		data->rbar[k] = m;
-		data->rsem[k] = nb > 1 ? sqrt(var / (nb - 1)) : 0.0;
+		data->rsem[k] = n > 1 ? sqrt(var / (n - 1)) : 0.0;
 	}
+	// A position no burst ever saw is a hole. The correlator skips it, but
+	// the phase slope is an FFT and cannot, so fill it by interpolating its
+	// live neighbours -- and say how many, because an interpolated sample
+	// is a guess about the very quantity being measured.
+	if (data->n_holes) pt_fill_holes(data);
 
 	double lag_cent = 0.0;
-	int ok = pt_correlate(data, data->rbar, data->rho, &data->rho_peak,
-		&data->lag_peak, &data->lag_onset, &lag_cent, &data->rho_noise);
+	int ok = pt_correlate(data, data->rbar, data->rlive, data->rho,
+		&data->rho_peak, &data->lag_peak, &data->lag_onset, &lag_cent,
+		&data->rho_noise, &data->n_thin_lags);
 	data->lag_centroid = lag_cent;
 	data->have_result = !ok;
 
@@ -515,8 +634,10 @@ static void pt_analyze(struct aylp_prbs_test_data *data)
 		size_t n = 0;
 		for (size_t b = 0; b < nb; b++) {
 			double p, o, c, rp, nz;
-			if (pt_correlate(data, data->resp + b*win, NULL, &rp,
-					&p, &o, &c, &nz))
+			const unsigned char *lv = data->use_rejected
+				? NULL : data->live + b*win;
+			if (pt_correlate(data, data->resp + b*win, lv, NULL,
+					&rp, &p, &o, &c, &nz, NULL))
 				continue;
 			pk[n] = p;
 			on[n] = o;
@@ -544,6 +665,41 @@ static void pt_analyze(struct aylp_prbs_test_data *data)
 		log_warn("prbs_test: frame interval jitter is over 20%% of the "
 			"period; lags in frames are still exact but their "
 			"conversion to ms is smeared");
+	double lf = data->n_frames
+		? (double)data->n_live / (double)data->n_frames : 0.0;
+	log_info("prbs_test: sensor live on %.1f%% of frames (%zu of %zu); "
+		"%zu window position(s) had no live sample in any burst, "
+		"fewest live bursts at any position %zu of %zu",
+		1e2 * lf, data->n_live, data->n_frames, data->n_holes,
+		data->worst_cnt, nb);
+	if (data->use_rejected)
+		log_warn("prbs_test: use_rejected is set, so samples the sensor "
+			"flagged were correlated as if they were data. A held "
+			"sample carries an older frame's value, which biases "
+			"the lag LONG; this run is for comparison, not for a "
+			"number to configure a loop with");
+	else if (lf < 0.999)
+		log_info("prbs_test: those %zu held samples were excluded from "
+			"the ensemble mean and from every correlation, so the "
+			"lags below are fit only where the beam was actually "
+			"on", data->n_frames - data->n_live);
+	if (!data->use_rejected && lf < 0.5)
+		log_warn("prbs_test: the sensor was live on under half the "
+			"frames -- the ensemble mean is thin and the noise "
+			"floor is correspondingly higher. Fix the source "
+			"before trusting this");
+	if (data->n_holes)
+		log_warn("prbs_test: %zu window position(s) were dark in EVERY "
+			"burst, so their ensemble mean is interpolated from "
+			"neighbours. The correlogram skips them, but the phase "
+			"slope cannot -- treat tau as approximate. A chop "
+			"locked to the burst period does exactly this; change "
+			"quiet_frames to walk the two apart",
+			data->n_holes);
+	if (data->n_thin_lags)
+		log_warn("prbs_test: %zu lag(s) had too few live sample pairs "
+			"to fit (min_pair_frac %G) and were dropped from the "
+			"correlogram", data->n_thin_lags, data->min_pair_frac);
 	if (!data->have_result) goto write;
 	log_info("prbs_test: ONSET (transport delay) %.3f frames = %.4f ms",
 		data->lag_onset, data->lag_onset * dt_ms);
@@ -614,6 +770,7 @@ int prbs_test_init(struct aylp_device *self)
 	data->phase_f_hi = 200.0;
 	data->volts_per_unit = 1.0;
 	data->pixel_scale = 1.0;
+	data->min_pair_frac = 0.25;
 	data->output_file = xstrdup("prbs_test.pdf");
 
 	if (self->params) { json_object_object_foreach(self->params, key, val) {
@@ -652,6 +809,10 @@ int prbs_test_init(struct aylp_device *self)
 			data->volts_per_unit = json_object_get_double(val);
 		} else if (!strcmp(key, "pixel_scale")) {
 			data->pixel_scale = json_object_get_double(val);
+		} else if (!strcmp(key, "use_rejected")) {
+			data->use_rejected = json_object_get_boolean(val);
+		} else if (!strcmp(key, "min_pair_frac")) {
+			data->min_pair_frac = json_object_get_double(val);
 		} else if (!strcmp(key, "output_file")) {
 			// an empty name means "log the numbers, write nothing"
 			const char *v = json_object_get_string(val);
@@ -676,6 +837,10 @@ int prbs_test_init(struct aylp_device *self)
 	}
 	if (data->onset_frac <= 0.0 || data->onset_frac >= 1.0) {
 		log_error("prbs_test: onset_frac must be in (0, 1)");
+		return -1;
+	}
+	if (data->min_pair_frac <= 0.0 || data->min_pair_frac > 1.0) {
+		log_error("prbs_test: min_pair_frac must be in (0, 1]");
 		return -1;
 	}
 	if (data->order < 5 || data->order > 16) {
@@ -707,8 +872,11 @@ int prbs_test_init(struct aylp_device *self)
 	data->out = xcalloc_type(gsl_vector, data->out_size);
 	data->cmd_win = xcalloc(data->win, sizeof *data->cmd_win);
 	data->resp = xcalloc(data->n_bursts * data->win, sizeof *data->resp);
+	data->live = xcalloc(data->n_bursts * data->win, sizeof *data->live);
 	data->rbar = xcalloc(data->win, sizeof *data->rbar);
 	data->rsem = xcalloc(data->win, sizeof *data->rsem);
+	data->rcnt = xcalloc(data->win, sizeof *data->rcnt);
+	data->rlive = xcalloc(data->win, sizeof *data->rlive);
 	data->rho = xcalloc(data->neg_lags + data->max_lag + 1,
 		sizeof *data->rho);
 
@@ -783,7 +951,20 @@ int prbs_test_proc(struct aylp_device *self, struct aylp_state *state)
 		// correlation lag of L frames is L whole iterations from
 		// command to response, with nothing hidden in between.
 		size_t k = data->frame;
-		data->resp[data->burst * data->win + k] = err;
+		size_t idx = data->burst * data->win + k;
+		data->resp[idx] = err;
+		// Whether the beam was on for THIS frame, taken from the
+		// sensor's own flags rather than from any assumed duty cycle.
+		// fit_com, wfs_com and center_of_mass all re-publish their
+		// previous coordinate when they cannot measure one, so without
+		// this the correlator cannot tell a held value from a fresh
+		// one -- and a held value is an older frame's, which drags the
+		// apparent lag long.
+		bool live = !(state->header.status
+			& (AYLP_FRAME_REJECTED | AYLP_BEAM_LOST));
+		data->live[idx] = live;
+		data->n_frames++;
+		data->n_live += live;
 		double dt = t - data->t_prev;
 		data->dt_sum += dt;
 		data->dt_sum2 += dt * dt;
@@ -852,8 +1033,11 @@ int prbs_test_fini(struct aylp_device *self)
 	xfree(data->chips);
 	xfree(data->cmd_win);
 	xfree(data->resp);
+	xfree(data->live);
 	xfree(data->rbar);
 	xfree(data->rsem);
+	xfree(data->rcnt);
+	xfree(data->rlive);
 	xfree(data->rho);
 	xfree(data);
 	return 0;

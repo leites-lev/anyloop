@@ -14,8 +14,8 @@
 				"camera_name": "ASI290MM",
 				"width": 64,
 				"height": 64,
-				"start_x": 1084,
-				"start_y": 418,
+				"start_x": 1088,
+				"start_y": 416,
 				"exposure": 400,
 				"gain": 0,
 				"bandwidth": 100,
@@ -105,7 +105,8 @@
 				"trip_command": 0.8,
 				"trip_frames": 8,
 				"beam_recover_ramp": 0.5,
-				"transient_sigma": 6.0,
+				"_transient_off_2026_08_07": "TRANSIENT PATH DISABLED 2026-08-07 (was 6.0). transient_sigma is the master switch -- it defaults to 0 and every other transient validation in fsp.c:1370-1390 is gated on transient_sigma > 0, so the whole detection/recovery path goes inert while all the tuning below is preserved verbatim for re-enabling. Off for now because the plant it would act against is not currently characterised: K and the delay predate today's refocus, and the scale sign is inferred from sweep phase rather than a push test. A modal event controller that fires with authority transient_clamp 10.0 against a mis-signed or mis-scaled plant is the worst possible time to find that out. Restore 6.0 once a push test and fresh sweeps are in. NOTE: transient_shadow_mu MUST BE ZEROED TOO. Its validation (fsp.c:1356) is gated on transient_shadow_mu > 0, NOT on transient_sigma, so leaving shadow_mu at 0.01 with transient_sigma 0 is a half-disabled state that fails init outright: 'transient shadow recovery requires transient_sigma > 0'. Both go to 0 together; restore 6.0 / 0.01 together.",
+				"transient_sigma": 0.0,
 				"transient_floor": 0.03,
 				"transient_controller": "modal",
 				"transient_modal_q_scale": 100.0,
@@ -118,7 +119,7 @@
 				"transient_trip_command": 10.0,
 				"transient_max_duration": 0.0,
 				"transient_arm_delay": 450.0,
-				"transient_shadow_mu": 0.01,
+				"transient_shadow_mu": 0.0,
 				"transient_shadow_tau": 0.5,
 				"transient_shadow_min_duration": 2.0,
 				"transient_shadow_hold": 1.0,
@@ -211,10 +212,8 @@
 					0,
 					1
 				],
-				"scale": [
-					1,
-					-1
-				],
+				"_scale_sign_2026_08_07": "SIGN CORRECTED 2026-08-07 to [-1, 1] = [ch0 y, ch1 x], matching steering_par_fsp.json and attenuation_par_fsp.json. Both bode sweeps measure a POSITIVE, in-phase K with x at +1.0 and y at -1.0 (phase at 5 Hz +0.037 rad x / +0.028 rad y, i.e. ~0 not ~pi), which is the sign convention fsp's u = -phi_hat/K assumes. The previous signs would have been positive feedback on both axes. CONFIRMED CORRECT ON THE BENCH 2026-08-07. Fix any future change here rather than by flipping K.",
+				"scale": [-1, 1],
 				"offset": [
 					0,
 					0

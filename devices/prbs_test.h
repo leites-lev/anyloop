@@ -31,6 +31,8 @@ struct aylp_prbs_test_data {
 	double phase_f_hi;
 	double volts_per_unit;	// DAC scale of the swept channel, for reporting
 	double pixel_scale;	// px per response unit, for reporting
+	bool use_rejected;	// correlate held samples too, as if they were data
+	double min_pair_frac;	// fraction of the window a lag needs to be fit
 	char *output_file;	// PDF path; the .dat is written alongside it
 	char *config;		// free-text note copied into the .dat header
 
@@ -53,6 +55,10 @@ struct aylp_prbs_test_data {
 
 	// per-burst response, [burst*win + frame]
 	double *resp;
+	// 1 where the sensor published a live sample for that frame, 0 where it
+	// flagged the frame and held its previous output. Tracked frame by
+	// frame; nothing here assumes a duty cycle or a chop period.
+	unsigned char *live;
 
 	// loop-rate bookkeeping
 	double t_prev, dt_sum, dt_sum2;
@@ -62,6 +68,15 @@ struct aylp_prbs_test_data {
 	double *rho;		// correlogram over [-neg_lags, max_lag]
 	double *rbar;		// ensemble-mean response over the window
 	double *rsem;		// standard error of that mean
+	size_t *rcnt;		// live bursts that went into rbar[k]
+	unsigned char *rlive;	// 1 where rbar[k] has at least one live burst
+
+	// how much of the run the sensor actually delivered
+	size_t n_frames;	// frames recorded into a burst window
+	size_t n_live;		// of those, frames the sensor called good
+	size_t n_holes;		// window positions with no live sample at all
+	size_t worst_cnt;	// fewest live bursts at any window position
+	size_t n_thin_lags;	// lags dropped for want of live pairs
 	double fs;		// measured loop rate, Hz
 	double rho_peak;	// signed peak of the correlogram
 	double lag_peak;	// parabola-refined peak lag, frames

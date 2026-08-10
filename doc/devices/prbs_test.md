@@ -105,14 +105,18 @@ Sizing the drive
 
 - `amplitude` must keep the beam on the sensor. The plant reaches roughly full
   deflection during the sequence's longest run of like chips (`order` chips),
-  so budget `amplitude × K × pixel_scale` px of excursion — at Kx 4.05 and a
-  64×64 ROI, 0.05 V is about ±6 px. Averaging is what buys SNR here, not
-  amplitude; the shipped configs stay well inside the linear region on purpose,
-  so the delay is not measured at an operating point the loop never visits.
+  so budget `amplitude × K × pixel_scale` px of excursion — at this rig's
+  2026-08-07 Kx 0.579 units/V and a 64×64 ROI, 0.05 V is about ±0.9 px.
+  Averaging is what buys SNR here, not amplitude; the shipped configs stay well
+  inside the linear region on purpose, so the delay is not measured at an
+  operating point the loop never visits. The ceiling is the beam rather than
+  the frame — keep 3σ inside the ROI, since truncation at the extremes is
+  *synchronous with the drive* and so cannot be averaged out.
 - `chip_frames` should stay at 1 unless the response is too weak to see. A
   chip is a boxcar, and a chip longer than the delay smears the onset by its
-  own length: at 3.8 kHz the delay is under three frames, so a 10-frame chip
+  own length: at 2.3 kHz the delay is about three frames, so a 10-frame chip
   would measure almost nothing else.
+- **A chopped or dropping source is handled, not assumed away.** See below.
 - `quiet_frames` should be at least `max_lag`, or one burst's tail overlaps the
   next burst's start. The device warns if it isn't.
 - The window (`burst + quiet`) has to be longer than the lags asked about,
@@ -123,6 +127,56 @@ The correlation's noise floor is not just sensor noise: the *linear* (rather
 than circular) autocorrelation of a finite m-sequence has sidelobes of order
 `1/sqrt(n_chips)`, a few percent of the peak. That is what the acausal lags
 measure and what the onset threshold is set against.
+
+A chopped source, and frames the sensor did not measure
+-------------------------------------------------------
+
+A centroid stage that cannot fit a frame does not report a gap — `fit_com`,
+`wfs_com` and a tracked `center_of_mass` all **re-publish their previous
+coordinate** and raise `AYLP_FRAME_REJECTED`. Those samples are not missing
+data, they are wrong data: each carries some earlier frame's value.
+
+This device records that flag for every frame and drops the held samples from
+the ensemble mean and from every correlation. Nothing is assumed about the
+duty cycle, its period, or its regularity; the live fraction is *measured* and
+reported. What makes the repair cheap is that a chop is almost never locked to
+the burst period, so a window position that was dark in one burst is live in
+others and the ensemble mean fills itself in.
+
+Measured on the simulated plant in `tests/test_prbs_test.c` (a 4-frame lag,
+25% of frames held in 13-frame streaks), masking recovers the CW answer to
+within 0.001 frames on the peak and 0.001 on rho. Correlating the held samples
+instead — `use_rejected: true` — costs:
+
+| held | streaks | peak | lobe centroid | phase slope | rho |
+|------|---------|------|---------------|-------------|------|
+| 0%   | —       | 4.165 | 4.703 | 4.521 | 0.866 |
+| 25%  | 13 fr   | +0.013 | +0.028 | −0.24 | 0.836 |
+| 51%  | 26 fr   | +0.031 | +0.293 | −0.66 | 0.732 |
+| 10%  | 5 fr    | +0.015 | +0.089 | ±0.03 | 0.838 |
+
+So the damage lands on the **phase slope** — the number you copy into an fsp
+`delay`/`delay_frac` pair — and it reads *short*, not long. Held samples have a
+spread of ages, so they decorrelate the response rather than shifting it
+coherently, and a decorrelated high-frequency end flattens a phase-slope fit.
+Below about 10% held it is all decorrelation and the sign is not even stable.
+The exact size depends on where `[phase_f_lo, phase_f_hi]` sits in the
+spectrum.
+
+Two things to read in the log before quoting a delay:
+
+- **the live fraction.** Under ~50% the ensemble mean is thin and the noise
+  floor rises correspondingly. That is a source problem, not a fit problem.
+- **holes.** A window position dark in *every* burst has no measurement at all.
+  The correlogram skips it, but the phase slope is an FFT and cannot, so it is
+  filled by interpolating its neighbours and the run warns. This is what a chop
+  locked to the burst period does; change `quiet_frames` to walk the two apart.
+  `resp_n` in the `_traces.dat` file is the live burst count per position, and
+  0 marks an interpolated one.
+
+`use_rejected` exists so the two can be run against the same data and compared,
+which is the only way to see what a given source is costing. It is not a way to
+get a number out of a bad run.
 
 Loop-rate jitter
 ----------------
@@ -205,6 +259,17 @@ Parameters
 - `pixel_scale` (float) (optional)
   - Pixels per response unit, `(dim - 1)/2` for a `center_of_mass` output.
     Default 1.
+- `use_rejected` (bool) (optional)
+  - Correlate frames the sensor flagged `AYLP_FRAME_REJECTED` as if they were
+    measurements. Default false, which drops them. For comparing a run against
+    itself to see what a chopped source costs — see the section above — not for
+    producing a number. The run warns when it is set.
+- `min_pair_frac` (float) (optional)
+  - Fraction of the correlation window a lag needs in live sample pairs before
+    it is fit at all; lags below it are dropped from the correlogram rather
+    than allowed to win the peak on a handful of samples. Default 0.25, floored
+    at 8 pairs. Only bites when the live fraction is very low or a chop is
+    locked to the burst period.
 - `output_file` (string) (optional)
   - PDF path; the `.dat` files are written alongside it. Default
     `"prbs_test.pdf"`. `""` writes nothing.

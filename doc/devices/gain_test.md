@@ -39,27 +39,38 @@ the end throws the actuator for no reason.
 Sizing the sweep to the sensor
 ------------------------------
 
-**The useful range is set by the camera, not by the DAC.** With the gain this
-rig has (Kx 4.05, Ky 3.646 CoM units/V) and a 64×64 ROI (31.5 px per unit), one
-volt moves the beam about 128 px — twice the ROI. The beam leaves a 64×64 ROI
-at roughly ±0.25 V and leaves a 20×20 `center_of_mass` tracking window at about
-±0.08 V *per step*, so both the span and the increment matter:
+**The useful range is set by the camera, not by the DAC**, and on a
+whole-frame estimator it is set by the *beam*, not by the frame:
 
-    span:  |V| < (ROI/2 - beam radius) / (K * pixel_scale)
+    span:  |V| < (ROI/2 - 3*sigma) / (K * pixel_scale)
     step:  step * K * pixel_scale < (window/2 - beam radius)
 
-The shipped configs use ±0.12 V in 12 mV steps: ±15 px of travel with ~17 px of
-margin, and 1.5 px per step against a settled centroid noise hundreds of times
-smaller. Re-derive both if the ROI, the optics or `K` change.
+A tail that leaves the frame at the sweep extremes pulls the centroid inward
+and reads as compression — which is exactly the curvature the sweep is there to
+measure — so the binding limit is the beam's 3σ, not the ROI edge.
+
+Worked from this rig as of 2026-08-07 (ASI290MM, 64×64, 31.5 px per unit,
+σ 9.33 px, Kx 0.579 and Ky 0.8156 units/V, i.e. 18.2 and 25.7 px/V): the
+ceiling is (31.5 − 28.0)/18.2 = 0.19 V on x and 0.14 V on y. The shipped
+configs use ±0.12 V in 12 mV steps — ±2.2 px on x, ±3.1 px on y, a step of
+0.22–0.31 px. **That step is at or below the per-sample centroid noise
+(~0.27 px); what resolves it is the ~1150 settled samples per level, which put
+the SEM near 0.008 px.** Read the per-level SEM in the report. Re-derive all of
+it if the ROI, the optics, the beam width or `K` change — and note that `K` is
+normalized, so it rescales with `(dim - 1)/2` on top of any optical change.
 
 Levels that break those bounds anyway are recorded but excluded from the fit,
 rather than quietly flattening the slope:
 
 - a settled `|response|` past `resp_max` — the beam is running out of the
-  sensor;
+  sensor. Note this is a *runaway* guard, not the sizing limit above: the
+  default 0.9 is 28 px at a 64×64 ROI, far past where a wide beam's tails
+  start leaving the frame;
 - a settled window whose samples are all bit-identical — a tracked
-  `center_of_mass` that has lost the beam holds its last coordinate, which
-  otherwise reads as a beautifully quiet level.
+  `center_of_mass` past `min_peak`, or `fit_com` on a failed fit, holds its
+  last coordinate, which otherwise reads as a beautifully quiet level. Only a
+  level held *throughout* is caught; see the note on partly-held levels in
+  `devices/gain_test.c`.
 
 Two unusable levels in a row end the sweep early *once it has been in range* —
 a sweep that starts wider than the sensor walks into range and its good middle

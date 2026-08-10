@@ -609,8 +609,12 @@ static void fsp_shadow_update(struct aylp_fsp_axis *ax,
 	double step2 = data->transient_shadow_mu * learn2 / energy2;
 	double primary_norm2 = 0.0, delta_norm2 = 0.0;
 	for (size_t i = 0; i < P; i++) {
-		ax->shadow_w[i] += step1 * ax->broad_xbuf[i];
-		ax->shadow_w_next[i] += step2 * ax->broad_xbuf2[i];
+		// same exclusion as the production weights: a fabricated tap
+		// predicts but never teaches (see broad_syn)
+		if (!ax->broad_synbuf[i])
+			ax->shadow_w[i] += step1 * ax->broad_xbuf[i];
+		if (!ax->broad_synbuf2[i])
+			ax->shadow_w_next[i] += step2 * ax->broad_xbuf2[i];
 		double d1 = ax->shadow_w[i] - ax->broad_w[i];
 		double d2 = ax->shadow_w_next[i] - ax->broad_w_next[i];
 		delta_norm2 += d1*d1 + d2*d2;
@@ -999,6 +1003,11 @@ int fsp_init(struct aylp_device *self)
 	data->broad_mu_tau = 30.0;
 	data->broad_lp = 0;		// raw broadband observer unless asked
 	data->broad_freeze_closed = true;
+	data->dark_predict = true;	// predict through a dark frame
+	data->dark_predict_max = 0;	// 0 = auto, 2*(delay + broad_gd)
+	data->dark_train_min_real = 0.5;
+	data->dark_fab_frames = 0;	// 0 = auto, broad_hist_len/2
+	data->dark_bank_train = 4;	// bank horizons trained per live frame
 	data->drift_tau = 0.0;		// compound predictor unless asked
 	data->transient_sigma = 0.0;	// transient fallback is opt-in
 	data->transient_floor = 0.02;
@@ -1108,6 +1117,16 @@ int fsp_init(struct aylp_device *self)
 				json_object_get_double(val);
 		} else if (!strcmp(key, "broad_lp")) {
 			data->broad_lp = json_object_get_uint64(val);
+		} else if (!strcmp(key, "dark_predict")) {
+			data->dark_predict = json_object_get_boolean(val);
+		} else if (!strcmp(key, "dark_predict_max")) {
+			data->dark_predict_max = json_object_get_uint64(val);
+		} else if (!strcmp(key, "dark_train_min_real")) {
+			data->dark_train_min_real = json_object_get_double(val);
+		} else if (!strcmp(key, "dark_fab_frames")) {
+			data->dark_fab_frames = json_object_get_uint64(val);
+		} else if (!strcmp(key, "dark_bank_train")) {
+			data->dark_bank_train = json_object_get_uint64(val);
 		} else if (!strcmp(key, "drift_tau")) {
 			data->drift_tau = json_object_get_double(val);
 		} else if (!strcmp(key, "transient_sigma")) {
@@ -1311,6 +1330,16 @@ int fsp_init(struct aylp_device *self)
 	if (data->broad_mu_init > 0.0 && data->broad_mu_tau <= 0.0) {
 		log_error("fsp: broad_mu_tau must be > 0 when broad_mu_init is "
 			"set.");
+		return -1;
+	}
+	if (data->broad_order && (!isfinite(data->dark_train_min_real)
+			|| data->dark_train_min_real <= 0.0
+			|| data->dark_train_min_real > 1.0)) {
+		log_error("fsp: dark_train_min_real must satisfy 0 < value <= 1.");
+		return -1;
+	}
+	if (data->dark_predict_max > 4096) {
+		log_error("fsp: dark_predict_max must be <= 4096 frames.");
 		return -1;
 	}
 	if (!isfinite(data->transient_sigma)
@@ -1554,10 +1583,28 @@ int fsp_init(struct aylp_device *self)
 		// One extra command is retained for fractional-delay interpolation.
 		ax->ucmd = xcalloc(ax->delay + 1, sizeof(double));
 		if (data->broad_order) {
-			ax->broad_hist_len = data->broad_order + ax->delay
-				+ data->broad_gd + 2;
+			// twice the horizon the main filter runs
+			ax->dark_predict_max = data->dark_predict_max
+				? data->dark_predict_max
+				: 2 * (ax->delay + data->broad_gd);
+			if (ax->dark_predict_max < 4) ax->dark_predict_max = 4;
+			ax->dark_bank_max = ax->dark_predict_max + ax->delay
+				+ data->broad_gd + 1;
+			// The dark bank's longest training window ends dark_bank_max
+			// samples back, which can reach deeper
+			// into the ring than the main filter's delay + broad_gd
+			// window does; the ring must hold whichever is longer.
+			size_t reach = ax->delay + data->broad_gd;
+			if (data->dark_predict && ax->dark_bank_max > reach)
+				reach = ax->dark_bank_max;
+			ax->broad_hist_len = data->broad_order + reach + 2;
 			ax->broad_hist = xcalloc(ax->broad_hist_len,
 				sizeof(double));
+			ax->broad_hist_bl = xcalloc(ax->broad_hist_len,
+				sizeof(double));
+			if (data->dark_predict)
+				ax->dark_w = xcalloc(ax->dark_bank_max
+					* data->broad_order, sizeof(double));
 			ax->broad_w = xcalloc(data->broad_order, sizeof(double));
 			ax->broad_w_next = xcalloc(data->broad_order,
 				sizeof(double));
@@ -1568,9 +1615,16 @@ int fsp_init(struct aylp_device *self)
 			}
 			ax->broad_xbuf = xcalloc(data->broad_order, sizeof(double));
 			ax->broad_xbuf2 = xcalloc(data->broad_order, sizeof(double));
+			ax->broad_syn = xcalloc(ax->broad_hist_len, 1);
+			ax->broad_synbuf = xcalloc(data->broad_order, 1);
+			ax->broad_synbuf2 = xcalloc(data->broad_order, 1);
 			if (data->broad_lp)
 				ax->broad_lpbuf = xcalloc(data->broad_lp,
 					sizeof(double));
+			if (!data->dark_bank_train)
+				data->dark_bank_train = 4;
+			if (data->dark_bank_train > ax->dark_bank_max)
+				data->dark_bank_train = ax->dark_bank_max;
 		}
 		ax->r_ewma = ax->r;
 		ax->transient_var = 0.0;
@@ -1905,6 +1959,23 @@ static int fsp_adapt_advance(struct aylp_fsp_axis *ax,
 }
 
 
+// Blended delay / delay+1 broadband prediction over the newest P-sample
+// window of broad_hist. Callers check isfinite.
+static double fsp_broad_predict(const struct aylp_fsp_axis *ax,
+	const struct aylp_fsp_data *data)
+{
+	size_t P = data->broad_order, H = ax->broad_hist_len;
+	size_t idx = ax->broad_head;
+	double b = 0.0, bn = 0.0;
+	for (size_t i = 0; i < P; i++) {
+		b += ax->broad_w[i] * ax->broad_hist[idx];
+		bn += ax->broad_w_next[i] * ax->broad_hist[idx];
+		idx = idx ? idx - 1 : H - 1;
+	}
+	return (1.0 - ax->delay_frac) * b + ax->delay_frac * bn;
+}
+
+
 static void fsp_reset_after_beam_loss(struct aylp_fsp_axis *ax,
 	struct aylp_fsp_data *data)
 {
@@ -1927,12 +1998,19 @@ static void fsp_reset_after_beam_loss(struct aylp_fsp_axis *ax,
 	ax->guard_active = false;
 	ax->guard_ramping = false;
 	ax->gd_over_count = 0;
+	ax->broad_dark_run = 0;
 	if (data->broad_order) {
 		memset(ax->broad_hist, 0,
 			ax->broad_hist_len * sizeof(double));
+		memset(ax->broad_hist_bl, 0,
+			ax->broad_hist_len * sizeof(double));
+		// a zeroed history is fabricated, not measured; broad_seen 0
+		// already gates the predictor, but the flags have to agree
+		memset(ax->broad_syn, 1, ax->broad_hist_len);
 		ax->broad_head = 0;
 		ax->broad_seen = 0;
 		ax->broad_fab = ax->broad_hist_len;
+		ax->broad_lpclean = 0;
 		if (data->broad_lp) {
 			memset(ax->broad_lpbuf, 0,
 				data->broad_lp * sizeof(double));
@@ -2083,6 +2161,10 @@ int fsp_proc(struct aylp_device *self, struct aylp_state *state)
 			// Pad the vibration history with the estimated AC residual.
 			// The separately tracked drift state carries the DC correction
 			// through the gap; phases across the hole are unknowable.
+			// the first live frame after the gap is a step from
+			// wherever the disturbance walked to; re-seed the burst
+			// detector so the step itself cannot ring it
+			ax->gd_precharge = true;
 			if (data->broad_order) {
 				size_t H = ax->broad_hist_len;
 				size_t nh = miss < H ? miss : H;
@@ -2092,7 +2174,11 @@ int fsp_proc(struct aylp_device *self, struct aylp_state *state)
 						% H;
 					ax->broad_hist[ax->broad_head] =
 						phi_pad;
+					ax->broad_hist_bl[ax->broad_head] =
+						phi_pad;
+					ax->broad_syn[ax->broad_head] = 1;
 				}
+				ax->broad_lpclean = 0;
 				// pad the observer prefilter ring the same way
 				size_t nl = miss < data->broad_lp
 					? miss : data->broad_lp;
@@ -2122,6 +2208,7 @@ int fsp_proc(struct aylp_device *self, struct aylp_state *state)
 		if (j > 1) { r->data[j * r->stride] = 0.0; continue; }
 		struct aylp_fsp_axis *ax = &data->axis[j];
 		double e = s->data[j * s->stride];
+		ax->n_total++;
 
 		// per-axis delay bookkeeping (each axis is visited exactly once
 		// per frame, so advancing here keeps per-frame cadence)
@@ -2140,11 +2227,11 @@ int fsp_proc(struct aylp_device *self, struct aylp_state *state)
 		}
 		if (UNLIKELY(sensor_rejected)) {
 			// Upstream deliberately held its last coordinate because this
-			// frame was distorted, not because the beam disappeared. Hold the
-			// actuator command too and advance only the command-delay model;
-			// do not train observers or correct modal state with the duplicated
+			// frame was distorted, not because the beam disappeared. Do not
+			// train observers or correct modal state with the duplicated
 			// measurement. Time still advanced, so propagate the autonomous
-			// modal state and pad the broadband history with its slow baseline;
+			// modal state, pad broadband history with its slow baseline, and
+			// use the direct bank command below when it is ready;
 			// freezing those states would leave every oscillator one frame late.
 			// Advance the Bode-shaped plant model on the delayed command even
 			// though there is no measurement from which to form phi_meas.
@@ -2157,9 +2244,20 @@ int fsp_proc(struct aylp_device *self, struct aylp_state *state)
 				ax->xhat[2*i+1] = ax->xhat[2*i];
 				ax->xhat[2*i] = p0;
 			}
+			ax->n_dark++;
+			ax->broad_dark_run++;
+			bool dark_commandable = false;
+			double dark_broad_hat = 0.0;
 			if (data->broad_order) {
+				size_t H = ax->broad_hist_len;
+				// Keep the ordinary observer baseline-masked through the
+				// hole. Dark prediction is used only for the command below,
+				// so an estimate can never feed this or a later prediction.
 				double phi_pad = ax->phi_dc - ax->drift_hat;
-				double phi_bl = phi_pad;
+				// the masked history gets what masking-only
+				// would have stored: the baseline, boxcar'd
+				// like any other raw sample
+				double bl_pad = phi_pad;
 				if (data->broad_lp) {
 					ax->broad_lpbuf[ax->broad_lphead] = phi_pad;
 					ax->broad_lphead = (ax->broad_lphead + 1)
@@ -2167,29 +2265,131 @@ int fsp_proc(struct aylp_device *self, struct aylp_state *state)
 					double sum = 0.0;
 					for (size_t i = 0; i < data->broad_lp; i++)
 						sum += ax->broad_lpbuf[i];
-					phi_bl = sum / (double)data->broad_lp;
+					bl_pad = sum / (double)data->broad_lp;
 				}
-				ax->broad_head = (ax->broad_head + 1)
-					% ax->broad_hist_len;
-				ax->broad_hist[ax->broad_head] = phi_bl;
+				if (data->dark_predict && ax->dark_w
+						&& !ax->broad_fab
+						&& ax->broad_seen >= H
+						&& ax->broad_dark_run
+							<= ax->dark_predict_max) {
+					size_t P = data->broad_order;
+					size_t k = ax->broad_dark_run;
+					// the slot about to be written is
+					// now-time, so the window ending at
+					// the last real sample starts k slots
+					// behind it
+					size_t idx = (ax->broad_head + 1 + H
+						- k) % H;
+					// Command from a single direct predictor: asking the
+					// main FIR to predict from a synthetic current sample would
+					// cascade two imperfect predictors.  Bank horizon
+					// k+bd predicts the same future boxcar target as the
+					// live main FIR, directly from the last real sample.
+					size_t bd = ax->delay + data->broad_gd;
+					size_t hc = k + bd;
+					if (hc + 1 <= ax->dark_bank_max) {
+						double pc = 0.0, pcn = 0.0;
+						const double *wc = ax->dark_w
+							+ (hc - 1) * P;
+						const double *wcn = wc + P;
+						idx = (ax->broad_head + 1 + H - k) % H;
+						for (size_t i = 0; i < P; i++) {
+							double v = ax->broad_hist_bl[idx];
+							pc += wc[i] * v;
+							pcn += wcn[i] * v;
+							idx = idx ? idx - 1 : H - 1;
+						}
+						dark_broad_hat = (1.0 - ax->delay_frac) * pc
+							+ ax->delay_frac * pcn;
+						dark_commandable = isfinite(dark_broad_hat);
+						if (dark_commandable) ax->n_dark_predicted++;
+					}
+				}
+				// however good the stand-in, it is not a
+				// measurement: mark it so no update ever trains
+				// on it, and restart the clean-target count,
+				// since the prefilter output is now a boxcar
+				// over partly fabricated raw samples
+				ax->broad_lpclean = 0;
+				ax->broad_head = (ax->broad_head + 1) % H;
+				ax->broad_hist[ax->broad_head] = bl_pad;
+				ax->broad_hist_bl[ax->broad_head] = bl_pad;
+				ax->broad_syn[ax->broad_head] = 1;
 				ax->broad_seen++;
+				// A hole long enough to fill a serious part of
+				// the tap window leaves no regressor worth
+				// training against, per-tap exclusion or not:
+				// pause learning until it has walked out. This
+				// is for an OUTAGE, and the threshold has to be
+				// measured against the window rather than set
+				// to some small number of frames -- a 13-frame
+				// chop trips any small threshold on every
+				// streak, and since broad_fab counts down one
+				// frame at a time it would then never reach
+				// zero and the filter would never train again.
+				// Ordinary chops are handled tap by tap.
+				size_t fab_at = data->dark_fab_frames
+					? data->dark_fab_frames : H / 2;
+				if (ax->broad_dark_run == fab_at)
+					ax->broad_fab = H;
 			}
-			double u_held = ax->frac_x1;
+			// Command through the hole from the direct long-horizon bank.
+			// Anything non-nominal falls back to the old held command.
+			double u_out = ax->frac_x1;
+			if (dark_commandable && !ax->guard_active
+					&& !ax->transient_active) {
+				double broad_hat = dark_broad_hat;
+				if (isfinite(broad_hat)) {
+					double v = frac * (-(ax->drift_hat
+						+ broad_hat) / ax->K);
+					double u = v;
+					if (ax->plant_shaped)
+						u = fsp_biquad(v, ax->plant_ib,
+							ax->plant_ia,
+							&ax->plant_iz1,
+							&ax->plant_iz2);
+					if (data->cmd_fc > 0.0) {
+						double uf = data->lp_b0*u
+							+ ax->lp_z1;
+						ax->lp_z1 = data->lp_b1*u
+							- data->lp_a1*uf
+							+ ax->lp_z2;
+						ax->lp_z2 = data->lp_b2*u
+							- data->lp_a2*uf;
+						u = uf;
+					}
+					if (!isfinite(u)) {
+						u = 0.0;
+						ax->lp_z1 = ax->lp_z2 = 0.0;
+						ax->plant_iz1 =
+							ax->plant_iz2 = 0.0;
+					}
+					if (u > ax->clamp_hi) u = ax->clamp_hi;
+					if (u < ax->clamp_lo) u = ax->clamp_lo;
+					u_out = u;
+					ax->n_dark_cmd++;
+				}
+			}
 			double a_frac = (1.0 - ax->delay_frac)
 				/ (1.0 + ax->delay_frac);
-			double u_frac = a_frac*u_held + ax->frac_x1
+			double u_frac = a_frac*u_out + ax->frac_x1
 				- a_frac*ax->frac_y1;
-			ax->frac_x1 = u_held;
+			ax->frac_x1 = u_out;
 			ax->frac_y1 = u_frac;
 			ax->ucmd[slot_older] = u_frac;
 			ax->uhead = (ax->uhead + 1) % ring_len;
-			r->data[j * r->stride] = u_held;
+			r->data[j * r->stride] = u_out;
 			continue;
 		}
+		bool dark_exit = ax->broad_dark_run != 0;
+		ax->broad_dark_run = 0;
 		if (data->broad_order) {
 			ax->broad_head = (ax->broad_head + 1)
 				% ax->broad_hist_len;
 			ax->broad_seen++;
+			// a real measurement lands here; phi_bl is written
+			// further down, once the Smith reconstruction exists
+			ax->broad_syn[ax->broad_head] = 0;
 		}
 
 		// Learn the ordinary open-loop operating point.  Use the same slow
@@ -2211,6 +2411,22 @@ int fsp_proc(struct aylp_device *self, struct aylp_state *state)
 		bool suppress = false;
 		bool over = false;
 		if (data->guard_ratio > 0.0) {
+			// First live frame after a run of dark frames or a
+			// stall gap: the band-pass state still holds the
+			// pre-hole signal, and hitting it with the post-hole
+			// value is a step. A band-pass rung by a step at every
+			// chop period looks exactly like sustained
+			// regeneration (measured on a 25% chop: authority shed
+			// to u_rms 0.0056, attenuation 1.91x -> 1.01x), so
+			// pre-charge the filter to steady state at this
+			// frame's value -- for a constant-peak band-pass
+			// (b1 = 0, b2 = -b0) that is z1 = z2 = -b0*e, output
+			// exactly 0 -- and let the detector respond only to
+			// motion WITHIN contiguous live data.
+			if (UNLIKELY(dark_exit || ax->gd_precharge)) {
+				ax->gd_precharge = false;
+				ax->gd_z1 = ax->gd_z2 = -ax->gd_b0 * e;
+			}
 			double bp = ax->gd_b0 * e + ax->gd_z1;
 			ax->gd_z1 = -ax->gd_a1 * bp + ax->gd_z2;
 			ax->gd_z2 = ax->gd_b2 * e - ax->gd_a2 * bp;
@@ -2360,8 +2576,16 @@ int fsp_proc(struct aylp_device *self, struct aylp_state *state)
 					sum += ax->broad_lpbuf[i];
 				phi_bl = sum / (double)data->broad_lp;
 			}
+			// phi_bl is the boxcar of the last broad_lp raw
+			// samples, so it is only a clean training target once
+			// that many real ones have been pushed in a row
+			if (ax->broad_lpclean < data->broad_lp + 1)
+				ax->broad_lpclean++;
+			bool target_clean = !data->broad_lp
+				|| ax->broad_lpclean >= data->broad_lp;
 			size_t bd = delay + data->broad_gd;
 			ax->broad_hist[ax->broad_head] = phi_bl;
+			ax->broad_hist_bl[ax->broad_head] = phi_bl;
 			if (ax->broad_seen >= H) {
 				// The delay-tap and (delay+1)-tap regressors are the
 				// same P-sample window shifted by one, sharing P-1
@@ -2369,28 +2593,82 @@ int fsp_proc(struct aylp_device *self, struct aylp_state *state)
 				// walking the ring twice. xbuf/pred1/energy1 belong to
 				// the delay predictor (broad_w); xbuf2/pred2/energy2 to
 				// the delay+1 predictor (broad_w_next).
+				// Provenance rides along with the samples. Every
+				// tap feeds the PREDICTION -- a synthesized
+				// sample is the best estimate of an instant
+				// nobody measured, and dropping it would leave
+				// a hole in the regressor instead. Only the
+				// UPDATE excludes them, so the filter is never
+				// trained toward its own output; energy*_upd is
+				// the norm over just the taps that will move,
+				// which is what an NLMS step must normalize by.
 				size_t idx = (ax->broad_head + H - bd) % H;
 				double pred1 = 0.0, energy1 = 1e-12;
 				double pred2 = 0.0, energy2 = 1e-12;
+				double pred1_upd = 0.0, pred2_upd = 0.0;
+				double energy1_upd = 1e-12, energy2_upd = 1e-12;
+				size_t n_syn1 = 0, n_syn2 = 0;
+				unsigned char sy;
 				double v = ax->broad_hist[idx];	// walk1-only tap
+				sy = ax->broad_syn[idx];
 				ax->broad_xbuf[0] = v;
+				ax->broad_synbuf[0] = sy;
 				pred1 += ax->broad_w[0] * v;
 				energy1 += v * v;
+				if (sy) n_syn1++; else {
+					energy1_upd += v * v;
+					pred1_upd += ax->broad_w[0] * v;
+				}
 				idx = idx ? idx - 1 : H - 1;
 				for (size_t i = 1; i < P; i++) {
 					v = ax->broad_hist[idx];
+					sy = ax->broad_syn[idx];
 					ax->broad_xbuf[i] = v;
+					ax->broad_synbuf[i] = sy;
 					pred1 += ax->broad_w[i] * v;
 					energy1 += v * v;
 					ax->broad_xbuf2[i - 1] = v;
+					ax->broad_synbuf2[i - 1] = sy;
 					pred2 += ax->broad_w_next[i - 1] * v;
 					energy2 += v * v;
+					if (sy) {
+						n_syn1++;
+						n_syn2++;
+					} else {
+						energy1_upd += v * v;
+						energy2_upd += v * v;
+						pred1_upd += ax->broad_w[i] * v;
+						pred2_upd += ax->broad_w_next[i - 1] * v;
+					}
 					idx = idx ? idx - 1 : H - 1;
 				}
 				v = ax->broad_hist[idx];		// walk2-only tap
+				sy = ax->broad_syn[idx];
 				ax->broad_xbuf2[P - 1] = v;
+				ax->broad_synbuf2[P - 1] = sy;
 				pred2 += ax->broad_w_next[P - 1] * v;
 				energy2 += v * v;
+				if (sy) n_syn2++; else {
+					energy2_upd += v * v;
+					pred2_upd += ax->broad_w_next[P - 1] * v;
+				}
+				ax->n_syn_taps += n_syn1;
+				// A partial-update NLMS step normalizes by the
+				// norm of the taps it actually moves, so if only
+				// a few real taps survive, that norm is tiny and
+				// the step is enormous: one small sample would
+				// take the whole correction. Refuse to train
+				// until enough of the regressor is real. This is
+				// the fine-grained version of broad_fab, and the
+				// criterion has to be the COUNT rather than the
+				// energy -- fabricated samples sit near the DC
+				// baseline, so they carry almost no energy and
+				// an energy test would call a window of them
+				// clean.
+				size_t need_real = (size_t)(data->dark_train_min_real
+					* (double)P);
+				bool enough1 = P - n_syn1 >= need_real;
+				bool enough2 = P - n_syn2 >= need_real;
 
 				double pe = phi_bl - pred1;
 				transient_mix = fsp_transient_update(ax, data, pe,
@@ -2402,11 +2680,20 @@ int fsp_proc(struct aylp_device *self, struct aylp_state *state)
 				// used by the release detector, so the event cannot teach itself
 				// into agreement.
 				bool train = (!data->broad_freeze_closed || in_hold)
-					&& !suppress && !ax->transient_active;
-				if (train && isfinite(pe)) {
-					double step = data->broad_mu_cur * pe / energy1;
-					for (size_t i = 0; i < P; i++)
+					&& !suppress && !ax->transient_active
+					// the target is a boxcar over the raw
+					// samples; if any of those were
+					// fabricated, this frame has no honest
+					// target to train against
+					&& target_clean;
+				if (!target_clean) ax->n_train_skip_target++;
+				double pe_upd = phi_bl - pred1_upd;
+				if (train && enough1 && isfinite(pe_upd)) {
+					double step = data->broad_mu_cur * pe_upd / energy1_upd;
+					for (size_t i = 0; i < P; i++) {
+						if (ax->broad_synbuf[i]) continue;
 						ax->broad_w[i] += step * ax->broad_xbuf[i];
+					}
 				} else if (!isfinite(pe)) {
 					memset(ax->broad_w, 0, P * sizeof(double));
 				}
@@ -2414,28 +2701,72 @@ int fsp_proc(struct aylp_device *self, struct aylp_state *state)
 				// combination is the conditional mean at the fractional
 				// Bode-fit horizon.
 				double pe2 = phi_bl - pred2;
-				fsp_shadow_update(ax, data, pe, pe2, pred1, pred2,
-					energy1, energy2, suppress, now, j);
-				if (train && isfinite(pe2)) {
-					double step = data->broad_mu_cur * pe2 / energy2;
-					for (size_t i = 0; i < P; i++)
+				double pe2_upd = phi_bl - pred2_upd;
+				fsp_shadow_update(ax, data, pe_upd, pe2_upd,
+					pred1_upd, pred2_upd,
+					energy1_upd, energy2_upd,
+					suppress || !target_clean
+						|| !enough1 || !enough2,
+					now, j);
+				if (train && enough2 && isfinite(pe2_upd)) {
+					double step = data->broad_mu_cur * pe2_upd / energy2_upd;
+					for (size_t i = 0; i < P; i++) {
+						if (ax->broad_synbuf2[i]) continue;
 						ax->broad_w_next[i] += step
 							* ax->broad_xbuf2[i];
+					}
 				} else if (!isfinite(pe2)) {
 					memset(ax->broad_w_next, 0, P * sizeof(double));
 				}
-				idx = ax->broad_head;
-				double broad_next = 0.0;
-				for (size_t i = 0; i < P; i++) {
-					broad_hat += ax->broad_w[i]
-						* ax->broad_hist[idx];
-					broad_next += ax->broad_w_next[i]
-						* ax->broad_hist[idx];
-					idx = idx ? idx - 1 : H - 1;
-				}
-				broad_hat = (1.0 - ax->delay_frac) * broad_hat
-					+ ax->delay_frac * broad_next;
+				broad_hat = fsp_broad_predict(ax, data);
 				if (!isfinite(broad_hat)) broad_hat = 0.0;
+				// Train the dark bank: horizon-h filter learns
+				// to predict this frame's clean target from
+				// the baseline-masked history h frames back.
+				// Full-update NLMS -- the baseline fills are
+				// part of the bank's input signal by design,
+				// the same signal its predictions read, so
+				// there is nothing to exclude and no
+				// partial-update normalization trap.
+				// Round-robin dark_bank_train horizons per
+				// frame bounds the added cost; broad_xbuf is
+				// dead as scratch by this point.
+				if (ax->dark_w && train) {
+					for (size_t n = 0;
+							n < data->dark_bank_train;
+							n++) {
+						size_t h = ax->dark_bank_h + 1;
+						ax->dark_bank_h =
+							(ax->dark_bank_h + 1)
+							% ax->dark_bank_max;
+						double *w = ax->dark_w
+							+ (h - 1) * P;
+						size_t di = (ax->broad_head
+							+ H - h) % H;
+						double dpred = 0.0;
+						double denergy = 1e-12;
+						for (size_t i = 0; i < P; i++) {
+							double dv =
+								ax->broad_hist_bl[di];
+							ax->broad_xbuf[i] = dv;
+							dpred += w[i] * dv;
+							denergy += dv * dv;
+							di = di ? di - 1 : H - 1;
+						}
+						double dpe = phi_bl - dpred;
+						if (isfinite(dpe)) {
+							double step =
+								data->broad_mu_cur
+								* dpe / denergy;
+							for (size_t i = 0; i < P; i++)
+								w[i] += step
+									* ax->broad_xbuf[i];
+						} else {
+							memset(w, 0, P
+								* sizeof(double));
+						}
+					}
+				}
 			}
 		}
 
@@ -2775,9 +3106,29 @@ int fsp_fini(struct aylp_device *self)
 			data->wiener_trace);
 	}
 	for (int a = 0; a < 2; a++) {
+		struct aylp_fsp_axis *ax = &data->axis[a];
+		if (ax->n_dark)
+			log_info("fsp: %s: %zu frame(s) the sensor could not "
+				"measure (%.1f%% of %zu), %zu received a direct "
+				"dark-bank prediction (%zu commanded through, the rest "
+				"held) and the rest by the DC baseline; "
+				"%zu frame(s) skipped training on a "
+				"partly-fabricated target, %zu fabricated tap "
+				"update(s) excluded",
+				a == 0 ? "y" : "x", ax->n_dark,
+				ax->n_total ? 1e2 * (double)ax->n_dark
+					/ (double)ax->n_total : 0.0,
+				ax->n_total, ax->n_dark_predicted,
+				ax->n_dark_cmd,
+				ax->n_train_skip_target, ax->n_syn_taps);
 		xfree(data->wtrace_prev[a]);
 		xfree(data->axis[a].ucmd);
+		xfree(data->axis[a].broad_syn);
+		xfree(data->axis[a].broad_synbuf);
+		xfree(data->axis[a].broad_synbuf2);
 		xfree(data->axis[a].broad_hist);
+		xfree(data->axis[a].broad_hist_bl);
+		xfree(data->axis[a].dark_w);
 		xfree(data->axis[a].broad_w);
 		xfree(data->axis[a].broad_w_next);
 		xfree(data->axis[a].shadow_w);

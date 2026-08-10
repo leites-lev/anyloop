@@ -265,16 +265,54 @@ struct aylp_fsp_axis {
 	// sustained held-out improvement with bounded coefficient motion.
 	double *shadow_w;
 	double *shadow_w_next;
+	// Baseline-masked copy of broad_hist: real slots hold the same phi_bl,
+	// dark/padded slots hold the boxcar'd DC baseline -- never a
+	// prediction, anyone's. This is the ONLY input the dark bank below
+	// reads, which is what severs the feedback that made iterating the
+	// main FIR on its own output unstable (2026-08-10: 1.45x vs 1.91x at a
+	// 25% chop, weight blow-up at broad_mu 0.5).
+	double *broad_hist_bl;
+	// Direct multi-horizon dark-frame predictor bank (dark_predict), flattened;
+	// filter h-1 predicts h frames ahead. On dark frame k, filter k+bd predicts
+	// the command-horizon target directly from the window ending at the last
+	// real sample. The ordinary observer history remains baseline-masked, so a
+	// bank estimate cannot contaminate later live-frame predictions.
+	double *dark_w;
+	size_t dark_bank_h;		// round-robin training cursor
 	double *broad_xbuf;
 	// second scratch regressor: the delay+1 predictor's tap window is the
 	// delay predictor's window shifted by one sample (they share broad_
 	// order - 1 taps), so one ring walk fills both xbuf (delay) and
 	// xbuf2 (delay+1) instead of walking the history twice
 	double *broad_xbuf2;
+	// Provenance of every history sample: 1 = fabricated (padded across a
+	// gap or baseline-masked through a dark frame), 0 =
+	// reconstructed from a real measurement. A fabricated sample is a
+	// legitimate input to a PREDICTION -- it is the best estimate available
+	// for that instant -- but it must never appear in an NLMS UPDATE, or
+	// the filter trains toward its own output and confirms itself.
+	// broad_synbuf/2 carry the same flags for the scratch regressors, so
+	// the update can skip exactly those taps.
+	unsigned char *broad_syn;
+	unsigned char *broad_synbuf;
+	unsigned char *broad_synbuf2;
 	// observer prefilter ring: the last broad_lp raw phi samples (see
 	// broad_lp in aylp_fsp_data)
 	double *broad_lpbuf;
 	size_t broad_lphead;
+	// consecutive real raw samples pushed into broad_lpbuf. The NLMS target
+	// phi_bl is the boxcar of the last broad_lp of them, so it is only a
+	// clean training target once this reaches broad_lp.
+	size_t broad_lpclean;
+	// consecutive frames the sensor has flagged, and how many of those were
+	// answered with a direct bank command rather than a held command
+	size_t broad_dark_run;
+	size_t dark_predict_max;	// per-axis cap, derived from ax->delay
+	size_t dark_bank_max;		// cap plus command horizon and frac neighbor
+	// burst-guard band-pass re-seed request: the first live frame after a
+	// discontinuity (stall gap) pre-charges the detector to steady state
+	// at that frame's value, so the jump itself cannot ring it
+	bool gd_precharge;
 	// Explicit slow-disturbance state.  When drift_tau > 0 the broadband
 	// and modal predictors see phi - drift_hat, while drift_hat is cancelled
 	// separately as a constant-over-the-horizon component.  This keeps a
@@ -358,6 +396,13 @@ struct aylp_fsp_axis {
 	// window (training pauses while it is nonzero).
 	double phi_dc;
 	size_t broad_fab;
+	// diagnostics for the dark-frame path, reported at fini
+	size_t n_total;			// frames this axis was visited
+	size_t n_dark;			// frames the sensor flagged
+	size_t n_dark_predicted;	// of those, filled by the dark bank
+	size_t n_dark_cmd;		// of those, commanded through (not held)
+	size_t n_train_skip_target;	// frames not trained on: dirty target
+	size_t n_syn_taps;		// synthetic taps skipped in updates
 };
 
 struct aylp_fsp_data {
@@ -485,6 +530,66 @@ struct aylp_fsp_data {
 	// (passband droop at 30 Hz is <1%). 0 disables (raw broadband observer).
 	size_t broad_lp;
 	size_t broad_gd;	// = (broad_lp-1)/2, derived at init
+	// --- frames the sensor could not measure (AYLP_FRAME_REJECTED) ---
+	// A centroid stage that cannot fit a frame re-publishes its previous
+	// coordinate, so there is no measurement for that instant. Time still
+	// advanced, though, and the modal states have always been propagated
+	// through it. These three govern what the BROADBAND observer does.
+	//
+	// dark_predict: predict through dark frames with a DIRECT multi-horizon
+	// bank instead of holding. Default true; set false in the config for
+	// the masking-only behavior (fill with the DC baseline, hold the
+	// command). Two things happen on the k-th consecutive dark frame:
+	//
+	//  1. The ordinary NLMS history remains filled with the neutral DC
+	//     baseline. The first implementation put predictions there and
+	//     iterated the MAIN FIR on its own output; that failed twice over
+	//     (measured 2026-08-10): iterating an FIR on its own output is an
+	//     IIR with no guaranteed stable poles, and the training error
+	//     pe = phi_bl - pred1 carried the fabricated taps' contribution,
+	//     so the real weights grew to compensate and made the next hole's
+	//     synthesis wilder -- 1.45x vs masking's 1.91x at a 25% chop, and
+	//     a 5x AMPLIFYING blow-up at broad_mu 0.5. The bank severs both
+	//     loops by construction: a direct h-step prediction reads only
+	//     real samples and neutral baseline fills, never any prediction.
+	//     Each bank filter trains on that same masked signal against real,
+	//     clean targets only, and its output never enters observer history.
+	//
+	//  2. The loop keeps COMMANDING from bank horizon k+delay+broad_gd,
+	//     blended with the adjacent horizon for delay_frac. This single
+	//     direct prediction replaces the unstable cascade of a k-step fill
+	//     followed by the main FIR. Holding instead
+	//     (the old behavior, and the fallback whenever the bank cannot
+	//     predict, the guard is active, or a transient is running) leaves
+	//     the loop open for the whole hole -- 26% of the time at a 25%
+	//     duty chop.
+	bool dark_predict;
+	// Frames of prediction before falling back to the DC baseline and the
+	// held command. The bank also stores delay+broad_gd+1 longer horizons
+	// for direct command prediction. 0 = auto, per axis:
+	// 2*(delay + broad_gd), i.e. twice the horizon the main filter runs.
+	size_t dark_predict_max;
+	// Bank horizons trained per live frame (round-robin), bounding the
+	// added per-frame cost at dark_bank_train * broad_order MACs. Default
+	// 4. All stored horizons are refreshed round-robin.
+	size_t dark_bank_train;
+	// Fraction of the NLMS regressor that must be real measurements before
+	// the filter is allowed to train on it at all. A partial-update NLMS
+	// step normalizes by the norm of the taps it moves, so a regressor with
+	// only a few real taps left produces an enormous step and one small
+	// sample takes the whole correction. Counted in TAPS, not energy:
+	// fabricated samples sit near the DC baseline and carry almost no
+	// energy, so an energy test would call a window of them clean. Default
+	// 0.5.
+	double dark_train_min_real;
+	// Consecutive dark frames after which training pauses entirely until the
+	// fabricated samples have left the tap window (the broad_fab countdown).
+	// This is for an OUTAGE; ordinary chops are handled tap by tap by
+	// dark_train_min_real. 0 = auto, broad_hist_len/2. Do not set this to a
+	// small number of frames: broad_fab counts down one frame per frame, so
+	// a threshold a repeating chop keeps re-arming never reaches zero and
+	// the filter never trains again.
+	size_t dark_fab_frames;
 	// Separate slow drift from the vibration predictor. <= 0 preserves the
 	// original compound-disturbance predictor.
 	double drift_tau;

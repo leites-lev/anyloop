@@ -147,6 +147,11 @@ fit_com_bench = executable('fit_com_bench',
 		c.find_library('m', required: false)],
 	include_directories: [incdir, include_directories('devices')])
 
+# Standalone offline broadband/dark-frame controller replay.
+executable('fsp_replay', 'contrib/fsp_replay.c',
+	install: false,
+	dependencies: [c.find_library('m', required: false)])
+
 wfs_com_test = executable('wfs_com_test',
 	['test/wfs_com_test.c', 'devices/wfs_com.c', 'libaylp/logging.c',
 		'libaylp/xalloc.c'],

@@ -164,6 +164,26 @@ Parameters
   in-band cancellation timing is unchanged (11 taps at 3788 Hz: null 344 Hz,
   <1 % droop at 30 Hz). This removes at the root what the burst guard only
   reacts to; verified 180 s with zero ring vs. a latched limit cycle without it.
+- `dark_predict`: keep commanding when an upstream centroid device marks a
+  frame `AYLP_FRAME_REJECTED` (default true). A bank of direct multi-horizon
+  NLMS predictors reads only the baseline-masked history ending at the last
+  real sample. On dark frame `k`, horizon `k + delay + broad_gd` supplies the
+  command directly; the adjacent horizon supplies fractional-delay blending.
+  Bank output never enters the ordinary observer history, preventing a
+  prediction from feeding itself or contaminating later live frames. Disable
+  this to retain the previous mask-and-hold behavior.
+- `dark_predict_max`: consecutive dark frames to predict before holding again.
+  Zero selects `2 * (delay + broad_gd)` per axis. The bank internally includes
+  the additional command horizon and adjacent fractional-delay filter.
+- `dark_bank_train`: bank horizons updated per clean live frame (default 4),
+  round-robin. This bounds the added per-frame work.
+- `dark_train_min_real`: minimum real fraction of the ordinary FIR regressor
+  required for an update (default 0.5). Baseline-masked taps remain valid
+  prediction inputs but are excluded from both the update error and the
+  coefficient update.
+- `dark_fab_frames`: consecutive dark frames treated as a full outage, after
+  which ordinary FIR training pauses until fabricated history has drained.
+  Zero selects half the history length; leave it automatic for short chops.
 - `drift_tau`: slow-drift EWMA time constant in seconds. `<= 0` preserves the
   original compound predictor. When enabled, the drift estimate is cancelled
   separately as constant over the command horizon and is subtracted before

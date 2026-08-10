@@ -36,6 +36,14 @@
 // range, two unusable
 // levels in a row end it early and the fit is done on what was measured.
 //
+// The bit-identical test only catches a level that is held THROUGHOUT: one
+// differing sample clears it. A level that is partly held -- a chopped source,
+// a beam that dims for a few frames -- is fitted with those held samples in the
+// mean. That is harmless while the hold is short against the settled window,
+// since the held value then comes from the same level, and it biases the slope
+// toward zero once a hold spans a level boundary. Nothing here can tell the
+// difference: watch the sensor's rejection rate.
+//
 // Params: see doc/devices/gain_test.md.
 
 #include <math.h>
