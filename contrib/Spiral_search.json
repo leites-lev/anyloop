@@ -21,12 +21,14 @@
 	},
 	"pipeline": [
 		{
-			"_comment": "CALIBRATE: camera_name matches supervisor.py's STEERING camera (ASI290MM, CAMERA_CONFIGS index 1 -- CHECK the index still points at this camera). width/height are 64 here (must be a multiple of 8) with start_x/start_y auto-centred, which puts the ROI at the SENSOR centre (968, 548) -- about 300 px from where the other configs place the beam (676, 350); set explicit start_x/start_y once the beam's sensor position is known so the ROI tracks it instead of the raw sensor centre. exposure/gain are ASI SDK defaults (1000 us / 100), not tuned for this beam's brightness.",
+			"_comment": "CALIBRATE: camera_name matches supervisor.py's STEERING camera (ASI290MM, CAMERA_CONFIGS index 1 -- CHECK the index still points at this camera). width/height are 64 here (must be a multiple of 8) with start_x/start_y auto-centred, which puts the ROI at the SENSOR centre (968, 548) -- about 300 px from where the other configs place the beam (676, 350); set explicit start_x/start_y once the beam's sensor position is known so the ROI tracks it instead of the raw sensor centre. exposure/gain are 400 us / 0 as of 2026-08-06, matching the other live configs rather than the ASI SDK defaults (1000 us / 100) this shipped with; neither has been tuned against this beam's brightness.",
 			"uri": "file:/home/fsl/anyloop_levfork/anyloop/build/asi_source.so",
 			"params": {
 				"camera_name": "ASI290MM",
 				"width": 64,
 				"height": 64,
+				"start_x": 1084,
+				"start_y": 418,
 				"exposure": 400,
 				"gain": 0,
 				"bandwidth": 80,
