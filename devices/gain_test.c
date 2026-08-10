@@ -28,9 +28,12 @@
 //
 // Two things make a level unusable, and both are recorded rather than fitted:
 // a settled |response| past `resp_max` (the beam is running out of the sensor)
-// and a settled window whose samples are all bit-identical (center_of_mass has
-// lost the beam and is holding its last coordinate, which otherwise reads as a
-// beautifully quiet level). Once the sweep has been in range, two unusable
+// and a settled window whose samples are all bit-identical (the centroid stage
+// -- center_of_mass or fit_com -- has lost the beam and is holding its last
+// coordinate, which otherwise reads as a beautifully quiet level). fit_com
+// also flags this as AYLP_FRAME_REJECTED, but the bit-identical test catches
+// both stages without either having to be assumed. Once the sweep has been in
+// range, two unusable
 // levels in a row end it early and the fit is done on what was measured.
 //
 // Params: see doc/devices/gain_test.md.
@@ -679,9 +682,10 @@ int gain_test_proc(struct aylp_device *self, struct aylp_state *state)
 			? GT_BRANCH_UP : GT_BRANCH_DOWN;
 		// A level is unusable if the beam is running out of the sensor,
 		// or if the sensor stopped moving altogether -- a tracked
-		// center_of_mass that has lost the beam holds its last
-		// coordinate, which reads as a perfectly quiet level rather
-		// than as an error.
+		// centroid stage that has lost the beam (center_of_mass past
+		// min_peak, fit_com on a failed fit) holds its last coordinate,
+		// which reads as a perfectly quiet level rather than as an
+		// error.
 		bool edge = fabs(mean) > data->resp_max;
 		// exact equality, not a small variance: a held coordinate is
 		// bit-identical every frame, while a real sensor that happens

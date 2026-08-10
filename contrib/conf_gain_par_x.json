@@ -16,10 +16,11 @@
 		"14": "units/V and 31.5 px/unit the beam moves 128 px per volt, so a +-1 V",
 		"15": "sweep would leave the 64x64 ROI at about +-0.25 V and spend most of",
 		"16": "its levels off the sensor. +-0.12 V is +-15 px of travel with ~17 px",
-		"17": "of margin, and the 12 mV step is 1.5 px -- comfortably inside the",
-		"18": "20x20 tracking window, and hundreds of times the settled CoM noise.",
+		"17": "of margin, and the 12 mV step is 1.5 px -- well inside the 55x55",
+		"18": "fit_com window, and hundreds of times the settled CoM noise.",
 		"19": "RE-DERIVE the span and step if the ROI, the optics or K change; the",
 		"20": "arithmetic is in doc/devices/gain_test.md.",
+		"_span_caveat": "THE SPAN ABOVE IS SIZED FROM Kx 4.05, WHICH THIS RUN EXISTS TO REPLACE. 4.05 came from fsm_bodex_par2.dat, taken before the 2026-08-06 retune; K is in NORMALIZED units, so it scales with (dim-1)/2 and does not carry across an ROI-size change (the same optical px/V reads half as large at 64x64 as at 32x32). If par2 was not taken at 64x64, the real travel here is nearer +-7 px than +-15. This degrades safely rather than silently: gain_test excludes any level past resp_max 0.9 and reports the sample count, so a too-small span shows up as a noisy fit and a too-large one as excluded end levels. Check the first run's log and re-size the span before trusting the number.",
 		"21": "The +-120 mV span deliberately straddles the operating point (~20 mV)",
 		"22": "and the region where the FSM compresses (>50 mV), so fit_range 0.05",
 		"23": "gives the small-signal K and the full-range slope shows the droop.",
@@ -33,9 +34,9 @@
 				"camera_name": "ASI290MM",
 				"width": 64,
 				"height": 64,
-				"start_x": 644,
-				"start_y": 318,
-				"_roi_note": "ROI and exposure copied from steering_par_fsp.json so this measures the plant the loop actually runs against. The beam walks several px per hour: re-probe with contrib/probe_frame.json and re-derive with contrib/find_roi.py once |park| exceeds ~2 px.",
+				"start_x": 1084,
+				"start_y": 418,
+				"_roi_note": "ROI and exposure copied from steering_par_fsp.json so this measures the plant the loop actually runs against. ROI re-derived 2026-08-06 to 1084/418 (find_roi put the beam at 1088/406; the residual is the 4-px/2-px ASI ROI grid) -- the earlier 644/318 was an unverified ASI662MM carry-over. The beam walks several px per hour: re-probe with contrib/probe_frame.json and re-derive with contrib/find_roi.py once |park| exceeds ~2 px.",
 				"exposure": 400,
 				"gain": 0,
 				"bandwidth": 100,
@@ -49,15 +50,25 @@
 			"params": { "ip": "127.0.0.1", "port": "64730", "decimation": 64 }
 		},
 		{
-			"uri": "anyloop:center_of_mass",
+			"_note": "fit_com, matching steering_par_fsp.json exactly, so the gain is measured through the same sensor the loop uses -- steering moved from center_of_mass to fit_com on 2026-08-06 and a K measured through the old estimator is a K for a loop that no longer exists. The 55x55 window also swallows the whole +-15 px staircase without the window ever having to walk, which the old 20x20 could not.",
+			"_provenance": "Values MEASURED 2026-08-06 by contrib/com_survey_run.sh at this ROI/exposure: beam sigma 6.55 px, amplitude 213.9 over background 1.74. window 55 = +/-4 sigma; sigma_min/max and min_amplitude are 0.3x/4x/0.1x of measured. RE-RUN com_survey_run.sh and re-derive after any refocus or source change.",
+			"_holds": "gain_test's frozen-level guard STILL WORKS against fit_com: a rejected fit re-publishes the previous coordinate bit-identically, which is exactly the all-samples-equal signature gain_test excludes on. reacquire_after is 300 here rather than the old 10, matching steering: at 10 the 4.70 Hz source chop (dark stretches median 3 frames, p90 49, max 201) would drop acquisition several times per second and re-search the window mid-staircase.",
+			"_replaced": "Replaced this center_of_mass block, kept for reversibility: {\"_note\":\"tracked 20x20, threshold 5, min_peak 40 -- the steering configuration exactly, so the gain is measured through the same sensor the loop uses. reacquire_after 10 matters more here than in a sweep: a staircase moves the beam 1.5 px per level, and a lost window would otherwise hold its last coordinate for the rest of the run (gain_test does detect that and excludes the level, but re-acquiring is better than losing the tail).\",\"region_height\":20,\"region_width\":20,\"threshold\":5,\"min_peak\":40,\"track\":true,\"reacquire_after\":10}",
+			"uri": "anyloop:fit_com",
 			"params": {
-				"_note": "tracked 20x20, threshold 5, min_peak 40 -- the steering configuration exactly, so the gain is measured through the same sensor the loop uses. reacquire_after 10 matters more here than in a sweep: a staircase moves the beam 1.5 px per level, and a lost window would otherwise hold its last coordinate for the rest of the run (gain_test does detect that and excludes the level, but re-acquiring is better than losing the tail).",
-				"region_height": 20,
-				"region_width": 20,
-				"threshold": 5,
-				"min_peak": 40,
-				"track": true,
-				"reacquire_after": 10
+				"window_height": 55,
+				"window_width": 55,
+				"sigma_init": 6.55,
+				"sigma_min": 1.965,
+				"sigma_max": 26.2,
+				"min_amplitude": 21.39,
+				"max_iter": 4,
+				"max_us": 25,
+				"robust_k": 2.5,
+				"robust_iter": 1,
+				"fit_slope": true,
+				"row_time": 0,
+				"reacquire_after": 300
 			}
 		},
 		{
@@ -67,7 +78,7 @@
 		},
 		{
 			"_note1": "THE TEST. Drives element 1 (x) and watches element 1 of the CoM ([y, x]); y stays at 0 command, i.e. parked at 0 V.",
-			"_note2": "21 levels at 1 s each = 21 s of staircase, plus 10 s warmup and 2 s of ramp at each end. settle_frac 0.5 throws away the first half of every level and averages the second: at ~3.8 kHz that is ~1900 samples per level, against an FSM that settles in well under a millisecond.",
+			"_note2": "21 levels at 1 s each = 21 s of staircase, plus 10 s warmup and 2 s of ramp at each end. settle_frac 0.5 throws away the first half of every level and averages the second: at fs 2310 Hz (64x64, exp 400, measured 2026-08-06 -- not the 3788 Hz this note used to assume) that is ~1150 samples per level, against an FSM that settles in well under a millisecond.",
 			"_updown": "off, so this is the 21 s run as specified. Turn it on (42 s) for two things a single ramp cannot give: hysteresis, and a drift-corrected gain -- in a plain rising staircase the command and the clock are the same axis, so drift and gain are collinear and the device declines to split them. Worth doing whenever a K matters, since the beam here walks several px per hour.",
 			"_pixel_scale": "MUST TRACK THE ROI: (dim-1)/2 = 31.5 px per unit at 64x64 (79.5 at the 160x160 on the ASI662MM, 15.5 at the old 32x32). Only affects the px figures in the report, never the slope.",
 			"_volts_per_unit": "the DAC scale of the driven channel, -1.0 for x below. Reporting only -- it converts the slope into px/V and mV/px and carries the optical sign.",
@@ -89,7 +100,7 @@
 				"resp_max": 0.9,
 				"volts_per_unit": -1.0,
 				"pixel_scale": 31.5,
-				"config": "x/tilt DC gain through the PARPORT DAC (DAC81404, spi link, mmio, +-5 V range, mirror parked at 0 V), no coarse stage, ch0=y parked / ch1=x driven at scale -1.0 V/unit. 64x64 ROI 644/318, exp 400, gain 0, tracked 20x20 thr 5 min_peak 40. Compare the slope against fsm_bodex_par2.dat's fit_K 4.05 and against the small-signal sweeps (4.056 at +-20 mV).",
+				"config": "x/tilt DC gain through the PARPORT DAC (DAC81404, spi link, mmio, +-5 V range, mirror parked at 0 V), no coarse stage, ch0=y parked / ch1=x driven at scale -1.0 V/unit. ASI290MM 64x64 ROI 1084/418, exp 400, gain 0, fs ~2310 Hz, fit_com 55x55 sigma_init 6.55. Compare the slope against fsm_bodex_par2.dat's fit_K 4.05 and the +-20 mV small-signal 4.056 ONLY IF par2 was taken at this ROI SIZE -- K is normalized, so it rescales with (dim-1)/2. This slope, not par2, is what goes into steering_par_fsp.json's x.K.",
 				"output_file": "fsm_gainx_par.pdf"
 			}
 		},
