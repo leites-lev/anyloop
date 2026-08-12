@@ -237,6 +237,10 @@ Parameters
 - `max_us` (default 10): latency cap for the whole call, in microseconds. 0
   disables it and leaves `max_iter` as the only bound. See *Bounding the
   latency* above for what it costs on a scene that wants more iterations.
+- `fit_gaussian` (default true): run the Gaussian LM solver. Set false only
+  with `moment_output: true` to use the intensity-moment/PWM tracker without
+  allowing a Gaussian fit to affect validity or output. Acquisition, moment
+  gates, held-frame flags and beam-loss/reacquisition remain active.
 - `tol` (default 1e-4): relative cost improvement at which to stop. Note this is
   relative to the *whole window's* cost, which on a large frame is dominated by
   background pixels the fit cannot improve, so it fires earlier than its face

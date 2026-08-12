@@ -74,15 +74,15 @@ def asi_stage(cfg):
     return None
 
 
-def camera_from_config(path):
-    """The camera_name a config asks for, or None if it names no camera."""
+def camera_params_from_config(path):
+    """Camera parameters requested by a config, or None if it has no camera."""
     try:
         st = asi_stage(json.load(open(path)))
     except (ValueError, OSError) as e:
         print(f"# WARNING: cannot read {os.path.basename(path)}: {e}",
               file=sys.stderr)
         return None
-    return (st or {}).get("params", {}).get("camera_name")
+    return (st or {}).get("params")
 
 
 def list_cameras():
@@ -135,12 +135,14 @@ def sensor_size(camera):
     return None
 
 
-def capture(exposure, camera=None, sensor=None):
+def capture(exposure, gain=None, camera=None, sensor=None):
     """Run probe_frame.json (with overrides applied) -> aylp path."""
     cfg = json.load(open(PROBE_CFG))
     params = asi_stage(cfg)["params"]
     if exposure is not None:
         params["exposure"] = exposure
+    if gain is not None:
+        params["gain"] = gain
     if camera is not None:
         params["camera_name"] = camera
     if sensor is not None:
@@ -158,10 +160,19 @@ def capture(exposure, camera=None, sensor=None):
     tmp = os.path.join(ROOT, ".find_roi_probe.json")
     json.dump(cfg, open(tmp, "w"))
     try:
-        print(f"# capturing (exp={params['exposure']}us) -- give the beam ~30 s to park...",
+        print(f"# capturing (exp={params['exposure']}us, gain={params['gain']}) "
+              "-- give the beam ~30 s to park...",
               file=sys.stderr)
-        subprocess.run([ANYLOOP, tmp], cwd=ROOT, check=True,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        probe = subprocess.run([ANYLOOP, tmp], cwd=ROOT, text=True,
+                               stdout=subprocess.PIPE,
+                               stderr=subprocess.STDOUT)
+        if probe.returncode:
+            # A failed camera mode used to surface only as CalledProcessError,
+            # hiding the ASI SDK's actual reason and making an automatic ROI
+            # checkpoint impossible to diagnose.
+            if probe.stdout:
+                print(probe.stdout, file=sys.stderr, end="")
+            probe.check_returncode()
     finally:
         os.remove(tmp)
     return out
@@ -184,23 +195,97 @@ def read_frames(path):
     return np.mean(fr, axis=0)
 
 
+def dominant_component(mask):
+    """Return y/x indices for the largest 8-connected True component.
+
+    A full sensor contains occasional hot pixels and readout artefacts.  Taking
+    the centroid of every half-peak pixel lets those unrelated pixels pull the
+    answer away from a dim but spatially coherent spot.
+    """
+    todo = mask.copy()
+    height, width = todo.shape
+    largest = []
+    for y, x in zip(*np.nonzero(todo)):
+        if not todo[y, x]:
+            continue
+        todo[y, x] = False
+        stack = [(int(y), int(x))]
+        component = []
+        while stack:
+            py, px = stack.pop()
+            component.append((py, px))
+            for ny in range(max(0, py - 1), min(height, py + 2)):
+                for nx in range(max(0, px - 1), min(width, px + 2)):
+                    if todo[ny, nx]:
+                        todo[ny, nx] = False
+                        stack.append((ny, nx))
+        if len(component) > len(largest):
+            largest = component
+    if not largest:
+        return np.array([], dtype=int), np.array([], dtype=int)
+    points = np.asarray(largest)
+    return points[:, 0], points[:, 1]
+
+
 def beam_com(img):
-    """Background-subtracted 50%-of-peak centroid, with a sanity check."""
-    sub = img - np.median(img)
-    sub[sub < 0] = 0
-    ys, xs = np.nonzero(sub >= sub.max() * 0.5)
-    w = sub[ys, xs]
-    t = w.sum()
-    cx, cy = (xs * w).sum() / t, (ys * w).sum() / t
-    H, W = img.shape
-    near_centre = abs(cx - (W - 1) / 2) < 20 and abs(cy - (H - 1) / 2) < 20
-    if img.max() < 60:
-        print(f"# WARNING: dim frame (max px {img.max():.0f}) -- beam may be missing",
-              file=sys.stderr)
-    if near_centre and img.max() < 80:
-        print("# WARNING: CoM near sensor centre on a dim frame -- likely background,"
-              " not the beam", file=sys.stderr)
-    return cx, cy, img.max()
+    """Locate the dominant spatially coherent half-peak spot."""
+    background = float(np.median(img))
+    sub = np.maximum(img - background, 0)
+    raw_peak_signal = float(sub.max())
+    if raw_peak_signal <= 0:
+        return 0.0, 0.0, float(img.max()), {
+            "valid": False, "support": 0, "threshold_support": 0,
+            "dominance": 0.0, "peak_signal": raw_peak_signal,
+            "background": background,
+        }
+
+    # Find the brightest 3x3 neighbourhood first.  Basing the threshold on the
+    # raw global maximum lets one hot pixel hide a dim, resolved beam.
+    padded = np.pad(sub, 1)
+    smooth = sum(padded[dy:dy + img.shape[0], dx:dx + img.shape[1]]
+                 for dy in range(3) for dx in range(3))
+    py, px = np.unravel_index(np.argmax(smooth), smooth.shape)
+    neighbourhood = sub[max(0, py - 1):py + 2, max(0, px - 1):px + 2]
+    peak_signal = float(neighbourhood.max())
+    mask = sub >= peak_signal * 0.5
+    threshold_support = int(mask.sum())
+    # A near-uniform image has no localisable spot and would make the Python
+    # component walk needlessly expensive.
+    if threshold_support > img.size // 4:
+        return 0.0, 0.0, float(img.max()), {
+            "valid": False, "support": 0,
+            "threshold_support": threshold_support, "dominance": 0.0,
+            "peak_signal": peak_signal, "background": background,
+        }
+
+    ys, xs = dominant_component(mask)
+    support = len(xs)
+    if support:
+        weights = sub[ys, xs]
+        total = weights.sum()
+        cx = float((xs * weights).sum() / total)
+        cy = float((ys * weights).sum() / total)
+        span_x = int(xs.max() - xs.min() + 1)
+        span_y = int(ys.max() - ys.min() + 1)
+    else:
+        cx = cy = 0.0
+        span_x = span_y = 0
+    dominance = support / threshold_support if threshold_support else 0.0
+    # Area alone is not a safe coherence test: a well-focused beam can have
+    # fewer than 25 half-peak pixels while still spanning several rows and
+    # columns. Accept that compact case only when one component owns at least
+    # half of all selected pixels. The wider/speckled case retains the older
+    # 25-pixel / 35% rule. Both branches exclude isolated hot pixels and thin
+    # readout streaks through the 2-D span requirement.
+    resolved = span_x >= 3 and span_y >= 3
+    compact = support >= 9 and dominance >= 0.40
+    extended = support >= 25 and dominance >= 0.35
+    valid = resolved and (compact or extended)
+    return cx, cy, float(img.max()), {
+        "valid": valid, "support": support,
+        "threshold_support": threshold_support, "dominance": dominance,
+        "peak_signal": peak_signal, "background": background,
+    }
 
 
 def align(v, a):
@@ -223,7 +308,7 @@ def asi_params(cfg):
 
 
 def com_window(cfg):
-    """Tracking-window (h, w) from the config's center_of_mass, or None.
+    """Tracking-window (h, w) from the config's COM tracker, or None.
 
     The window centres on the beam and spans (region-1)/2 either side, so an
     off-centre park eats into the clearance against the ROI edge. Running out
@@ -235,6 +320,12 @@ def com_window(cfg):
             p = st.get("params", {})
             if "region_height" in p and "region_width" in p:
                 return p["region_height"], p["region_width"]
+        if st.get("uri") == "anyloop:fit_com":
+            p = st.get("params", {})
+            height = p.get("window_height", 0)
+            width = p.get("window_width", 0)
+            if height and width:
+                return height, width
     return None
 
 
@@ -243,7 +334,9 @@ def main():
     ap.add_argument("--no-capture", action="store_true",
                     help="reuse existing probe_full.aylp instead of grabbing a new one")
     ap.add_argument("--exposure", type=int, default=None,
-                    help="probe exposure in µs (default: whatever probe_frame.json has)")
+                    help="probe exposure in µs (default: reference config)")
+    ap.add_argument("--gain", type=int, default=None,
+                    help="probe gain (default: reference config)")
     ap.add_argument("--settle", type=float, default=30.0,
                     help="seconds to wait for the FSM to park before capturing (default 30; "
                          "the beam drifts for ~30 s after the hold starts). Use 0 to skip.")
@@ -256,6 +349,9 @@ def main():
     ap.add_argument("--aylp", default=None, help="path to an existing .aylp probe file")
     ap.add_argument("--write", action="store_true",
                     help="edit the computed start_x/start_y back into each config")
+    ap.add_argument("--config", action="append", dest="configs", default=[],
+                    help="limit reporting/writes to this config (repeatable; "
+                         "default is every contrib JSON)")
     args = ap.parse_args()
 
     if args.aylp:
@@ -263,7 +359,8 @@ def main():
     elif args.no_capture:
         path = os.path.join(ROOT, "probe_full.aylp")
     else:
-        camera = args.camera or camera_from_config(args.ref_config)
+        ref_params = camera_params_from_config(args.ref_config) or {}
+        camera = args.camera or ref_params.get("camera_name")
         if camera is None:
             sys.exit(f"no camera_name in {args.ref_config} and none given -- "
                      "pass --camera")
@@ -280,12 +377,27 @@ def main():
             print(f"# settling: waiting {args.settle:.0f} s for the beam to park "
                   "(make sure the FSM is held at bias)...", file=sys.stderr)
             time.sleep(args.settle)
-        path = capture(args.exposure, camera, sensor)
+        exposure = (args.exposure if args.exposure is not None
+                    else ref_params.get("exposure"))
+        gain = args.gain if args.gain is not None else ref_params.get("gain")
+        path = capture(exposure, gain, camera, sensor)
 
     img = read_frames(path)
-    bx, by, mx = beam_com(img)
+    bx, by, mx, detection = beam_com(img)
     H, W = img.shape
+    if args.write and not detection["valid"]:
+        sys.exit(f"refusing --write: probe signal {detection['peak_signal']:.1f} "
+                 f"DN above background, dominant half-peak support "
+                 f"{detection['support']} px ({detection['dominance']:.0%} of "
+                 "selected pixels); no spatially coherent beam was found")
+    if not detection["valid"]:
+        print("# WARNING: no spatially coherent beam was found; do not use the "
+              "reported position", file=sys.stderr)
     print(f"# beam CoM: x={bx:.1f}  y={by:.1f}   (sensor {W}x{H}, peak px {mx:.0f})")
+    print(f"# dominant half-peak support: {detection['support']} / "
+          f"{detection['threshold_support']} px "
+          f"({detection['dominance']:.0%}); signal "
+          f"{detection['peak_signal']:.1f} DN above background")
     print(f"# offset = beam position minus frame centre (dim-1)/2, in ROI px:"
           f" 0.0 means the loop sees zero error with the beam parked.")
     print(f"# x is limited to +-2.0 by the 4-px ASI grid, y to +-1.0 by the"
@@ -293,7 +405,9 @@ def main():
     print(f"# {'config':28s} {'WxH':>9s}  start_x  start_y"
           f"   offset(x,y)  margin")
 
-    for f in sorted(glob.glob(os.path.join(ROOT, "contrib", "*.json"))):
+    files = args.configs or glob.glob(os.path.join(ROOT, "contrib", "*.json"))
+    files = [f if os.path.isabs(f) else os.path.join(ROOT, f) for f in files]
+    for f in sorted(set(files)):
         try:
             cfg = json.load(open(f))
         except (ValueError, OSError):

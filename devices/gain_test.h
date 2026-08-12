@@ -30,10 +30,14 @@ struct aylp_gain_test_data {
 	double warmup;		// seconds parked at bias before the sweep
 	double ramp;		// seconds to glide into/out of the staircase
 	bool updown;		// sweep back down again after reaching `high`
+	bool interleave;		// alternate low/high inward to decorrelate drift
+	size_t cycles;		// balanced interleaved passes over every level
+	bool use_rejected;	// include tracker-held samples (diagnostic only)
 	double volts_per_unit;	// DAC scale of the swept channel, for reporting
 	double pixel_scale;	// px per response unit, for reporting
 	double resp_max;	// |response| past this means the beam is leaving
 	double fit_range;	// extra fit over |cmd - bias| <= this (0 = off)
+	double min_r2;		// refuse report below this fit quality (0 = off)
 	char *output_file;	// PDF path; the .dat is written alongside it
 	char *config;		// free-text note copied into the .dat header
 

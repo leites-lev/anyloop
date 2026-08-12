@@ -2,3 +2,4 @@
 - [OptiPlex sushi serial quirks](optiplex-sushi-serial-port-quirks.md) — ttyS0 IRQ permanently dead, direct-register access is the fast path; SB disabled
 - [Parallel card + DAC81404 plan](parallel-card-dac81404-plan.md) — PEX1P2/AX99100 → BP-DAC81404EVM: **WORKING 2026-07-29, DAC outputs voltage**; as-built wiring, LDAC/CLR/RST on 10k pull-ups, restrap option dropped
 - [Pico parallel→SPI DAC bridge](pico-parallel-to-spi-dac-bridge.md) — DB25 → RP2350 PIO → SPI → DAC81404; off the critical path now that the direct bit-bang works, 5 V caveat, researched dead ends
+- [Steering + fit_com session, 2026-08-12](steering-fit-com-session-2026-08-12.md) — current camera/tracker parameters, automatic pre-centering behavior, gain/delay values, and the latest one-minute open/closed results

@@ -122,6 +122,14 @@ static inline double gt_now(void)
 static double gt_level_cmd(struct aylp_gain_test_data *data, size_t i)
 {
 	size_t n = data->n_levels;
+	if (data->interleave) {
+		size_t cycle = i / n;
+		size_t j = i % n;
+		size_t k = (j & 1) ? n - 1 - j/2 : j/2;
+		if (cycle & 1) k = n - 1 - k;
+		double v = data->low + (double)k * data->step;
+		return v > data->high ? data->high : v;
+	}
 	if (i >= n) i = 2*n - 1 - i;
 	double v = data->low + (double)i * data->step;
 	return v > data->high ? data->high : v;
@@ -145,6 +153,45 @@ static void gt_fit(struct aylp_gain_test_data *data)
 		y[n] = data->resp[i];
 		t[n] = data->times[i];
 		n++;
+	}
+	// Repeated interleaved cycles exist specifically to average disturbance
+	// that is independent of the commanded voltage. Fit one mean response per
+	// command level rather than treating every visit as a separate point in
+	// R2: the latter makes unavoidable beam motion look like a bad static
+	// plant fit and does not improve when cycles are added. Raw visits remain
+	// in resp[] and in the .dat output for repeatability/nonlinearity evidence.
+	if (data->cycles > 1 && n > 0) {
+		size_t grouped = 0;
+		for (size_t i = 0; i < n; i++) {
+			size_t g;
+			for (g = 0; g < grouped; g++)
+				if (fabs(x[g] - x[i]) <= 1e-9*fabs(data->step))
+					break;
+			if (g == grouped) {
+				x[grouped] = x[i];
+				y[grouped] = 0.0;
+				t[grouped] = 0.0;
+				grouped++;
+			}
+		}
+		for (size_t g = 0; g < grouped; g++) {
+			double sy = 0.0, st = 0.0;
+			size_t count = 0;
+			for (size_t i = 0; i < data->n_done; i++) {
+				if (!data->valid[i]
+					|| fabs(data->cmds[i] - x[g])
+						> 1e-9*fabs(data->step))
+					continue;
+				sy += data->resp[i];
+				st += data->times[i];
+				count++;
+			}
+			y[g] = sy/count;
+			t[g] = st/count;
+		}
+		log_info("gain_test: averaged %zu usable visits into %zu command "
+			"levels before fitting", n, grouped);
+		n = grouped;
 	}
 	if (n < 3) {
 		log_error("gain_test: only %zu usable levels; not fitting. "
@@ -450,6 +497,13 @@ static void gt_report(struct aylp_gain_test_data *data)
 				data->hysteresis * data->pixel_scale);
 	}
 
+	if (data->min_r2 > 0.0 &&
+			(!data->have_fit || data->r2 < data->min_r2)) {
+		log_error("gain_test: R2 %.6f is below min_r2 %.6f; refusing "
+			"to publish a calibration report",
+			data->have_fit ? data->r2 : 0.0, data->min_r2);
+		return;
+	}
 	if (!data->output_file) return;
 	const char *out = data->output_file;
 	const char *dot = strrchr(out, '.');
@@ -481,6 +535,7 @@ int gain_test_init(struct aylp_device *self)
 	data->settle_frac = 0.5;
 	data->warmup = 5.0;
 	data->ramp = 2.0;
+	data->cycles = 1;
 	data->volts_per_unit = 1.0;
 	data->pixel_scale = 1.0;
 	data->resp_max = 0.9;
@@ -512,6 +567,12 @@ int gain_test_init(struct aylp_device *self)
 			data->ramp = json_object_get_double(val);
 		} else if (!strcmp(key, "updown")) {
 			data->updown = json_object_get_boolean(val);
+		} else if (!strcmp(key, "interleave")) {
+			data->interleave = json_object_get_boolean(val);
+		} else if (!strcmp(key, "cycles")) {
+			data->cycles = json_object_get_uint64(val);
+		} else if (!strcmp(key, "use_rejected")) {
+			data->use_rejected = json_object_get_boolean(val);
 		} else if (!strcmp(key, "volts_per_unit")) {
 			data->volts_per_unit = json_object_get_double(val);
 		} else if (!strcmp(key, "pixel_scale")) {
@@ -520,6 +581,8 @@ int gain_test_init(struct aylp_device *self)
 			data->resp_max = json_object_get_double(val);
 		} else if (!strcmp(key, "fit_range")) {
 			data->fit_range = json_object_get_double(val);
+		} else if (!strcmp(key, "min_r2")) {
+			data->min_r2 = json_object_get_double(val);
 		} else if (!strcmp(key, "output_file")) {
 			// an empty name means "log the numbers, write nothing"
 			const char *v = json_object_get_string(val);
@@ -564,7 +627,16 @@ int gain_test_init(struct aylp_device *self)
 			data->n_levels);
 		return -1;
 	}
-	data->n_points = data->updown ? 2 * data->n_levels : data->n_levels;
+	if (!data->cycles) {
+		log_error("gain_test: cycles must be nonzero");
+		return -1;
+	}
+	if (!isfinite(data->min_r2) || data->min_r2 < 0.0 || data->min_r2 > 1.0) {
+		log_error("gain_test: min_r2 must be in [0,1]");
+		return -1;
+	}
+	data->n_points = data->interleave ? data->cycles * data->n_levels
+		: (data->updown ? 2 * data->n_levels : data->n_levels);
 
 	data->out = xcalloc_type(gsl_vector, data->out_size);
 	data->cmds = xcalloc(data->n_points, sizeof *data->cmds);
@@ -581,7 +653,8 @@ int gain_test_init(struct aylp_device *self)
 	log_info("gain_test: %zu levels from %G to %G in steps of %G, %G s "
 		"each%s; %.1f s of sweep after a %G s warmup and a %G s ramp",
 		data->n_levels, data->low, data->high, data->step, data->dwell,
-		data->updown ? " (up then down)" : "",
+		data->interleave ? " (interleaved)" :
+			(data->updown ? " (up then down)" : ""),
 		data->n_points * data->dwell, data->warmup, data->ramp);
 	if (data->volts_per_unit != 1.0)
 		log_info("gain_test: command unit is %G V at the DAC, so the "
@@ -653,8 +726,11 @@ int gain_test_proc(struct aylp_device *self, struct aylp_state *state)
 		data->dt_cnt++;
 		data->cmd = gt_level_cmd(data, data->point);
 		// settled window: the tail of the level
+		bool sensor_live = !(state->header.status
+			& (AYLP_FRAME_REJECTED | AYLP_BEAM_LOST));
 		if (t - data->stage_t0
-				>= data->dwell * (1.0 - data->settle_frac)) {
+				>= data->dwell * (1.0 - data->settle_frac)
+				&& (data->use_rejected || sensor_live)) {
 			if (!data->wcnt) {
 				data->wfirst = err;
 				data->wmoved = false;
@@ -686,8 +762,10 @@ int gain_test_proc(struct aylp_device *self, struct aylp_state *state)
 		data->resp_sem[i] = sqrt(var / data->wcnt);
 		data->counts[i] = data->wcnt;
 		data->times[i] = t - data->dwell*data->settle_frac/2.0 - data->t0;
-		data->branch[i] = data->point < data->n_levels
-			? GT_BRANCH_UP : GT_BRANCH_DOWN;
+		data->branch[i] = data->interleave
+			? ((data->point / data->n_levels) & 1)
+			: (data->point < data->n_levels
+				? GT_BRANCH_UP : GT_BRANCH_DOWN);
 		// A level is unusable if the beam is running out of the sensor,
 		// or if the sensor stopped moving altogether -- a tracked
 		// centroid stage that has lost the beam (center_of_mass past

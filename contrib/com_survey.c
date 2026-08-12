@@ -1,26 +1,11 @@
-// com_survey -- decide between anyloop:fit_com and anyloop:wfs_com from a
-// real open-loop capture, and report the beam/camera numbers the rest of the
-// tuning depends on.
+// com_survey -- validate and tune anyloop:fit_com from a real open-loop
+// capture, and report the beam/camera numbers the rest of the tuning depends
+// on.
 //
 // Capture with contrib/com_survey.json (one minute, no tracker, no loop, no
-// DAC), then run this over the resulting .aylp file. Both trackers are driven
-// over the SAME frames, so every comparison here is like-for-like.
-//
-// Why this needs measuring rather than reasoning: the two devices fail in
-// opposite directions and which one wins is a property of your beam.
-//   fit_com  fits a gaussian plus its intra-frame motion. It is far more
-//            accurate when that model describes the beam, reports absolute
-//            position, and treats rolling shutter as a fitted parameter --
-//            but a beam that is not gaussian biases it, and if the departure
-//            from gaussian MOVES (boiling speckle) that bias moves too and
-//            appears at the controller as real motion.
-//   wfs_com  correlates against a learned template. It does not care what
-//            shape the beam is, only that the shape is STABLE, so boiling
-//            speckle only adds noise instead of fabricating motion. It is
-//            less accurate on a clean beam and carries an acquisition-time
-//            offset.
-// So the decision turns on two measurables: how far the beam is from
-// gaussian, and whether that departure is frozen or boiling.
+// DAC), then run this over the resulting .aylp file. The fit parameters are
+// derived from that capture and accepted only when the ROI, saturation and
+// live-frame gates all pass.
 #include <math.h>
 #include <stdio.h>
 #include <stdint.h>
@@ -32,7 +17,6 @@
 
 #include "anyloop.h"
 #include "fit_com.h"
-#include "wfs_com.h"
 
 #define HDR 40
 #define MAXLAG 1024
@@ -82,30 +66,17 @@ static double ser_hf(const struct series *s)
 int main(int argc, char **argv)
 {
 	const char *path = 0;
+	const char *json_path = 0;
+	const char *trace_path = 0;
 	double fs = 3788.0, row_time = 0.0;
+	double exposure_us = 0.0, max_exposure_us = 0.0, camera_gain = 0.0;
 	size_t max_frames = 0;
-	// wfs_com geometry/gate overrides. The defaults below are derived from
-	// the measured spot further down; these exist because those heuristics
-	// are only a starting point and the rejection rate is the thing that
-	// tells you they were wrong. A grid whose outer cells hold almost no
-	// light cannot meet min_valid_subaps no matter how good the tracker is,
-	// and the resulting 90%+ rejection reads as "wfs_com loses" when it is
-	// really "wfs_com was asked for consensus among cells that are dark".
-	// Any value left at 0 keeps the derived default.
-	size_t o_cell = 0, o_grid = 0, o_minvalid = 0, o_fitwin = 0;
-	long o_sr = -1, o_edge = -1;
-	double o_minconf = -1.0, o_fluxfloor = -1.0;
+	size_t skip_frames = 0;
+	size_t o_fitwin = 0;
 	static const char *usage =
 		"usage: %s CAPTURE.aylp [--fs HZ] [--row-time S] "
-		"[--max-frames N]\n"
-		"  wfs_com overrides (0/unset = derive from the beam):\n"
-		"    --wfs-cell PX        subaperture size\n"
-		"    --wfs-grid N         N by N subapertures\n"
-		"    --wfs-min-valid N    subapertures required per frame\n"
-		"    --wfs-min-conf F     NCC confidence threshold\n"
-		"    --wfs-search-radius PX  correlation search half-width\n"
-		"    --wfs-edge 0|1       reject boundary matches\n"
-		"    --wfs-flux-floor F   per-cell flux gate\n"
+		"[--skip-frames N] [--max-frames N] [--json RESULT.json] [--trace TRACE.bin]\n"
+		"    [--exposure-us US] [--max-exposure-us US] [--gain G]\n"
 		"    --fit-window PX      fit_com window size\n";
 	for (int i = 1; i < argc; i++) {
 		if (!strcmp(argv[i], "--fs") && i+1 < argc) fs = atof(argv[++i]);
@@ -113,20 +84,18 @@ int main(int argc, char **argv)
 			row_time = atof(argv[++i]);
 		else if (!strcmp(argv[i], "--max-frames") && i+1 < argc)
 			max_frames = strtoull(argv[++i], 0, 0);
-		else if (!strcmp(argv[i], "--wfs-cell") && i+1 < argc)
-			o_cell = strtoull(argv[++i], 0, 0);
-		else if (!strcmp(argv[i], "--wfs-grid") && i+1 < argc)
-			o_grid = strtoull(argv[++i], 0, 0);
-		else if (!strcmp(argv[i], "--wfs-min-valid") && i+1 < argc)
-			o_minvalid = strtoull(argv[++i], 0, 0);
-		else if (!strcmp(argv[i], "--wfs-min-conf") && i+1 < argc)
-			o_minconf = atof(argv[++i]);
-		else if (!strcmp(argv[i], "--wfs-search-radius") && i+1 < argc)
-			o_sr = strtol(argv[++i], 0, 0);
-		else if (!strcmp(argv[i], "--wfs-edge") && i+1 < argc)
-			o_edge = strtol(argv[++i], 0, 0);
-		else if (!strcmp(argv[i], "--wfs-flux-floor") && i+1 < argc)
-			o_fluxfloor = atof(argv[++i]);
+		else if (!strcmp(argv[i], "--skip-frames") && i+1 < argc)
+			skip_frames = strtoull(argv[++i], 0, 0);
+		else if (!strcmp(argv[i], "--json") && i+1 < argc)
+			json_path = argv[++i];
+		else if (!strcmp(argv[i], "--trace") && i+1 < argc)
+			trace_path = argv[++i];
+		else if (!strcmp(argv[i], "--exposure-us") && i+1 < argc)
+			exposure_us = atof(argv[++i]);
+		else if (!strcmp(argv[i], "--max-exposure-us") && i+1 < argc)
+			max_exposure_us = atof(argv[++i]);
+		else if (!strcmp(argv[i], "--gain") && i+1 < argc)
+			camera_gain = atof(argv[++i]);
 		else if (!strcmp(argv[i], "--fit-window") && i+1 < argc)
 			o_fitwin = strtoull(argv[++i], 0, 0);
 		else if (argv[i][0] != '-') path = argv[i];
@@ -160,7 +129,11 @@ int main(int argc, char **argv)
 	long long bytes = ftell(f);
 	fseek(f, 0, SEEK_SET);
 	size_t fsz = HDR + H*W;
-	size_t nframes = (size_t)(bytes / (long long)fsz);
+	size_t total_frames = (size_t)(bytes / (long long)fsz);
+	if (skip_frames >= total_frames) {
+		fprintf(stderr, "%s: skip exceeds capture length\n", path); return 1;
+	}
+	size_t nframes = total_frames - skip_frames;
 	if (max_frames && nframes > max_frames) nframes = max_frames;
 	if (nframes < 100) {
 		fprintf(stderr, "%s: only %zu frames; need at least 100\n",
@@ -179,14 +152,18 @@ int main(int argc, char **argv)
 
 	// ---------------- pass 1: camera and beam characterisation -------
 	double bg_sum = 0, bg_sq = 0; size_t bg_n = 0;
-	double peak_sum = 0; size_t nsat = 0, npix_tot = 0;
-	double sig_sum = 0; size_t sig_n = 0;
+	size_t nsat = 0, npix_tot = 0;
+	size_t sig_n = 0;
 	double flux_sum = 0;
 	double cy_sum = 0, cx_sum = 0;
 	size_t sample_every = nframes/2000 ? nframes/2000 : 1;
+	size_t sample_cap = nframes/sample_every + 2, namp = 0, nsigma = 0;
+	double *amp_samples = malloc(sample_cap*sizeof(double));
+	double *sigma_samples = malloc(sample_cap*sizeof(double));
 	// running background sigma, so the moment cut below has something to
 	// use on the very first sampled frame
 	double bg_sd = 0.5;
+	fseek(f, (long long)skip_frames*fsz, SEEK_SET);
 	for (size_t k = 0; k < nframes; k++) {
 		if (fread(raw, 1, fsz, f) != fsz) { nframes = k; break; }
 		if (k % sample_every) continue;
@@ -210,7 +187,7 @@ int main(int argc, char **argv)
 			double v = bg_sq/bg_n - m*m;
 			bg_sd = v > 0.25 ? sqrt(v) : 0.5;
 		}
-		peak_sum += peak - bg;
+		amp_samples[namp++] = peak - bg;
 		// flux-weighted centroid and radial second moment above bg
 		double sw = 0, sy = 0, sx = 0;
 		double cut = 5.0*(bg_sd > 0.5 ? bg_sd : 0.5);
@@ -229,13 +206,23 @@ int main(int argc, char **argv)
 				double dy = i-cy, dx = j-cx;
 				sr2 += v*(dy*dy+dx*dx);
 			}
-		sig_sum += sqrt(sr2/sw/2.0); sig_n++;
+		double frame_sigma = sqrt(sr2/sw/2.0);
+		sig_n++;
+		sigma_samples[nsigma++] = frame_sigma;
 		flux_sum += sw; cy_sum += cy; cx_sum += cx;
 	}
 	double bg_mean = bg_n ? bg_sum/bg_n : 0;
 	bg_sd = bg_n ? sqrt(bg_sq/bg_n - bg_mean*bg_mean) : 0;
-	double amp_mean = sig_n ? peak_sum/sig_n : 0;
-	double sigma = sig_n ? sig_sum/sig_n : 2.0;
+	qsort(amp_samples, namp, sizeof(double), cmpd);
+	qsort(sigma_samples, nsigma, sizeof(double), cmpd);
+	double amp_p50 = namp ? amp_samples[namp/2] : 0;
+	double amp_p90 = namp ? amp_samples[(size_t)(0.90*(namp-1))] : 0;
+	double amp_p99 = namp ? amp_samples[(size_t)(0.99*(namp-1))] : 0;
+	// The upper-decile amplitude describes illuminated frames and is not
+	// pulled down by scheduled or sprinkled dark frames.
+	double amp_mean = amp_p90;
+	// Median width rejects both dark-frame noise and rare clipped/smeared fits.
+	double sigma = nsigma ? sigma_samples[nsigma/2] : 2.0;
 	double flux_mean = sig_n ? flux_sum/sig_n : 0;
 	double cy_mean = sig_n ? cy_sum/sig_n : H/2.0;
 	double cx_mean = sig_n ? cx_sum/sig_n : W/2.0;
@@ -243,7 +230,8 @@ int main(int argc, char **argv)
 
 	printf("\n--- camera and beam -------------------------------------------\n");
 	printf("  background        %6.2f counts, sigma %.2f\n", bg_mean, bg_sd);
-	printf("  beam amplitude    %6.1f counts above background\n", amp_mean);
+	printf("  beam amplitude    p50 %6.1f  p90 %6.1f  p99 %6.1f counts"
+	       " above background\n", amp_p50, amp_p90, amp_p99);
 	printf("  beam sigma        %6.2f px   (FWHM %.2f px)\n",
 		sigma, 2.3548*sigma);
 	printf("  mean position     (%.2f, %.2f) px\n", cy_mean, cx_mean);
@@ -253,73 +241,99 @@ int main(int argc, char **argv)
 		: "(ok)");
 
 	int sugg_thresh = (int)ceil(bg_mean + 5*bg_sd);
+	if (sugg_thresh < 0) sugg_thresh = 0;
+	if (sugg_thresh > 255) sugg_thresh = 255;
 	size_t sugg_win = (size_t)(2*ceil(4*sigma)+1);
 	if (sugg_win > H) sugg_win = H;
 	if (sugg_win > W) sugg_win = W;
+	double half_win = 0.5*(sugg_win - 1);
+	bool beam_clipped = cy_mean - half_win < 0 || cy_mean + half_win >= H ||
+		cx_mean - half_win < 0 || cx_mean + half_win >= W;
 	printf("\n  suggested threshold   %d      (background + 5 sigma)\n",
 		sugg_thresh);
 	printf("  suggested sigma_init  %.2f\n", sigma);
 	printf("  suggested window      %zu x %zu   (+/-4 sigma)\n",
 		sugg_win, sugg_win);
 
-	// ---------------- pass 2: run both trackers over the same frames --
-	char fitcfg[700], wfscfg[700];
-	if (o_fitwin) sugg_win = o_fitwin;
+	double suggested_exposure = exposure_us;
+	double suggested_gain = camera_gain;
+	if (exposure_us > 0.0 && amp_p90 > 1.0) {
+		const double target = 180.0;
+		double scale = target/amp_p90;
+		// The upper tail protects against clipping even when p90 itself is
+		// in range. This matters for a source whose bright phase varies.
+		if (sat_frac > 1e-3 && amp_p99 > 230.0 && 220.0/amp_p99 < scale)
+			scale = 220.0/amp_p99;
+		double cap = max_exposure_us > 0.0 ? max_exposure_us : exposure_us;
+		if (scale >= 1.0) {
+			// Add photons with exposure first. Gain is allowed to rise only
+			// after exposure reaches the no-frame-rate-loss ceiling.
+			suggested_exposure = exposure_us*scale;
+			if (suggested_exposure > cap) suggested_exposure = cap;
+			double remaining = scale*exposure_us/suggested_exposure;
+			if (remaining > 1.0)
+				suggested_gain += 200.0*log10(remaining);
+		} else if (camera_gain > 0.0) {
+			// Once gain has been added, remove it before shortening exposure.
+			suggested_gain += 200.0*log10(scale);
+		} else {
+			suggested_exposure = exposure_us*scale;
+		}
+		if (suggested_exposure > cap) suggested_exposure = cap;
+		if (suggested_exposure < 20.0) suggested_exposure = 20.0;
+		if (suggested_gain < 0.0) suggested_gain = 0.0;
+		if (suggested_gain > 200.0) suggested_gain = 200.0;
+		// Avoid reacting to harmless measurement scatter near the target.
+		if (amp_p90 >= 140.0 && amp_p90 <= 220.0 && sat_frac <= 1e-3) {
+			suggested_exposure = exposure_us;
+			suggested_gain = camera_gain;
+		}
+		suggested_exposure = 10.0*lround(suggested_exposure/10.0);
+		suggested_gain = 5.0*lround(suggested_gain/5.0);
+		printf("  camera (bright p90)   exposure %.0f -> %.0f us, gain %.0f -> %.0f\n",
+			exposure_us, suggested_exposure, camera_gain, suggested_gain);
+		printf("                         target 180 counts; exposure capped at %.0f us"
+		       " to preserve frame rate\n", cap);
+	}
+
+	// ---------------- pass 2: validate fit_com over every frame -------
+	char fitcfg[700];
+	// Validation and actuator calibration must tolerate commanded travel.
+	// The stationary 4-sigma footprint is only a clearance diagnostic; use
+	// the entire ROI unless the caller explicitly requests another window.
+	sugg_win = o_fitwin ? o_fitwin : (H < W ? H : W);
 	snprintf(fitcfg, sizeof fitcfg,
 		"{\"window_height\":%zu,\"window_width\":%zu,\"sigma_init\":%.3f,"
 		"\"sigma_min\":%.3f,\"sigma_max\":%.3f,\"min_amplitude\":%.2f,"
-		"\"max_iter\":4,\"robust_k\":2.5,\"robust_iter\":1,"
-		"\"fit_slope\":true,\"row_time\":%g,\"reacquire_after\":10}",
+		"\"max_step\":8.0,\"max_iter\":12,\"max_us\":300,"
+		"\"robust_k\":2.5,\"robust_iter\":1,\"fit_slope\":false,"
+		"\"moment_output\":true,\"moment_cut\":5.0,"
+		"\"pwm_period_frames\":14.57,\"pwm_dark_flux\":100,"
+		"\"pwm_bright_flux\":1000,\"pwm_full_start\":4,"
+		"\"pwm_full_end_margin\":2,"
+		"\"row_time\":%g,\"reacquire_after\":300}",
 		sugg_win, sugg_win, sigma, sigma*0.3 > 0.3 ? sigma*0.3 : 0.3,
-		sigma*4, amp_mean*0.1 > 5 ? amp_mean*0.1 : 5.0, row_time);
-	// wfs geometry sized from the measured spot: cells about one FWHM so
-	// each lit cell contains curvature rather than a bare gradient, which
-	// is the regime its correlation peak goes degenerate in.
-	size_t cell = o_cell ? o_cell : (size_t)ceil(2.0*sigma);
-	if (cell < 3) cell = 3;
-	size_t rows = o_grid ? o_grid : 3, cols = o_grid ? o_grid : 3;
-	size_t sr = o_sr >= 0 ? (size_t)o_sr : 2;
-	while (rows*cell + 2*sr > H && rows > 1) rows--;
-	while (cols*cell + 2*sr > W && cols > 1) cols--;
-	size_t minvalid = o_minvalid ? o_minvalid : (rows*cols+1)/2;
-	if (minvalid > rows*cols) minvalid = rows*cols;
-	double minconf = o_minconf >= 0.0 ? o_minconf : 0.55;
-	double fluxfloor = o_fluxfloor >= 0.0 ? o_fluxfloor
-		: (amp_mean*0.5 > 5 ? amp_mean*0.5 : 5.0);
-	snprintf(wfscfg, sizeof wfscfg,
-		"{\"subap_height\":%zu,\"subap_width\":%zu,\"subap_rows\":%zu,"
-		"\"subap_cols\":%zu,\"search_radius\":%zu,"
-		"\"reject_edge_matches\":%s,\"threshold\":%d,\"ref_beta\":0.01,"
-		"\"ref_beta_init\":0.25,\"ref_beta_tau\":2.0,"
-		"\"min_confidence\":%.3f,\"flux_floor\":%.1f,"
-		"\"min_valid_subaps\":%zu,\"rolling_shutter\":false,"
-		"\"max_row_shear\":2.5,\"reacquire_after\":10}",
-		cell, cell, rows, cols, sr,
-		o_edge == 0 ? "false" : "true", sugg_thresh, minconf,
-		fluxfloor, minvalid);
+		sigma*4, 5.0, row_time);
 	printf("\n--- tracker configuration used -------------------------------\n");
 	printf("  fit_com  window %zux%zu  sigma_init %.2f\n",
 		sugg_win, sugg_win, sigma);
-	printf("  wfs_com  %zux%zu cells of %zux%zu px  search_radius %zu"
-		"  reject_edge %s\n"
-		"           min_valid_subaps %zu  min_confidence %.2f  "
-		"flux_floor %.1f\n",
-		rows, cols, cell, cell, sr, o_edge == 0 ? "false" : "true",
-		minvalid, minconf, fluxfloor);
 
-	struct aylp_device fit_dev = {0}, wfs_dev = {0};
+	struct aylp_device fit_dev = {0};
 	json_object *fp = json_tokener_parse(fitcfg);
-	json_object *wp = json_tokener_parse(wfscfg);
-	fit_dev.params = fp; wfs_dev.params = wp;
+	fit_dev.params = fp;
 	if (fit_com_init(&fit_dev)) { fprintf(stderr, "fit_com init failed\n"); return 1; }
-	if (wfs_com_init(&wfs_dev)) { fprintf(stderr, "wfs_com init failed\n"); return 1; }
 	struct aylp_fit_com_data *fd = fit_dev.device_data;
-	struct aylp_wfs_com_data *wd = wfs_dev.device_data;
+	FILE *trace = trace_path ? fopen(trace_path, "wb") : 0;
+	if (trace_path && !trace) { perror(trace_path); return 1; }
 
-	struct series fy = {0}, fx = {0}, wy = {0}, wx = {0}, rres = {0};
+	struct series fy = {0}, fx = {0}, rres = {0};
+	struct series raw_y = {0}, raw_x = {0}, fit_raw_dy = {0},
+		fit_raw_dx = {0}, raw_flux = {0};
+	double *track_y = malloc(nframes*sizeof(double));
+	double *track_x = malloc(nframes*sizeof(double));
+	unsigned char *track_kind = calloc(nframes, 1); /* 1 complete, 2 inferred */
 	double *ftime = malloc(nframes*sizeof(double));
-	double *wtime = malloc(nframes*sizeof(double));
-	size_t frej = 0, wrej = 0, flost = 0, wlost = 0;
+	size_t frej = 0, flost = 0;
 	// fit_com sizes its window on the first frame it sees, so the residual
 	// map's extent is not known until then -- allocate the ring lazily.
 	size_t nlag = 0;
@@ -328,7 +342,7 @@ int main(int argc, char **argv)
 	double lag_num[4] = {0}, lag_da[4] = {0}, lag_db[4] = {0};
 	size_t lag_n[4] = {0};
 
-	fseek(f, 0, SEEK_SET);
+	fseek(f, (long long)skip_frames*fsz, SEEK_SET);
 	struct aylp_state st = {0};
 	size_t used = 0;
 	for (size_t k = 0; k < nframes; k++) {
@@ -343,20 +357,51 @@ int main(int argc, char **argv)
 		if (fr) frej++;
 		if (st.header.status & AYLP_BEAM_LOST) flost++;
 
-		st.matrix_uchar = img; st.header.status = 0;
-		t0 = now_s();
-		wfs_com_proc(&wfs_dev, &st);
-		wtime[used] = 1e6*(now_s()-t0);
-		if (st.header.status & AYLP_FRAME_REJECTED) wrej++;
-		if (st.header.status & AYLP_BEAM_LOST) wlost++;
 		used++;
 
 		if (k < 200) continue;	// let both settle
-		ser_add(&fy, (fd->last_y+1)/2*(H-1));
-		ser_add(&fx, (fd->last_x+1)/2*(W-1));
-		ser_add(&wy, (wd->last_y+1)/2*(H-1));
-		ser_add(&wx, (wd->last_x+1)/2*(W-1));
+		double fcy = (fd->last_y+1)/2*(H-1);
+		double fcx = (fd->last_x+1)/2*(W-1);
+		ser_add(&fy, fcy);
+		ser_add(&fx, fcx);
+		track_y[k] = fcy; track_x[k] = fcx;
+		if (!fr) track_kind[k] = fd->inferred_last ? 2 : 1;
+		if (trace) {
+			unsigned char flags = (fr ? 1 : 0) | (fd->inferred_last ? 2 : 0)
+				| ((st.header.status & AYLP_BEAM_LOST) ? 4 : 0);
+			fwrite(&fcy, sizeof fcy, 1, trace);
+			fwrite(&fcx, sizeof fcx, 1, trace);
+			fwrite(&flags, sizeof flags, 1, trace);
+			continue;
+		}
 		if (!fr) ser_add(&rres, fd->last_rms);
+
+		// Independent truth estimate from the raw pixels.  This does not use
+		// fit_com's centre, window, amplitude, residual, or validity flag.
+		// A border mean supplies the per-frame background and a fixed 2-DN
+		// excess cut suppresses read noise without changing with brightness.
+		double border = 0.0; size_t border_n = 0;
+		const unsigned char *px = raw + HDR;
+		for (uint64_t i = 0; i < H; i++)
+			for (uint64_t j = 0; j < W; j++)
+				if (i == 0 || j == 0 || i == H-1 || j == W-1) {
+					border += px[i*W+j]; border_n++;
+				}
+		double frame_bg = border_n ? border/border_n : 0.0;
+		double rw = 0.0, ry = 0.0, rx = 0.0;
+		for (uint64_t i = 0; i < H; i++)
+			for (uint64_t j = 0; j < W; j++) {
+				double v = (double)px[i*W+j] - frame_bg;
+				if (v <= 2.0) continue;
+				rw += v; ry += v*i; rx += v*j;
+			}
+		if (!fr && !fd->inferred_last && rw > 100.0) {
+			double rcy = ry/rw, rcx = rx/rw;
+			ser_add(&raw_y, rcy); ser_add(&raw_x, rcx);
+			ser_add(&fit_raw_dy, fcy-rcy);
+			ser_add(&fit_raw_dx, fcx-rcx);
+			ser_add(&raw_flux, rw);
+		}
 
 		// residual-map autocorrelation at several lags: does the part
 		// of the beam the gaussian cannot explain stay put, or boil?
@@ -394,6 +439,19 @@ int main(int argc, char **argv)
 		}
 	}
 	fclose(f);
+	if (trace) {
+		fclose(trace);
+		fit_com_fini(&fit_dev);
+		json_object_put(fp);
+		free(fy.v); free(fx.v); free(rres.v);
+		free(ftime); free(ring); free(raw);
+		free(amp_samples); free(sigma_samples);
+		free(track_y); free(track_x); free(track_kind);
+		gsl_matrix_uchar_free(img);
+		printf("wrote %zu tracker records to %s\n", used > 200 ? used-200 : 0,
+			trace_path);
+		return 0;
+	}
 
 	// ---------------- report -----------------------------------------
 	double resid = ser_mean(&rres);
@@ -424,105 +482,206 @@ int main(int argc, char **argv)
 	}
 
 	qsort(ftime, used, sizeof(double), cmpd);
-	qsort(wtime, used, sizeof(double), cmpd);
 	double period_us = 1e6/fs;
 	printf("\n--- cost per frame (this machine) -----------------------------\n");
 	printf("  fit_com  p50 %6.1f us  p99 %6.1f us  max %6.1f us   "
 		"(%.0f%% of the %.0f us period at p99)\n",
 		ftime[used/2], ftime[(size_t)(used*0.99)], ftime[used-1],
 		100*ftime[(size_t)(used*0.99)]/period_us, period_us);
-	printf("  wfs_com  p50 %6.1f us  p99 %6.1f us  max %6.1f us   "
-		"(%.0f%%)\n",
-		wtime[used/2], wtime[(size_t)(used*0.99)], wtime[used-1],
-		100*wtime[(size_t)(used*0.99)]/period_us);
 
-	printf("\n--- what each tracker reported --------------------------------\n");
+	printf("\n--- fit_com tracking result -----------------------------------\n");
+	double fit_hf = ser_hf(&fy);
 	printf("  %-9s %-12s %-12s %-11s %-9s %s\n", "", "rms y (px)",
 		"rms x (px)", "hf y (px)", "rejected", "beam_lost");
 	printf("  %-9s %-12.4f %-12.4f %-11.4f %-9.2f%% %zu\n", "fit_com",
-		ser_rms_about_mean(&fy), ser_rms_about_mean(&fx), ser_hf(&fy),
+		ser_rms_about_mean(&fy), ser_rms_about_mean(&fx), fit_hf,
 		100.0*frej/used, flost);
-	printf("  %-9s %-12.4f %-12.4f %-11.4f %-9.2f%% %zu\n", "wfs_com",
-		ser_rms_about_mean(&wy), ser_rms_about_mean(&wx), ser_hf(&wy),
-		100.0*wrej/used, wlost);
 	printf("  hf = rms of the frame-to-frame difference / sqrt(2): the\n"
 		"       high-frequency content, which is what the loop must\n"
 		"       reject and where fabricated motion shows up first.\n");
-	// disagreement between the two, which bounds how wrong at least one is
-	double dy = 0, dx = 0;
-	size_t nd = fy.n < wy.n ? fy.n : wy.n;
-	for (size_t i = 0; i < nd; i++) {
-		double a = (fy.v[i]-ser_mean(&fy)) - (wy.v[i]-ser_mean(&wy));
-		double b = (fx.v[i]-ser_mean(&fx)) - (wx.v[i]-ser_mean(&wx));
-		dy += a*a; dx += b*b;
-	}
-	printf("  they disagree by  %.4f px rms (y), %.4f px rms (x)\n",
-		nd ? sqrt(dy/nd) : 0.0, nd ? sqrt(dx/nd) : 0.0);
 
-	// ---------------- recommendation ---------------------------------
+	double dy_mean = ser_mean(&fit_raw_dy), dx_mean = ser_mean(&fit_raw_dx);
+	double dy_rms = ser_rms_about_mean(&fit_raw_dy);
+	double dx_rms = ser_rms_about_mean(&fit_raw_dx);
+	double max_abs_dy = 0.0, max_abs_dx = 0.0;
+	double fm = ser_mean(&raw_flux), fv = 0.0, fdy = 0.0, fdx = 0.0;
+	for (size_t i = 0; i < fit_raw_dy.n; i++) {
+		double ady = fabs(fit_raw_dy.v[i] - dy_mean);
+		double adx = fabs(fit_raw_dx.v[i] - dx_mean);
+		if (ady > max_abs_dy) max_abs_dy = ady;
+		if (adx > max_abs_dx) max_abs_dx = adx;
+		double df = raw_flux.v[i] - fm;
+		fv += df*df;
+		fdy += df*(fit_raw_dy.v[i] - dy_mean);
+		fdx += df*(fit_raw_dx.v[i] - dx_mean);
+	}
+	double bright_y = fv > 0.0 ? fdy/fv*fm : 0.0;
+	double bright_x = fv > 0.0 ? fdx/fv*fm : 0.0;
+	struct series infer_dy = {0}, infer_dx = {0}, hold_dy = {0}, hold_dx = {0},
+		predict_dy = {0}, predict_dx = {0};
+	size_t prev = (size_t)-1, next = 0;
+	size_t prev2 = (size_t)-1;
+	for (size_t k = 200; k < used; k++) {
+		if (track_kind[k] == 1) { prev2 = prev; prev = k; continue; }
+		if (track_kind[k] != 2 || prev == (size_t)-1) continue;
+		if (next <= k) {
+			next = k+1;
+			while (next < used && track_kind[next] != 1) next++;
+		}
+		if (next >= used) continue;
+		double a = (double)(k-prev)/(double)(next-prev);
+		double ty = track_y[prev] + a*(track_y[next]-track_y[prev]);
+		double tx = track_x[prev] + a*(track_x[next]-track_x[prev]);
+		ser_add(&infer_dy, track_y[k]-ty);
+		ser_add(&infer_dx, track_x[k]-tx);
+		ser_add(&hold_dy, track_y[prev]-ty);
+		ser_add(&hold_dx, track_x[prev]-tx);
+		if (prev2 != (size_t)-1) {
+			double dt = (double)(prev-prev2);
+			double py = track_y[prev] + (k-prev)*(track_y[prev]-track_y[prev2])/dt;
+			double px = track_x[prev] + (k-prev)*(track_x[prev]-track_x[prev2])/dt;
+			ser_add(&predict_dy, py-ty); ser_add(&predict_dx, px-tx);
+		}
+	}
+	double infer_y_bias = ser_mean(&infer_dy), infer_x_bias = ser_mean(&infer_dx);
+	double infer_y_rms = ser_rms_about_mean(&infer_dy);
+	double infer_x_rms = ser_rms_about_mean(&infer_dx);
+	printf("\n--- independent raw-pixel tracking check ----------------------\n");
+	printf("  compared %zu complete frames against border-subtracted raw centroid\n",
+		fit_raw_dy.n);
+	printf("  fit - raw bias       y %+7.3f px   x %+7.3f px\n", dy_mean, dx_mean);
+	printf("  disagreement RMS     y %7.3f px   x %7.3f px\n", dy_rms, dx_rms);
+	printf("  disagreement max     y %7.3f px   x %7.3f px\n",
+		max_abs_dy, max_abs_dx);
+	printf("  brightness coupling  y %+7.3f px / fractional flux   "
+		"x %+7.3f\n", bright_y, bright_x);
+	printf("  inferred shutter frames %zu, checked against bracketing complete frames\n",
+		infer_dy.n);
+	printf("  inference bias       y %+7.3f px   x %+7.3f px\n",
+		infer_y_bias, infer_x_bias);
+	printf("  inference error RMS  y %7.3f px   x %7.3f px\n",
+		infer_y_rms, infer_x_rms);
+	printf("  causal hold RMS      y %7.3f px   x %7.3f px\n",
+		ser_rms_about_mean(&hold_dy), ser_rms_about_mean(&hold_dx));
+	printf("  causal velocity RMS  y %7.3f px   x %7.3f px\n",
+		ser_rms_about_mean(&predict_dy), ser_rms_about_mean(&predict_dx));
+	for (double a=0.25; a<=0.75; a+=0.25) {
+		struct series by={0}, bx={0};
+		for(size_t i=0;i<infer_dy.n;i++) {
+			ser_add(&by, hold_dy.v[i]+a*(infer_dy.v[i]-hold_dy.v[i]));
+			ser_add(&bx, hold_dx.v[i]+a*(infer_dx.v[i]-hold_dx.v[i]));
+		}
+		printf("  blend %.2f RMS       y %7.3f px   x %7.3f px\n", a,
+			ser_rms_about_mean(&by),ser_rms_about_mean(&bx));
+		free(by.v); free(bx.v);
+	}
+
+	// ---------------- fit_com acceptance -----------------------------
 	printf("\n=================================================================\n");
 	const char *pick; const char *why;
-	if (sat_frac > 1e-3) {
-		pick = "NEITHER YET";
+	double fit_rejected = (double)frej/used;
+	bool raw_agrees = fit_raw_dy.n > used/10 && dy_rms < 0.5 && dx_rms < 0.5
+		&& fabs(bright_y) < 0.5 && fabs(bright_x) < 0.5;
+	bool inference_agrees = infer_dy.n > used/20 && infer_y_rms < 2.0
+		&& infer_x_rms < 1.25 && fabs(infer_y_bias) < 0.75
+		&& fabs(infer_x_bias) < 0.75;
+	// A rolling-shutter frame that crosses a PWM edge is intentionally held:
+	// at 80% duty the 20% off interval plus row-sliced transitions measured
+	// about 32% unusable frames.  Independent centroid agreement below still
+	// prevents this wider live-fraction allowance from admitting false motion.
+	const double max_rejected = 0.40;
+	if (beam_clipped) {
+		pick = "FAIL";
+		why = "the measured beam/window reaches outside the ROI. Re-centre\n"
+		"  or enlarge the ROI before using fit_com.";
+	} else if (sat_frac > 1e-3) {
+		pick = "FAIL";
 		why = "the beam is saturating, which destroys sub-pixel accuracy\n"
-		"  for both trackers. Reduce exposure or gain and re-run this\n"
-		"  survey before choosing.";
-	} else if (rel_resid < 0.010) {
-		pick = "fit_com";
-		why = "the beam is gaussian to within noise, which is fit_com's\n"
-		"  best case: far better accuracy, absolute position, and rolling\n"
-		"  shutter handled as a fitted parameter if it ever appears.";
-	} else if (persist > 0.70) {
-		pick = "fit_com";
-		why = "the beam departs from gaussian, but that departure is\n"
-		"  FROZEN. A static model error is a static bias, which the loop\n"
-		"  absorbs; it does not become fabricated motion. fit_com still\n"
-		"  wins on the part that matters.";
-	} else if (rel_resid > 0.035) {
-		pick = "wfs_com";
-		why = "the beam departs substantially from gaussian AND that\n"
-		"  departure is BOILING. A moving model error becomes fabricated\n"
-		"  motion that fit_com feeds to the controller as real. wfs_com\n"
-		"  correlates against a learned template, so it does not care what\n"
-		"  the shape is -- only that it is stable -- and boiling speckle\n"
-		"  costs it noise rather than a wandering centre.";
+		"  for fit_com. Reduce exposure or gain and re-run this survey.";
+	} else if (fit_rejected > max_rejected) {
+		pick = "FAIL";
+		why = "fit_com rejected more than 40% of frames. Fix\n"
+		"  centring, illumination, or tracker gates before driving.";
+	} else if (!raw_agrees) {
+		pick = "FAIL";
+		why = "fit_com does not agree with the independent raw-pixel\n"
+		"  centroid or its error depends on brightness. Do not drive.";
+	} else if (!inference_agrees) {
+		pick = "FAIL";
+		why = "shutter-frame inferred centres do not agree with the\n"
+		"  trajectory interpolated between complete frames. Do not drive.";
 	} else {
-		pick = "fit_com (marginal)";
-		why = "this sits between the clear cases: a moderate,\n"
-		"  partly-boiling departure from gaussian. fit_com is the better\n"
-		"  starting point, but compare the hf columns above -- if fit_com's\n"
-		"  high-frequency content is much larger than wfs_com's on a beam\n"
-		"  you believe is quiet, that excess is fabricated and you should\n"
-		"  switch.";
+		pick = "fit_com";
+		why = "fit_com passed ROI, saturation, live-frame, independent\n"
+		"  raw-centroid, and brightness-coupling gates.";
 	}
-	printf(" RECOMMENDATION:  %s\n", pick);
+	printf(" FIT_COM RESULT:  %s\n", pick);
 	printf("=================================================================\n");
 	printf("  %s\n", why);
 
-	printf("\n  Caveats you should not skip:\n");
-	printf("  - This capture has NO rolling-shutter shear in it (open loop,\n"
-	       "    beam near rest). Shear only ever helps fit_com, whose model\n"
-	       "    fits it, and only ever hurts wfs_com, which cannot correct\n"
-	       "    it. So this survey is the WORST case for fit_com -- re-run\n"
-	       "    it under real vibration before reversing a fit_com verdict.\n");
-	printf("  - rms/hf above are not accuracy. Real beam motion is in them\n"
-	       "    too, and there is no ground truth here. They are only\n"
-	       "    comparable BETWEEN the two trackers on the same frames.\n");
-	printf("  - The thresholds (0.010 / 0.035 / 0.70) come from a synthetic\n"
-	       "    multiplicative-speckle model, not from your optics. Near a\n"
-	       "    boundary, trust the hf comparison over the verdict.\n");
 
-	printf("\n  Suggested wfs_com geometry for this beam: %zux%zu cells of\n"
-	       "  %zux%zu px, search_radius %zu, min_valid_subaps %zu.\n",
-		rows, cols, cell, cell, sr, (rows*cols+1)/2);
-	printf("  Check that against the per-frame rejection rate above: if\n"
-	       "  wfs_com rejected a large fraction, min_valid_subaps is more\n"
-	       "  than the number of cells your beam actually lights.\n");
+	if (json_path) {
+		json_object *result = json_object_new_object();
+		json_object_object_add(result, "recommendation",
+			json_object_new_string(!strcmp(pick, "fit_com") ? "fit_com" :
+				"none"));
+		json_object_object_add(result, "fit_com", json_object_get(fp));
+		json_object_object_add(result, "frames",
+			json_object_new_int64((int64_t)nframes));
+		json_object_object_add(result, "fs_hz", json_object_new_double(fs));
+		json_object_object_add(result, "beam_sigma_px",
+			json_object_new_double(sigma));
+		json_object_object_add(result, "beam_amplitude_counts",
+			json_object_new_double(amp_mean));
+		json_object_object_add(result, "raw_disagreement_rms_y_px",
+			json_object_new_double(dy_rms));
+		json_object_object_add(result, "raw_disagreement_rms_x_px",
+			json_object_new_double(dx_rms));
+		json_object_object_add(result, "brightness_coupling_y_px",
+			json_object_new_double(bright_y));
+		json_object_object_add(result, "brightness_coupling_x_px",
+			json_object_new_double(bright_x));
+		json_object_object_add(result, "amplitude_p50_counts",
+			json_object_new_double(amp_p50));
+		json_object_object_add(result, "amplitude_p90_counts",
+			json_object_new_double(amp_p90));
+		json_object_object_add(result, "amplitude_p99_counts",
+			json_object_new_double(amp_p99));
+		json_object *camera = json_object_new_object();
+		json_object_object_add(camera, "exposure",
+			json_object_new_int((int)lround(suggested_exposure)));
+		json_object_object_add(camera, "gain",
+			json_object_new_int((int)lround(suggested_gain)));
+		json_object_object_add(result, "camera", camera);
+		json_object_object_add(result, "saturation_fraction",
+			json_object_new_double(sat_frac));
+		json_object_object_add(result, "beam_clipped",
+			json_object_new_boolean(beam_clipped));
+		json_object *position = json_object_new_object();
+		json_object_object_add(position, "y",
+			json_object_new_double(cy_mean));
+		json_object_object_add(position, "x",
+			json_object_new_double(cx_mean));
+		json_object_object_add(result, "beam_position", position);
+		json_object_object_add(result, "fit_rejected_fraction",
+			json_object_new_double((double)frej/used));
+		json_object_object_add(result, "fit_hf_px",
+			json_object_new_double(fit_hf));
+		if (json_object_to_file_ext(json_path, result,
+				JSON_C_TO_STRING_PRETTY) < 0) {
+			fprintf(stderr, "cannot write JSON result %s\n", json_path);
+			json_object_put(result);
+			return 1;
+		}
+		printf("\n  Machine-readable result written to %s\n", json_path);
+		json_object_put(result);
+	}
 
-	fit_com_fini(&fit_dev); wfs_com_fini(&wfs_dev);
-	json_object_put(fp); json_object_put(wp);
-	free(fy.v); free(fx.v); free(wy.v); free(wx.v); free(rres.v);
-	free(ftime); free(wtime); free(ring); free(raw);
+	fit_com_fini(&fit_dev);
+	json_object_put(fp);
+	free(fy.v); free(fx.v); free(rres.v);
+	free(ftime); free(ring); free(raw);
+	free(amp_samples); free(sigma_samples);
 	gsl_matrix_uchar_free(img);
 	return 0;
 }

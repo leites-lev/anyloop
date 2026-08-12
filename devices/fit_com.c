@@ -826,6 +826,21 @@ int fit_com_init(struct aylp_device *self)
 	data->tail_rows = 32;
 	data->min_amplitude = 5.0;
 	data->max_residual = 0.0;	// 0 => disabled
+	data->max_step = 0.0;		// 0 => disabled
+	data->moment_output = false;
+	data->fit_gaussian = true;
+	data->moment_cut = 5.0;
+	data->moment_max_y_skew = 0.0;
+	data->moment_min_y_width = 0.0;
+	data->pwm_period_frames = 0.0;
+	data->pwm_dark_flux = 100.0;
+	data->pwm_bright_flux = 1000.0;
+	data->pwm_full_start = 4;
+	data->pwm_full_end_margin = 2;
+	data->pwm_qy = 0.03;
+	data->pwm_qx = 0.03;
+	data->pwm_ry_full = 1.0;
+	data->pwm_rx_full = 1.0;
 	data->reacquire_after = 10;
 	data->row_time = 0.0;
 	bool fit_slope = true;
@@ -870,6 +885,30 @@ int fit_com_init(struct aylp_device *self)
 			data->min_amplitude = json_object_get_double(val);
 		} else if (!strcmp(key, "max_residual")) {
 			data->max_residual = json_object_get_double(val);
+		} else if (!strcmp(key, "max_step")) {
+			data->max_step = json_object_get_double(val);
+		} else if (!strcmp(key, "moment_output")) {
+			data->moment_output = json_object_get_boolean(val);
+		} else if (!strcmp(key, "fit_gaussian")) {
+			data->fit_gaussian = json_object_get_boolean(val);
+		} else if (!strcmp(key, "moment_cut")) {
+			data->moment_cut = json_object_get_double(val);
+		} else if (!strcmp(key, "moment_max_y_skew")) {
+			data->moment_max_y_skew = json_object_get_double(val);
+		} else if (!strcmp(key, "moment_min_y_width")) {
+			data->moment_min_y_width = json_object_get_double(val);
+		} else if (!strcmp(key, "moment_reject_inferred")) {
+			data->moment_reject_inferred = json_object_get_boolean(val);
+		} else if (!strcmp(key, "pwm_period_frames")) {
+			data->pwm_period_frames = json_object_get_double(val);
+		} else if (!strcmp(key, "pwm_dark_flux")) {
+			data->pwm_dark_flux = json_object_get_double(val);
+		} else if (!strcmp(key, "pwm_bright_flux")) {
+			data->pwm_bright_flux = json_object_get_double(val);
+		} else if (!strcmp(key, "pwm_full_start")) {
+			data->pwm_full_start = json_object_get_uint64(val);
+		} else if (!strcmp(key, "pwm_full_end_margin")) {
+			data->pwm_full_end_margin = json_object_get_uint64(val);
 		} else if (!strcmp(key, "reacquire_after")) {
 			data->reacquire_after = json_object_get_uint64(val);
 		} else if (!strcmp(key, "row_time")) {
@@ -885,7 +924,11 @@ int fit_com_init(struct aylp_device *self)
 		log_error("Provide both init_y and init_x, or neither");
 		return -1;
 	}
-	if (!data->max_iter) {
+	if (!data->fit_gaussian && !data->moment_output) {
+		log_error("fit_com: fit_gaussian=false requires moment_output=true");
+		return -1;
+	}
+	if (data->fit_gaussian && !data->max_iter) {
 		log_error("fit_com: max_iter must be nonzero");
 		return -1;
 	}
@@ -935,6 +978,32 @@ int fit_com_init(struct aylp_device *self)
 		log_error("fit_com: max_residual must be finite, non-negative");
 		return -1;
 	}
+	if (!isfinite(data->max_step) || data->max_step < 0.0) {
+		log_error("fit_com: max_step must be finite, non-negative");
+		return -1;
+	}
+	if (!isfinite(data->moment_cut) || data->moment_cut < 0.0) {
+		log_error("fit_com: moment_cut must be finite and non-negative");
+		return -1;
+	}
+	if (!isfinite(data->moment_max_y_skew)
+			|| data->moment_max_y_skew < 0.0) {
+		log_error("fit_com: moment_max_y_skew must be finite and non-negative");
+		return -1;
+	}
+	if (!isfinite(data->moment_min_y_width)
+			|| data->moment_min_y_width < 0.0
+			|| data->moment_min_y_width > 1.0) {
+		log_error("fit_com: moment_min_y_width must be in [0, 1]");
+		return -1;
+	}
+	if (!isfinite(data->pwm_period_frames) || data->pwm_period_frames < 0.0
+			|| !isfinite(data->pwm_dark_flux) || data->pwm_dark_flux < 0.0
+			|| !isfinite(data->pwm_bright_flux)
+			|| data->pwm_bright_flux <= data->pwm_dark_flux) {
+		log_error("fit_com: invalid PWM period/flux thresholds");
+		return -1;
+	}
 	if (!isfinite(data->row_time) || data->row_time < 0.0) {
 		log_error("fit_com: row_time must be finite and non-negative");
 		return -1;
@@ -976,6 +1045,7 @@ int fit_com_init(struct aylp_device *self)
 int fit_com_proc(struct aylp_device *self, struct aylp_state *state)
 {
 	struct aylp_fit_com_data *data = self->device_data;
+	data->inferred_last = false;
 	gsl_matrix_uchar *img = state->matrix_uchar;
 	if (UNLIKELY(!img || !img->data || img->size1 < 3 || img->size2 < 3
 			|| img->tda < img->size2)) {
@@ -1014,6 +1084,43 @@ int fit_com_proc(struct aylp_device *self, struct aylp_state *state)
 	plan_core(data, org_y, org_x);
 	prefetch_frame(data, img->data, img->tda, org_y, org_x);
 	gather_core(data, img->data, img->tda);
+	// Detect a rolling-shutter illumination edge against the previous complete
+	// Gaussian. Uniform brightness changes scale every row equally; a shutter
+	// edge makes the observed/expected ratio collapse on only part of the spot.
+	// Mask those rows before fitting so their zeros cannot pull the inferred
+	// full-beam centre toward the visible fragment.
+	unsigned char shutter_row[data->core_h];
+	memset(shutter_row, 0, sizeof shutter_row);
+	double row_ratio[data->core_h], ratio_max = 0.0;
+	for (size_t i = 0; i < data->core_h; i++) {
+		double obs = 0.0;
+		double y = data->core_y+i;
+		for (size_t j = 0; j < data->core_w; j++) {
+			double v = data->pix[i*data->core_stride+j]
+				- data->p[AYLP_FIT_P_BG];
+			if (v > 0.0) obs += v;
+		}
+		double dy = y-data->p[AYLP_FIT_P_Y0];
+		double row_shape = exp(-dy*dy/(2.0*data->p[AYLP_FIT_P_SIGMA]
+			*data->p[AYLP_FIT_P_SIGMA]));
+		row_ratio[i] = row_shape > 0.01 ? obs/row_shape : -1.0;
+		if (row_ratio[i] > ratio_max) ratio_max = row_ratio[i];
+	}
+	size_t shutter_low = 0, shutter_high = 0;
+	if (!fresh && ratio_max > 0.0)
+		for (size_t i = 0; i < data->core_h; i++) {
+			if (row_ratio[i] < 0.0) continue;
+			if (row_ratio[i] < 0.10*ratio_max) shutter_low++;
+			else shutter_high++;
+		}
+	bool shutter_masked = false;
+	if (shutter_masked)
+		for (size_t i = 0; i < data->core_h; i++)
+			if (row_ratio[i] >= 0.0 && row_ratio[i] < 0.10*ratio_max) {
+				shutter_row[i] = 1;
+				memset(data->weights+i*data->core_stride, 0,
+					data->core_w*sizeof *data->weights);
+			}
 	tail_sums(img->data, img->tda, org_y, org_x, data->win_h, data->win_w,
 		data->core_y, data->core_x, data->core_h, data->core_w,
 		data->tail_rows, &data->tail_n, &data->tail_s, &data->tail_s2);
@@ -1024,7 +1131,7 @@ int fit_com_proc(struct aylp_device *self, struct aylp_state *state)
 		.y0 = data->core_y, .x0 = data->core_x,
 		.ref_row = data->ref_row,
 		.pix = data->pix, .wt = data->weights,
-		.tn = data->tail_n,
+		.tn = shutter_masked ? 0 : data->tail_n,
 		.ts = data->tail_s,
 		.ts2 = data->tail_s2,
 	};
@@ -1036,6 +1143,14 @@ int fit_com_proc(struct aylp_device *self, struct aylp_state *state)
 	// converges in a couple of iterations.
 	double p[NP];
 	memcpy(p, data->p, sizeof(p));
+	bool frame_active[NP];
+	memcpy(frame_active, data->active, sizeof frame_active);
+	if (shutter_masked) {
+		frame_active[AYLP_FIT_P_SIGMA] = false;
+		frame_active[AYLP_FIT_P_BG] = false;
+		frame_active[AYLP_FIT_P_SY] = false;
+		frame_active[AYLP_FIT_P_SX] = false;
+	}
 
 	double JtJ[NP*NP], Jtr[NP], step[NP], trial[NP];
 	double *resid = data->resid, *resid_alt = data->resid_alt;
@@ -1067,7 +1182,7 @@ int fit_com_proc(struct aylp_device *self, struct aylp_state *state)
 	size_t it = 0;
 	bool converged = false, budget_hit = false;
 	double iter_us = 0.0;
-	for (; it < data->max_iter; it++) {
+	for (; data->fit_gaussian && it < data->max_iter; it++) {
 		// A latency guard, not an accuracy one: the loop is warm-started
 		// and an ordinary frame converges in two or three iterations
 		// well inside the budget, so what this bounds is the frame that
@@ -1121,7 +1236,10 @@ int fit_com_proc(struct aylp_device *self, struct aylp_state *state)
 				for (size_t i = 0; i < data->core_h; i++) {
 					double *w = data->weights
 						+ i*data->core_stride;
-					if (starved)
+					if (shutter_row[i])
+						for (size_t j = 0; j < data->core_w; j++)
+							w[j] = 0.0;
+					else if (starved)
 						for (size_t j = 0;
 								j < data->core_w; j++)
 							w[j] = 1.0;
@@ -1137,12 +1255,12 @@ int fit_com_proc(struct aylp_device *self, struct aylp_state *state)
 		cost = eval_jac(&ctx, p, JtJ, Jtr, resid, data->scratch);
 		bool stepped = false;
 		for (int attempt = 0; attempt < 8; attempt++) {
-			if (!solve_step(JtJ, Jtr, data->active, lambda, step)) {
+			if (!solve_step(JtJ, Jtr, frame_active, lambda, step)) {
 				lambda *= 10.0;
 				continue;
 			}
 			for (size_t a = 0; a < NP; a++)
-				trial[a] = p[a] + (data->active[a] ? step[a] : 0.0);
+				trial[a] = p[a] + (frame_active[a] ? step[a] : 0.0);
 			clamp_params(data, trial, max_y, max_x);
 			// Trial residuals go to the spare buffer, so an accepted
 			// step just swaps pointers instead of costing another
@@ -1187,27 +1305,219 @@ int fit_com_proc(struct aylp_device *self, struct aylp_state *state)
 	double ss = sum_sq(resid, nbuf) + tail_ss(&ctx, p[AYLP_FIT_P_BG]);
 	double rms = sqrt((ss > 0.0 ? ss : 0.0)/(double)npix);
 
-	bool ok = isfinite(p[AYLP_FIT_P_Y0]) && isfinite(p[AYLP_FIT_P_X0])
+	// A centre pinned to an image boundary is a constrained optimizer
+	// result, not a measured centroid.  Require one fitted sigma of support
+	// on every side so a clipped spot cannot be reported as valid motion.
+	double centre_margin = p[AYLP_FIT_P_SIGMA];
+	double step_y = p[AYLP_FIT_P_Y0] - data->p[AYLP_FIT_P_Y0];
+	double step_x = p[AYLP_FIT_P_X0] - data->p[AYLP_FIT_P_X0];
+	bool fit_ok = data->fit_gaussian
+		&& isfinite(p[AYLP_FIT_P_Y0]) && isfinite(p[AYLP_FIT_P_X0])
+		&& p[AYLP_FIT_P_Y0] >= centre_margin
+		&& p[AYLP_FIT_P_Y0] <= (double)(max_y-1) - centre_margin
+		&& p[AYLP_FIT_P_X0] >= centre_margin
+		&& p[AYLP_FIT_P_X0] <= (double)(max_x-1) - centre_margin
+		&& (fresh || data->max_step <= 0.0
+			|| hypot(step_y, step_x) <= data->max_step)
 		&& p[AYLP_FIT_P_AMP] >= data->min_amplitude
 		&& p[AYLP_FIT_P_SIGMA] > data->sigma_min
 		&& p[AYLP_FIT_P_SIGMA] < data->sigma_max
 		&& (data->max_residual <= 0.0 || rms <= data->max_residual);
 
+	// PWM illumination plus a rolling shutter can cut a bright spot at a row
+	// boundary. The raw intensity centroid of that fragment is not the beam
+	// centre. Use moments on complete frames, but when row skew/width identifies
+	// a shutter fragment publish the robust Gaussian's inferred full-spot centre.
+	double out_y = p[AYLP_FIT_P_Y0], out_x = p[AYLP_FIT_P_X0];
+	double moment_sum = 0.0, moment_peak = 0.0;
+	bool moment_ok = false, fragment = false;
+	double prev_y = (data->last_y+1.0)*0.5*(max_y-1.0);
+	double prev_x = (data->last_x+1.0)*0.5*(max_x-1.0);
+	if (data->moment_have_full) data->moment_full_age++;
+	if (data->moment_output) {
+		double row_flux[data->win_h];
+		memset(row_flux, 0, sizeof row_flux);
+		double bs = 0.0; size_t bn = 0;
+		for (size_t i = 0; i < data->win_h; i++)
+			for (size_t j = 0; j < data->win_w; j++)
+				if (i == 0 || j == 0 || i == data->win_h-1
+						|| j == data->win_w-1) {
+					bs += img->data[(org_y+i)*img->tda + org_x+j]; bn++;
+				}
+		double bg = bn ? bs/bn : 0.0, sy = 0.0, sx = 0.0;
+		double sw2 = 0.0, sy2 = 0.0, sx2 = 0.0;
+		for (size_t i = 0; i < data->win_h; i++)
+			for (size_t j = 0; j < data->win_w; j++) {
+				double v = (double)img->data[(org_y+i)*img->tda + org_x+j] - bg;
+				if (v > moment_peak) moment_peak = v;
+				if (v > 2.0) {
+					sw2 += v; sy2 += v*(org_y+i); sx2 += v*(org_x+j);
+					row_flux[i] += v;
+				}
+				if (v <= data->moment_cut) continue;
+				moment_sum += v; sy += v*(org_y+i); sx += v*(org_x+j);
+			}
+		if (moment_sum > 100.0) { out_y = sy/moment_sum; out_x = sx/moment_sum; }
+		double y2 = 0.0, y3 = 0.0;
+		if (moment_sum > 100.0)
+			for (size_t i = 0; i < data->win_h; i++)
+				for (size_t j = 0; j < data->win_w; j++) {
+					double v = (double)img->data[(org_y+i)*img->tda + org_x+j] - bg;
+					if (v <= data->moment_cut) continue;
+					double dy = (double)(org_y+i) - out_y;
+					y2 += v*dy*dy; y3 += v*dy*dy*dy;
+				}
+		double moment_y_width = moment_sum > 0.0 ? sqrt(y2/moment_sum) : 0.0;
+		double moment_y_skew = y2 > 0.0
+			? fabs((y3/moment_sum) / pow(y2/moment_sum, 1.5)) : INFINITY;
+		double out_y2 = sw2 > 100.0 ? sy2/sw2 : out_y;
+		double out_x2 = sw2 > 100.0 ? sx2/sw2 : out_x;
+		double margin = data->sigma_init;
+		double threshold_shift = hypot(out_y-out_y2, out_x-out_x2);
+		if (data->pwm_period_frames > 0.0) {
+			/* A dark onset is a much more reliable shutter-phase marker than
+			 * spot skew: this beam is intrinsically skewed even when fully on.
+			 * Frames safely inside the on plateau are calibration measurements;
+			 * transition frames get flux-dependent measurement noise and dark
+			 * frames are pure causal predictions. */
+			bool dark = sw2 < data->pwm_dark_flux;
+			if (dark && !data->pwm_prev_dark) {
+				data->pwm_phase = 0;
+				data->pwm_phase_locked = true;
+			} else if (data->pwm_phase_locked) {
+				data->pwm_phase++;
+			}
+			data->pwm_prev_dark = dark;
+			size_t last_full = (size_t)floor(data->pwm_period_frames)
+				- data->pwm_full_end_margin;
+			bool full = data->pwm_phase_locked
+				&& data->pwm_phase >= data->pwm_full_start
+				&& data->pwm_phase <= last_full;
+			bool bright = sw2 >= data->pwm_bright_flux;
+			bool measured = full && bright && sw2 > 100.0;
+			if (measured) {
+				data->pwm_y=out_y2; data->pwm_x=out_x2;
+				data->pwm_filter_have=true;
+			}
+			fragment = !measured;
+			moment_ok = data->pwm_filter_have;
+			if (moment_ok) { out_y=data->pwm_y; out_x=data->pwm_x; }
+		} else {
+		fragment = shutter_masked || (moment_sum > 100.0
+			&& moment_peak >= data->min_amplitude
+			&& (threshold_shift > 1.5
+				|| (data->moment_max_y_skew > 0.0
+					&& moment_y_skew > data->moment_max_y_skew)
+				|| (data->moment_min_y_width > 0.0
+					&& moment_y_width < data->moment_min_y_width
+						* data->sigma_init)));
+		moment_ok = moment_sum > 100.0 && moment_peak >= data->min_amplitude
+			&& sw2 > 100.0 && threshold_shift <= 1.5
+			&& out_y >= margin && out_y <= max_y-1.0-margin
+			&& out_x >= margin && out_x <= max_x-1.0-margin
+			&& (fresh || data->max_step <= 0.0
+				|| hypot(out_y-prev_y, out_x-prev_x) <= data->max_step);
+		if (fragment) {
+			double rfmax = 0.0;
+			for (size_t i = 0; i < data->win_h; i++)
+				if (row_flux[i] > rfmax) rfmax = row_flux[i];
+			double loy = fmax(margin, prev_y-4.0);
+			double hiy = fmin(max_y-1.0-margin, prev_y+4.0);
+			double measured_x = sx/moment_sum;
+			double best_y = prev_y, best_x = measured_x, best_ss = INFINITY,
+				best_ff = 0.0;
+			size_t nr = 0;
+			for (size_t i = 0; i < data->win_h; i++)
+				if (row_flux[i] >= 0.10*rfmax) nr++;
+			// Register the observed row profile against the latest complete
+			// frame. Brightness is a fitted scale and therefore cannot move it.
+			for (double yc=loy; yc<=hiy+0.25 && nr>=3; yc+=0.5) {
+				double tf=0.0, tt=0.0, ff=0.0;
+				for (size_t i=0; i<data->win_h; i++) {
+					if (row_flux[i] < 0.10*rfmax) continue;
+					double q=(org_y+i)-(yc-data->moment_template_y)
+						-data->moment_template_org_y;
+					long q0=(long)floor(q); double t=0.0, f=q-q0;
+					if (q0>=0 && (size_t)(q0+1)<data->moment_template_n)
+						t=(1-f)*data->moment_row_template[q0]
+							+f*data->moment_row_template[q0+1];
+					tf+=t*row_flux[i]; tt+=t*t; ff+=row_flux[i]*row_flux[i];
+				}
+				double ssr=tt>0.0 ? ff-tf*tf/tt : INFINITY;
+				if (ssr<best_ss) { best_ss=ssr; best_ff=ff; best_y=yc; }
+			}
+			double profile_rel = best_ff > 0.0 ? best_ss/best_ff : INFINITY;
+			if (data->moment_have_full) {
+				out_y = data->moment_full_y + 0.25*(best_y-data->moment_full_y);
+				out_x = data->moment_full_x + 0.25*(best_x-data->moment_full_x);
+			} else { out_y = best_y; out_x = best_x; }
+			moment_ok = nr >= 3 && isfinite(best_ss)
+				&& profile_rel < 0.50
+				&& out_y >= margin && out_y <= max_y-1.0-margin
+				&& out_x >= margin && out_x <= max_x-1.0-margin
+				&& (fresh || data->max_step <= 0.0
+					|| hypot(out_y-prev_y,out_x-prev_x)<=data->max_step);
+		}
+		if (!fragment && moment_ok) {
+			if (data->moment_template_cap < data->win_h) {
+				data->moment_row_template = xrealloc(data->moment_row_template,
+					data->win_h*sizeof *data->moment_row_template);
+				data->moment_template_cap = data->win_h;
+			}
+			memcpy(data->moment_row_template, row_flux,
+				data->win_h*sizeof *row_flux);
+			data->moment_template_n = data->win_h;
+			data->moment_template_org_y = org_y;
+			data->moment_template_y = out_y;
+			size_t ni=data->win_h*data->win_w;
+			if (data->moment_image_cap < ni) {
+				data->moment_image_template=xrealloc(data->moment_image_template,
+					ni*sizeof *data->moment_image_template);
+				data->moment_image_cap=ni;
+			}
+			for (size_t i=0;i<data->win_h;i++) for(size_t j=0;j<data->win_w;j++) {
+				double v=(double)img->data[(org_y+i)*img->tda+org_x+j]-bg;
+				data->moment_image_template[i*data->win_w+j]=v>0.0?v:0.0;
+			}
+			data->moment_template_w=data->win_w;
+			data->moment_template_org_x=org_x;
+			data->moment_template_x=out_x;
+		}
+		}
+	}
+	bool ok = data->moment_output ? moment_ok : fit_ok;
+
 	if (LIKELY(ok)) {
-		memcpy(data->p, p, sizeof(p));
+		data->inferred_last = fragment;
+		if (data->moment_output && !fragment) {
+			// Full frames alone update motion; a fragment prediction must never
+			// train on itself. Divide displacement by elapsed frames: complete
+			// frames can be separated by several PWM-sliced readouts.
+			if (data->moment_have_full && data->moment_full_age) {
+				double dy = (out_y-data->moment_full_y)/data->moment_full_age;
+				double dx = (out_x-data->moment_full_x)/data->moment_full_age;
+				data->moment_dy = 0.8*data->moment_dy + 0.2*dy;
+				data->moment_dx = 0.8*data->moment_dx + 0.2*dx;
+			}
+			data->moment_full_y = out_y; data->moment_full_x = out_x;
+			data->moment_full_age = 0; data->moment_have_full = true;
+		}
+		if (fit_ok && !fragment) memcpy(data->p, p, sizeof(p));
 		data->last_rms = rms;
 		data->vel_y = data->row_time > 0.0
 			? p[AYLP_FIT_P_SY]/data->row_time : 0.0;
 		data->vel_x = data->row_time > 0.0
 			? p[AYLP_FIT_P_SX]/data->row_time : 0.0;
-		data->last_y = -1.0 + 2.0*p[AYLP_FIT_P_Y0]/((double)max_y - 1.0);
-		data->last_x = -1.0 + 2.0*p[AYLP_FIT_P_X0]/((double)max_x - 1.0);
-		data->win_y = (size_t)llround(p[AYLP_FIT_P_Y0]);
-		data->win_x = (size_t)llround(p[AYLP_FIT_P_X0]);
+		data->last_y = -1.0 + 2.0*out_y/((double)max_y - 1.0);
+		data->last_x = -1.0 + 2.0*out_x/((double)max_x - 1.0);
+		data->win_y = (size_t)llround(out_y);
+		data->win_x = (size_t)llround(out_x);
 		clamp_window(data, max_y, max_x);
 		data->lost = 0;
 		state->header.status &= (aylp_status)~AYLP_FRAME_REJECTED;
 		state->header.status &= (aylp_status)~AYLP_BEAM_LOST;
+		if (fragment && data->moment_reject_inferred)
+			state->header.status |= AYLP_FRAME_REJECTED;
 	} else {
 		// The model could not describe this frame. Hold the last valid
 		// output rather than publish a diverged fit, and say so.
@@ -1245,6 +1555,8 @@ int fit_com_fini(struct aylp_device *self)
 		xfree(data->resid);
 		xfree(data->resid_alt);
 		xfree(data->scratch);
+		xfree(data->moment_row_template);
+		xfree(data->moment_image_template);
 		if (data->com) xfree_type(gsl_vector, data->com);
 	}
 	xfree(self->device_data);

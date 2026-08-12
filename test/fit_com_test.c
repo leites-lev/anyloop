@@ -355,7 +355,69 @@ static void test_no_beam(void)
 	gsl_matrix_uchar_free(img);
 }
 
-// ---- 7. the latency guard actually bounds latency ----------------------
+// ---- 7. a boundary-pinned solution is rejected --------------------------
+static void test_clipped_beam(void)
+{
+	printf("\n=== clipped beam is rejected instead of pinned to the boundary ===\n");
+	gsl_matrix_uchar *img = gsl_matrix_uchar_alloc(IMG, IMG);
+	json_object *p = cfg("");
+	struct aylp_device self = {0};
+	self.params = p;
+	if (fit_com_init(&self)) { CHECK(0, "init failed"); return; }
+	struct aylp_fit_com_data *d = self.device_data;
+	struct aylp_state st = {0};
+	render(img, 16.0, 16.0, 0.0, 0.0, 2.5, 200.0, 5.0);
+	for (int f = 0; f < 4; f++) {
+		st.matrix_uchar = img; st.header.status = 0;
+		fit_com_proc(&self, &st);
+	}
+	double hold_y = d->last_y, hold_x = d->last_x;
+	render(img, 31.0, 31.0, 0.0, 0.0, 2.5, 200.0, 5.0);
+	for (int f = 0; f < 4; f++) {
+		st.matrix_uchar = img; st.header.status = 0;
+		fit_com_proc(&self, &st);
+		CHECK(st.header.status & AYLP_FRAME_REJECTED,
+			"a clipped edge fit must be rejected on frame %d", f);
+		CHECK(d->last_y == hold_y && d->last_x == hold_x,
+			"a clipped edge fit must hold the last valid centroid");
+	}
+	fit_com_fini(&self);
+	json_object_put(p);
+	gsl_matrix_uchar_free(img);
+}
+
+// ---- 8. a solver jump cannot become a valid centroid --------------------
+static void test_max_step(void)
+{
+	printf("\n=== implausible one-frame centroid jump is rejected ===\n");
+	gsl_matrix_uchar *img = gsl_matrix_uchar_alloc(IMG, IMG);
+	json_object *p = cfg("\"max_step\":5.0");
+	struct aylp_device self = {0};
+	self.params = p;
+	if (fit_com_init(&self)) { CHECK(0, "init failed"); return; }
+	struct aylp_fit_com_data *d = self.device_data;
+	struct aylp_state st = {0};
+	render(img, 16.0, 16.0, 0.0, 0.0, 2.5, 200.0, 5.0);
+	for (int f = 0; f < 4; f++) {
+		st.matrix_uchar = img; st.header.status = 0;
+		fit_com_proc(&self, &st);
+	}
+	double hold_y = d->last_y, hold_x = d->last_x;
+	render(img, 25.0, 16.0, 0.0, 0.0, 2.5, 200.0, 5.0);
+	for (int f = 0; f < 4; f++) {
+		st.matrix_uchar = img; st.header.status = 0;
+		fit_com_proc(&self, &st);
+		CHECK(st.header.status & AYLP_FRAME_REJECTED,
+			"a >5 px one-frame fit jump must be rejected on frame %d", f);
+		CHECK(d->last_y == hold_y && d->last_x == hold_x,
+			"a rejected fit jump must hold the last valid centroid");
+	}
+	fit_com_fini(&self);
+	json_object_put(p);
+	gsl_matrix_uchar_free(img);
+}
+
+// ---- 9. the latency guard actually bounds latency ----------------------
 //
 // The device exists to fit inside a loop period, so the bound is a behaviour to
 // test rather than a hope. What a specific microsecond count would test is the
@@ -432,6 +494,50 @@ static void test_latency(void)
 		"(%.2f vs %.2f us)", cap_us, free_us);
 }
 
+// A PWM edge during rolling readout leaves a bright fragment of the spot.
+// Moment brightness and peak tests alone accept it and move the cross.  The
+// row-shape gates must make the tracker infer the complete Gaussian's centre,
+// while a uniformly dim whole spot must remain usable.
+static void test_pwm_shutter_fragment(void)
+{
+	printf("\n=== PWM rolling-shutter fragments are held ===\n");
+	gsl_matrix_uchar *full = gsl_matrix_uchar_alloc(IMG, IMG);
+	render(full, 16.0, 16.0, 0.0, 0.0, 2.5, 200.0, 5.0);
+	json_object *p = cfg("\"fit_slope\":false,\"moment_output\":true,"
+		"\"fit_gaussian\":false,"
+		"\"moment_cut\":5,\"moment_max_y_skew\":0.35,"
+		"\"moment_min_y_width\":0.70,\"max_step\":8");
+	struct aylp_device self = {0}; self.params = p;
+	CHECK(!fit_com_init(&self), "init failed");
+	struct aylp_fit_com_data *d = self.device_data;
+	struct aylp_state st = {0}; st.matrix_uchar = full;
+	for (int k = 0; k < 4; k++) { st.header.status = 0; fit_com_proc(&self, &st); }
+	double good_y = d->last_y, good_x = d->last_x;
+
+	gsl_matrix_uchar *cut = gsl_matrix_uchar_alloc(IMG, IMG);
+	memcpy(cut->data, full->data, IMG*full->tda);
+	for (size_t i = 17; i < IMG; i++)
+		for (size_t j = 0; j < IMG; j++) cut->data[i*cut->tda+j] = 5;
+	st.matrix_uchar = cut; st.header.status = 0; fit_com_proc(&self, &st);
+	CHECK(!(st.header.status & AYLP_FRAME_REJECTED),
+		"one-sided shutter fragment was not tracked");
+	CHECK(fabs(d->last_y-good_y)*(IMG-1)/2 < 0.35
+			&& fabs(d->last_x-good_x)*(IMG-1)/2 < 0.35,
+		"inferred full-beam centre moved by (%.3f, %.3f) px",
+		fabs(d->last_y-good_y)*(IMG-1)/2,
+		fabs(d->last_x-good_x)*(IMG-1)/2);
+
+	gsl_matrix_uchar *dim = gsl_matrix_uchar_alloc(IMG, IMG);
+	render(dim, 16.0, 16.0, 0.0, 0.0, 2.5, 60.0, 5.0);
+	st.matrix_uchar = dim; st.header.status = 0; fit_com_proc(&self, &st);
+	CHECK(!(st.header.status & AYLP_FRAME_REJECTED),
+		"uniformly dim whole beam was rejected as a shutter fragment");
+
+	fit_com_fini(&self); json_object_put(p);
+	gsl_matrix_uchar_free(full); gsl_matrix_uchar_free(cut);
+	gsl_matrix_uchar_free(dim);
+}
+
 
 int main(void)
 {
@@ -441,6 +547,9 @@ int main(void)
 	test_static();
 	test_stray();
 	test_no_beam();
+	test_clipped_beam();
+	test_max_step();
+	test_pwm_shutter_fragment();
 	test_latency();
 	if (failures) {
 		printf("\n%d CHECK(S) FAILED\n", failures);

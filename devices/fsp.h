@@ -318,6 +318,12 @@ struct aylp_fsp_axis {
 	// separately as a constant-over-the-horizon component.  This keeps a
 	// large DC/random-walk component from consuming FIR dynamic range.
 	double drift_hat;
+	// Optional second slow-state component.  With drift_order=2 this is the
+	// estimated disturbance slope (error units/s); drift_hat is propagated by
+	// one sample before the innovation update and by the command horizon when
+	// forming the cancellation request.  This embeds the ramp internal model
+	// in the FSP instead of requiring an outer integral controller.
+	double drift_rate;
 	// Large-innovation recovery path. The normal command is cross-faded to a
 	// bounded proportional/modal command while transient_active is set. The
 	// broadband NLMS weights freeze for the event and return cross-fade, leaving
@@ -440,6 +446,9 @@ struct aylp_fsp_data {
 	// seconds to hold the command at 0 (loop open) at startup while the
 	// Kalman filter converges on the clean open-loop disturbance
 	double start_delay;
+	// Optional DC-only startup centering. After precenter_delay, the slow
+	// drift estimate is cancelled while modal/broadband authority remains off.
+	double precenter_delay, precenter_ramp, precenter_clamp;
 	// seconds over which the command blends 0 -> full authority after the
 	// hold, so the handover is bumpless
 	double ramp;
@@ -594,6 +603,7 @@ struct aylp_fsp_data {
 	// original compound-disturbance predictor.
 	double drift_tau;
 	double drift_beta;	// derived from drift_tau and fs
+	unsigned drift_order;	// 1 = EWMA position, 2 = alpha-beta position/rate
 	// Innovation-triggered transient/reacquisition path. transient_sigma <= 0
 	// disables it.  By default a bounded P servo replaces prediction.  With
 	// transient_modal_q_scale > 0, a high-process-noise copy of the damped-mode

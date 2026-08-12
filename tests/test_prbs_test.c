@@ -337,6 +337,55 @@ static void test_dead_plant_is_reported(void)
 	unmake(&dev);
 }
 
+/** Finding a correlation lobe is necessary but no longer sufficient for a
+ * bench calibration. Strict runs reject poor phase fits and inadequate live
+ * coverage while preserving the candidate diagnostics for troubleshooting. */
+static void test_quality_gates(void)
+{
+	current_test = "quality_gates_pass";
+	struct aylp_device dev;
+	CHECK(!make(&dev, BURSTS ",\"min_peak_snr\":8,"
+		"\"max_phase_resid_deg\":20,\"min_phase_bins\":4,"
+		"\"min_burst_frac\":0.5,\"max_peak_mad\":0.5,"
+		"\"min_live_frac\":0.7,\"max_holes\":0,"
+		"\"max_phase_peak_delta\":2}"), "init failed");
+	struct plant p = { .gain = 4.0, .delay = 3, .pole = 0.5,
+		.noise = 0.005, .seed = 19 };
+	run(&dev, &p, 100000);
+	struct aylp_prbs_test_data *d = dev.device_data;
+	CHECK(d->have_result, "strong run found no correlation");
+	CHECK(d->quality_ok, "strong run failed quality gates: %s",
+		d->quality_reason);
+	unmake(&dev);
+
+	current_test = "quality_gates_reject_phase";
+	CHECK(!make(&dev, BURSTS ",\"max_phase_resid_deg\":0.000001}"),
+		"init failed");
+	p = (struct plant){ .gain = 4.0, .delay = 3, .pole = 0.5,
+		.noise = 0.01, .seed = 20 };
+	run(&dev, &p, 100000);
+	d = dev.device_data;
+	CHECK(d->have_result, "candidate correlation was lost");
+	CHECK(!d->quality_ok, "accepted a deliberately impossible phase gate");
+	CHECK(strstr(d->quality_reason, "phase residual") != NULL,
+		"quality failure did not identify phase residual: %s",
+		d->quality_reason);
+	unmake(&dev);
+
+	current_test = "quality_gates_reject_live_fraction";
+	CHECK(!make(&dev, BURSTS ",\"min_live_frac\":0.9}"), "init failed");
+	p = (struct plant){ .gain = 4.0, .delay = 3, .pole = 0.5,
+		.noise = 0.01, .seed = 22, .chop_period = 51, .chop_dark = 13 };
+	run(&dev, &p, 100000);
+	d = dev.device_data;
+	CHECK(d->have_result, "candidate correlation was lost through chop");
+	CHECK(!d->quality_ok, "accepted insufficient live-frame coverage");
+	CHECK(strstr(d->quality_reason, "live frames") != NULL,
+		"quality failure did not identify live coverage: %s",
+		d->quality_reason);
+	unmake(&dev);
+}
+
 /** Every tap mask in the table really does give a maximum-length sequence: a
  * short one would put a periodic ridge in the autocorrelation and could be
  * mistaken for a delay. init walks the whole cycle to check, so a bad mask
@@ -524,6 +573,7 @@ int main(void)
 	test_negative_gain();
 	test_survives_noise();
 	test_dead_plant_is_reported();
+	test_quality_gates();
 	test_chop_does_not_bias_lag();
 	test_chop_locked_to_window_is_reported();
 	test_all_orders_are_maximal();

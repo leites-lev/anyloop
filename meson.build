@@ -125,6 +125,24 @@ test_prbs_test = executable('test_prbs_test',
 )
 test('prbs_test', test_prbs_test)
 
+test_fsp_dark = executable('test_fsp_dark',
+	[
+		'tests/test_fsp_dark.c',
+		'devices/fsp.c',
+		'libaylp/logging.c',
+		'libaylp/types.c',
+		'libaylp/xalloc.c'
+	],
+	install: false,
+	dependencies: deps,
+	include_directories: [incdir, include_directories('devices')]
+)
+test('fsp_dark', test_fsp_dark, timeout: 120)
+
+python = import('python').find_installation('python3')
+test('steering_ab_analysis', python,
+	args: [files('tests/test_analyze_steering_ab.py')])
+
 parport_dac_range_test = executable('parport_dac_range_test',
 	['test/parport_dac_range.c', 'devices/parport_dac_range.c'],
 	install: false,
@@ -151,14 +169,6 @@ fit_com_bench = executable('fit_com_bench',
 executable('fsp_replay', 'contrib/fsp_replay.c',
 	install: false,
 	dependencies: [c.find_library('m', required: false)])
-
-wfs_com_test = executable('wfs_com_test',
-	['test/wfs_com_test.c', 'devices/wfs_com.c', 'libaylp/logging.c',
-		'libaylp/xalloc.c'],
-	install: false,
-	dependencies: [dependency('gsl'), dependency('json-c')],
-	include_directories: [incdir, include_directories('devices')])
-test('wfs_com', wfs_com_test)
 
 shared_library('plugin_example', 'contrib/plugin_example.c',
 	name_prefix: '',
@@ -188,7 +198,7 @@ executable('parport_pins', 'contrib/parport_pins.c',
 )
 
 executable('com_survey',
-	['contrib/com_survey.c', 'devices/fit_com.c', 'devices/wfs_com.c',
+	['contrib/com_survey.c', 'devices/fit_com.c',
 		'libaylp/logging.c', 'libaylp/xalloc.c'],
 	install: false,
 	dependencies: [dependency('gsl'), dependency('json-c'),

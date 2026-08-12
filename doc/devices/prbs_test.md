@@ -174,6 +174,23 @@ Two things to read in the log before quoting a delay:
   `resp_n` in the `_traces.dat` file is the live burst count per position, and
   0 marks an interpolated one.
 
+Quality gates
+-------------
+
+Finding a correlation lobe is not, by itself, enough to configure a
+controller. Calibration configurations can require a minimum peak/noise ratio,
+a sufficiently linear phase fit, enough independent bursts, low burst-to-burst
+peak scatter, adequate live-frame coverage, no interpolated holes, and
+reasonable agreement between the correlation peak and phase delay. A failed
+gate leaves the candidate diagnostics in the `.dat` file but suppresses the
+PDF and prints `QUALITY GATES FAILED`; the delay must not be copied into FSP.
+
+The shipped parport configurations also follow the gain ladder's central
+cross-check: the calibration suite repeats each axis at 35, 50 and 75 mV and
+requires the phase-delay estimates to agree within 0.2 frame. A tracker or
+plant whose dynamics change with excursion therefore fails explicitly instead
+of contributing one amplitude-dependent delay.
+
 `use_rejected` exists so the two can be run against the same data and compared,
 which is the only way to see what a given source is costing. It is not a way to
 get a number out of a bad run.
@@ -270,6 +287,27 @@ Parameters
     than allowed to win the peak on a handful of samples. Default 0.25, floored
     at 8 pairs. Only bites when the live fraction is very low or a chop is
     locked to the burst period.
+- `min_peak_snr` (float) (optional)
+  - Required absolute correlation peak divided by the acausal-lag RMS. Zero
+    disables the final-result gate; peak detection itself always requires 4.
+- `max_phase_resid_deg` (float) (optional)
+  - Maximum RMS residual of the phase-slope line, in degrees. Zero disables.
+- `min_phase_bins` (int) (optional)
+  - Minimum number of FFT bins in the phase fit. Zero disables.
+- `min_burst_frac` (float) (optional)
+  - Minimum fraction of individual bursts that must independently find a
+    correlation peak. Zero disables.
+- `max_peak_mad` (float) (optional)
+  - Maximum median absolute deviation of the per-burst peak lags, in frames.
+    Zero disables.
+- `min_live_frac` (float) (optional)
+  - Minimum fraction of sensor frames not marked rejected. Zero disables.
+- `max_holes` (int) (optional)
+  - Maximum window positions with no live sample in any burst. Unlimited by
+    default; strict calibration configurations set zero.
+- `max_phase_peak_delta` (float) (optional)
+  - Maximum absolute difference between phase-slope delay and correlation
+    peak, in frames. Zero disables. Leave enough room for real plant rise.
 - `output_file` (string) (optional)
   - PDF path; the `.dat` files are written alongside it. Default
     `"prbs_test.pdf"`. `""` writes nothing.

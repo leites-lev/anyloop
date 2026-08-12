@@ -13,7 +13,8 @@
 // immediately before timing it does NOT: that leaves the frame hot and evicts
 // everything else, which is exactly backwards.
 //
-// Usage: fit_com_bench [size] [window] [max_iter] [frames]
+// Usage: fit_com_bench [size] [window] [max_iter] [frames] [fit_radius]
+//                      [fit_gaussian] [max_us] [sigma]
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -76,13 +77,17 @@ int main(int argc, char **argv)
 	size_t max_iter = argc > 3 ? (size_t)atol(argv[3]) : 10;
 	size_t frames = argc > 4 ? (size_t)atol(argv[4]) : 4000;
 	double frad = argc > 5 ? atof(argv[5]) : 3.5;
+	bool fit_gaussian = argc > 6 ? !!atoi(argv[6]) : true;
+	double max_us = argc > 7 ? atof(argv[7]) : 10.0;
+	double sigma = argc > 8 ? atof(argv[8]) : 2.5;
 
 	char buf[512];
 	snprintf(buf, sizeof buf, "{\"sigma_init\":2.5,\"sigma_min\":0.5,"
-		"\"sigma_max\":10.0,\"max_iter\":%zu,\"min_amplitude\":5.0,"
-		"\"reacquire_after\":10,\"row_time\":8.25e-6,"
-		"\"window_height\":%zu,\"window_width\":%zu,\"fit_radius\":%g}",
-		max_iter, win, win, frad);
+		"\"sigma_max\":50.0,\"max_iter\":%zu,\"min_amplitude\":5.0,"
+		"\"max_us\":%g,\"reacquire_after\":10,\"row_time\":8.25e-6,"
+		"\"window_height\":%zu,\"window_width\":%zu,\"fit_radius\":%g,"
+		"\"moment_output\":true,\"fit_gaussian\":%s}",
+		max_iter, max_us, win, win, frad, fit_gaussian ? "true" : "false");
 	json_object *p = json_tokener_parse(buf);
 	struct aylp_device self = {0};
 	self.params = p;
@@ -106,7 +111,7 @@ int main(int argc, char **argv)
 		// shear = velocity * row_time, in px/row
 		double sy = ampl*2*M_PI*fdist*cos(2*M_PI*fdist*t)*8.25e-6;
 		double sx = -ampl*2*M_PI*fdist*sin(2*M_PI*fdist*t)*8.25e-6;
-		render(ring + k*n*n, n, ty[k], tx[k], sy, sx, 2.5, 200.0, 8.0, 6.0);
+		render(ring + k*n*n, n, ty[k], tx[k], sy, sx, sigma, 200.0, 8.0, 6.0);
 	}
 
 	gsl_matrix_uchar img = {.size1 = n, .size2 = n, .tda = n,

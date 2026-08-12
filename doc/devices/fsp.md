@@ -190,6 +190,11 @@ Parameters
   the boxcar/modal/FIR vibration observers. Start around 1--5 s: shorter values
   transfer more low-frequency motion out of the predictor, while longer values
   leave more of it in the learned vibration model.
+- `drift_order`: slow internal-model order (default 1). `1` retains the EWMA
+  position estimate. `2` uses an alpha-beta position/rate observer and
+  propagates the rate through the command horizon. This embeds DC integral and
+  ramp-drift rejection in the normal Smith predictor; it does not enable or
+  depend on the event-only transient integral controller.
 - `transient_sigma`, `transient_floor`: enable large-event recovery and set its
   innovation threshold to
   `max(transient_sigma * quiet_innovation_rms, transient_floor)`, in normalized

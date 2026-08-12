@@ -992,6 +992,9 @@ int fsp_init(struct aylp_device *self)
 	data->clamp_lo = NAN;
 	data->clamp_hi = NAN;
 	data->start_delay = 0.0;
+	data->precenter_delay = 0.0;
+	data->precenter_ramp = 0.0;
+	data->precenter_clamp = 0.0;
 	data->ramp = 10.0;
 	data->adapt_period = 0.0;	// fixed FSP unless asked
 	data->adapt_df_max = 0.5;	// Hz per update
@@ -1009,6 +1012,7 @@ int fsp_init(struct aylp_device *self)
 	data->dark_fab_frames = 0;	// 0 = auto, broad_hist_len/2
 	data->dark_bank_train = 4;	// bank horizons trained per live frame
 	data->drift_tau = 0.0;		// compound predictor unless asked
+	data->drift_order = 1;		// legacy one-state EWMA unless asked
 	data->transient_sigma = 0.0;	// transient fallback is opt-in
 	data->transient_floor = 0.02;
 	data->transient_settle_error = 0.03;
@@ -1081,6 +1085,12 @@ int fsp_init(struct aylp_device *self)
 		} else if (!strcmp(key, "start_delay")) {
 			data->start_delay = json_object_get_double(val);
 			if (data->start_delay < 0) data->start_delay = 0;
+		} else if (!strcmp(key, "precenter_delay")) {
+			data->precenter_delay = json_object_get_double(val);
+		} else if (!strcmp(key, "precenter_ramp")) {
+			data->precenter_ramp = json_object_get_double(val);
+		} else if (!strcmp(key, "precenter_clamp")) {
+			data->precenter_clamp = fabs(json_object_get_double(val));
 		} else if (!strcmp(key, "ramp")) {
 			data->ramp = json_object_get_double(val);
 			if (data->ramp < 0) data->ramp = 0;
@@ -1129,6 +1139,8 @@ int fsp_init(struct aylp_device *self)
 			data->dark_bank_train = json_object_get_uint64(val);
 		} else if (!strcmp(key, "drift_tau")) {
 			data->drift_tau = json_object_get_double(val);
+		} else if (!strcmp(key, "drift_order")) {
+			data->drift_order = json_object_get_uint64(val);
 		} else if (!strcmp(key, "transient_sigma")) {
 			data->transient_sigma = json_object_get_double(val);
 		} else if (!strcmp(key, "transient_floor")) {
@@ -1459,6 +1471,20 @@ int fsp_init(struct aylp_device *self)
 		log_error("fsp: beam_recover_ramp must be finite and >= 0.");
 		return -1;
 	}
+	if (data->drift_order < 1 || data->drift_order > 2) {
+		log_error("fsp: drift_order must be 1 or 2.");
+		return -1;
+	}
+	if (!isfinite(data->precenter_delay) || data->precenter_delay < 0.0
+			|| !isfinite(data->precenter_ramp) || data->precenter_ramp < 0.0
+			|| !isfinite(data->precenter_clamp)
+			|| (data->precenter_clamp > 0.0
+				&& (data->drift_tau <= 0.0
+					|| data->start_delay <= data->precenter_delay))) {
+		log_error("fsp: precentering needs finite non-negative settings, "
+			"drift_tau > 0, and start_delay > precenter_delay");
+		return -1;
+	}
 	if (!axy || !axx) {
 		log_error("fsp: both \"y\" and \"x\" axis objects are required.");
 		return -1;
@@ -1732,7 +1758,8 @@ int fsp_init(struct aylp_device *self)
 			"mismatch (see the 2026-07-22 380 Hz ring)");
 	if (data->drift_tau > 0.0)
 		log_info("fsp: slow drift separated from vibration prediction "
-			"with %G s EWMA", data->drift_tau);
+			"with %G s %s", data->drift_tau,
+			data->drift_order == 2 ? "position/rate observer" : "EWMA");
 	if (data->transient_sigma > 0.0)
 		log_info("fsp: transient path on: trigger %G sigma (floor %G), "
 			"controller %s, Kp %G, Ki %G/s, I leak %G/s, I limit %G, "
@@ -1987,6 +2014,7 @@ static void fsp_reset_after_beam_loss(struct aylp_fsp_axis *ax,
 	ax->plant_iz1 = ax->plant_iz2 = 0.0;
 	ax->lp_z1 = ax->lp_z2 = 0.0;
 	ax->drift_hat = 0.0;
+	ax->drift_rate = 0.0;
 	ax->phi_dc = 0.0;
 	ax->transient_active = false;
 	ax->transient_recovering = false;
@@ -2068,6 +2096,13 @@ int fsp_proc(struct aylp_device *self, struct aylp_state *state)
 	// closed-loop authority: 0 during the startup hold, then a linear ramp
 	// from 0 to 1 over `ramp` seconds so the handover is bumpless
 	bool in_hold = (now - data->t0) < data->start_delay;
+	double precenter_frac = 0.0;
+	if (in_hold && data->precenter_clamp > 0.0
+			&& now - data->t0 >= data->precenter_delay) {
+		double up = now - data->t0 - data->precenter_delay;
+		precenter_frac = data->precenter_ramp > 0.0
+			&& up < data->precenter_ramp ? up/data->precenter_ramp : 1.0;
+	}
 	double frac;
 	if (in_hold) {
 		frac = 0.0;
@@ -2548,9 +2583,25 @@ int fsp_proc(struct aylp_device *self, struct aylp_state *state)
 		ax->phi_dc += data->gap_dc_beta * (phi_meas - ax->phi_dc);
 		// Optional two-timescale model: cancel drift as a separate state and
 		// train the vibration predictor only on the zero-mean residual.
-		if (data->drift_tau > 0.0)
-			ax->drift_hat += data->drift_beta
-				* (phi_meas - ax->drift_hat);
+		if (data->drift_tau > 0.0) {
+			if (data->drift_order == 2) {
+				// Alpha-beta realization of a constant-velocity disturbance
+				// model.  The position pole supplies native integral/DC
+				// rejection; the rate pole removes the following error on a
+				// ramp.  beta=alpha^2/2 gives the rate state the same slow
+				// scale without making frame noise look like velocity.
+				double predicted = ax->drift_hat
+					+ ax->drift_rate / data->fs;
+				double innovation = phi_meas - predicted;
+				ax->drift_hat = predicted
+					+ data->drift_beta * innovation;
+				ax->drift_rate += 0.5 * data->drift_beta
+					* data->drift_beta * data->fs * innovation;
+			} else {
+				ax->drift_hat += data->drift_beta
+					* (phi_meas - ax->drift_hat);
+			}
+		}
 		double phi_vib = phi_meas - ax->drift_hat;
 
 		// Full compound-disturbance observer (Kulcsar/Petit/Meimon):
@@ -2870,7 +2921,11 @@ int fsp_proc(struct aylp_device *self, struct aylp_state *state)
 		// The full-band predictor and modal predictor estimate the same
 		// disturbance. Select, do not sum, to avoid double cancellation.
 		double vibration_hat = data->broad_order ? broad_hat : phi_hat;
-		double predictive_hat = ax->drift_hat + vibration_hat;
+		double drift_predictive = ax->drift_hat;
+		if (data->drift_tau > 0.0 && data->drift_order == 2)
+			drift_predictive += (ax->delay + ax->delay_frac)
+				* ax->drift_rate / data->fs;
+		double predictive_hat = drift_predictive + vibration_hat;
 		// Normal operation cancels the separately estimated drift plus the
 		// learned full-band prediction. Event recovery is selected independently.
 		// It deliberately uses this same axis's Bode-derived K and the modal
@@ -2901,9 +2956,23 @@ int fsp_proc(struct aylp_device *self, struct aylp_state *state)
 				+ (transient_proportional
 					? data->transient_kp * e : 0.0)) / ax->K
 			+ (transient_integral ? ax->transient_i : 0.0);
-		double v = frac * g_gain
-			* ((1.0 - transient_mix) * v_predictive
-				+ transient_mix * v_transient);
+		// During the startup hold, optionally move only the learned DC bias.
+		// The modal/broadband prediction remains at zero authority until close,
+		// so vibration control is trained around the centered operating point.
+		double v;
+		if (precenter_frac > 0.0) {
+			v = -precenter_frac * ax->drift_hat / ax->K;
+		} else if (data->precenter_clamp > 0.0 && !in_hold
+				&& !ax->transient_active) {
+			// Keep the learned centering bias continuously applied while
+			// only the vibration term ramps in at loop close.
+			v = -drift_predictive / ax->K
+				+ frac * g_gain * (-vibration_hat / ax->K);
+		} else {
+			v = frac * g_gain
+				* ((1.0 - transient_mix) * v_predictive
+					+ transient_mix * v_transient);
+		}
 		double u = v;
 		if (ax->plant_shaped)
 			u = fsp_biquad(v, ax->plant_ib, ax->plant_ia,
@@ -2976,6 +3045,20 @@ int fsp_proc(struct aylp_device *self, struct aylp_state *state)
 			? data->transient_clamp_hi : ax->clamp_hi;
 		double clamp_lo = ax->transient_active
 			? data->transient_clamp_lo : ax->clamp_lo;
+		if (precenter_frac > 0.0) {
+			clamp_hi = data->precenter_clamp;
+			clamp_lo = -data->precenter_clamp;
+		} else if (data->precenter_clamp > 0.0 && !in_hold
+				&& !ax->transient_active) {
+			// The normal clamp is FAST authority relative to the learned DC
+			// operating point, not an absolute actuator bound. Otherwise loop
+			// handoff would throw away the very bias pre-centering established.
+			double dc = -ax->drift_hat / ax->K;
+			if (dc > data->precenter_clamp) dc = data->precenter_clamp;
+			if (dc < -data->precenter_clamp) dc = -data->precenter_clamp;
+			clamp_hi = dc + ax->clamp_hi;
+			clamp_lo = dc + ax->clamp_lo;
+		}
 		double u_unclamped = u;
 		if (u > clamp_hi) u = clamp_hi;
 		if (u < clamp_lo) u = clamp_lo;

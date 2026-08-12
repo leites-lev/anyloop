@@ -29,7 +29,7 @@
 		"24": "normalization -- 0.579 units/V at 64x64 is 18.2 px/V against 62.8",
 		"25": "px/V in July, i.e. the plant really is ~3.4x weaker in px/V (see",
 		"26": "conf_bode_par_x.json's _amplitude_2026_08_07). SNR here comes from",
-		"27": "averaging 64 bursts x 127 chips, not from amplitude, so +-0.91 px",
+		"27": "averaging 64 bursts x 511 chips, not from amplitude, so +-0.91 px",
 		"28": "against a ~0.27 px per-sample centroid noise is still workable.",
 		"29": "IF YOU RAISE IT, THE CEILING IS THE BEAM, NOT THE DAC: at sigma",
 		"30": "9.33 px, keeping 3 sigma inside the 64 px frame caps the excursion",
@@ -38,8 +38,8 @@
 		"33": "cannot average out. Re-derive from conf_gain_par_x.json's slope.",
 		"34": "One frame per chip on purpose: a chip is a boxcar, and a chip longer",
 		"35": "than the delay smears the onset by its own length.",
-		"36": "127 chips + 128 quiet = 255 frames per burst, x64 = 16320 frames,",
-		"37": "i.e. ~7.1 s at 2310 Hz (not the ~4.3 s this file used to claim).",
+		"36": "511 chips + 257 quiet = 768 frames per burst, x64 = 49152 frames,",
+		"37": "i.e. ~21.3 s at 2310 Hz. The suite repeats this at three amplitudes.",
 		"38": "See conf_prbs_par_y.json for the y/tip twin, and conf_gain_par_x.json",
 		"39": "for the gain half of the same plant.",
 		"_chop": "HANDLED BY THE DEVICE AS OF THIS CONFIG -- no longer an open question, but read what it does. fit_com HOLDS its last coordinate through a dark frame (AYLP_FRAME_REJECTED) rather than reporting a gap, so on a chopped source part of the stream carries values from earlier frames. prbs_test now records that flag PER FRAME and drops the held samples from the ensemble mean and from every correlation -- the live fraction is measured and logged, not assumed, so nothing here depends on the duty cycle being 75%, periodic, or the same as it was yesterday. It works because the chop is not locked to the 255-frame burst window: a position dark in one burst is live in others, and 64 bursts cover every position many times. SOURCE STATE 2026-08-07 19:42 (supersedes the 08-06 reading of 4.70 Hz / median 3 / p90 49 / max 201 frames): a regular ~46 Hz chop, 119 streaks in 2.6 s, every streak exactly 13 frames (6 ms), 24.8% of frames dark. WHAT IT USED TO COST, simulated at exactly that duty in tests/test_prbs_test.c: the peak moved only +0.013 fr but the PHASE SLOPE -- the number that goes into fsp -- read 0.24 frames SHORT at rho 0.836 against 0.866, and at 51% dark 0.66 frames short at rho 0.73. Short rather than long: held samples have a spread of ages, so they decorrelate the response instead of shifting it. STILL CHECK TWO THINGS IN THE LOG: the live fraction (under ~50% the ensemble mean is thin and the noise floor rises), and holes -- window positions dark in EVERY burst, which only happens if the chop locks to the burst period, and which the phase slope has to interpolate through. Run with use_rejected true to see what this source is costing you; never to produce a number."
@@ -49,13 +49,13 @@
 			"uri": "file:/home/fsl/anyloop_levfork/anyloop/build/asi_source.so",
 			"params": {
 				"camera_name": "ASI290MM",
-				"width": 64,
-				"height": 64,
-				"start_x": 1076,
-				"start_y": 404,
+				"width": 96,
+				"height": 96,
+				"start_x": 968,
+				"start_y": 532,
 				"_roi_note": "ROI, exposure AND gain copied from steering_par_fsp.json as of 2026-08-07 19:42, so this measures the plant the loop actually runs against. Exposure is part of the delay being measured: change it and this number changes. start 1076/404 lands the beam at in-frame (32.2, 31.3) against the 31.5 centre, re-probed from a capture AT THE OPERATING ROI. THE 1084/418 THIS FILE CARRIED WAS NEVER A TREE VALUE -- it took x from the bode configs (1084/414) and y from com_survey (1073/418), and both predate the 08-07 refocus. gain stays 0 because at the current source brightness every higher setting saturates the core (measured amp p50/saturation: gain 0 -> 137/1.66%, gain 50 -> 254/3.61%, saturated in over half of all frames). Re-probe with contrib/probe_frame.json AND confirm against a capture at the operating ROI once |park| exceeds ~2 px; on 2026-08-07 a full-sensor probe and a cropped capture disagreed by 10 px in BOTH axes.",
 				"exposure": 400,
-				"gain": 0,
+				"gain": 120,
 				"bandwidth": 100,
 				"high_speed": 1,
 				"die_on_stall": 0
@@ -64,7 +64,11 @@
 		{
 			"_comment": "frame -> UDP viewer",
 			"uri": "anyloop:udp_sink",
-			"params": { "ip": "127.0.0.1", "port": "64730", "decimation": 64 }
+			"params": {
+				"ip": "127.0.0.1",
+				"port": "64730",
+				"decimation": 64
+			}
 		},
 		{
 			"_note": "fit_com, COPIED VERBATIM from steering_par_fsp.json as of 2026-08-07 19:42. The centroid computation is inside the delay being measured, so it HAS to be the one the loop uses -- and 'the one the loop uses' means the CURRENT gate set, not the 2026-08-06 one this file shipped with. fit_com is also the quieter estimator (hf 0.271 px vs 0.639 px for thresholded center_of_mass, measured on the 08-06 beam), which tightens the correlation peak.",
@@ -75,52 +79,77 @@
 			"uri": "anyloop:fit_com",
 			"params": {
 				"_reacquire": "300, matching steering_par_fsp.json and NOT the old 10. Every dark stretch either chop has produced (08-07: 13 frames flat; 08-06: median 3, p90 49, max 201) is well under 300, so they route to fit_com's HOLD path instead of dropping acquisition and re-searching mid-burst, which would put a sensor discontinuity directly into the correlogram. SEE _chop IN THE HEADER: prbs_test now DROPS the held samples rather than correlating them, so the hold path costs only the samples themselves, not a biased lag. Keeping reacquire_after high is still the right call -- a re-search is a real discontinuity in the beam position, which no flag can undo.",
-				"window_height": 0,
-				"window_width": 0,
-				"sigma_init": 9.33,
-				"sigma_min": 2.8,
-				"sigma_max": 37.3,
-				"min_amplitude": 10.0,
+				"window_height": 112,
+				"window_width": 112,
+				"sigma_init": 11.799,
+				"sigma_min": 3.54,
+				"sigma_max": 47.197,
+				"min_amplitude": 5.0,
+				"max_step": 8.0,
 				"max_iter": 12,
 				"max_us": 300,
 				"robust_k": 2.5,
 				"robust_iter": 1,
-				"fit_slope": true,
+				"fit_slope": false,
+				"moment_output": true,
+				"fit_gaussian": false,
+				"moment_cut": 5.0,
+				"pwm_period_frames": 14.57,
+				"pwm_dark_flux": 100,
+				"pwm_bright_flux": 1000,
+				"pwm_full_start": 4,
+				"pwm_full_end_margin": 2,
 				"row_time": 0,
-				"reacquire_after": 300
+				"reacquire_after": 100000
 			}
 		},
 		{
 			"_comment": "CoM -> UDP viewer",
 			"uri": "anyloop:udp_sink",
-			"params": { "ip": "127.0.0.1", "port": "64731", "decimation": 64 }
+			"params": {
+				"ip": "127.0.0.1",
+				"port": "64731",
+				"decimation": 64
+			}
 		},
 		{
 			"_note1": "THE TEST. Drives element 1 (x) and watches element 1 of the CoM ([y, x]); y stays at 0 command, i.e. parked at 0 V.",
-			"_note2": "quiet_frames 128 is both the rest between bursts (so each one starts from the same state) and the room the correlator needs: it must be at least max_lag, or one burst's tail overlaps the next burst's start.",
-			"_note3": "neg_lags 24 buys the noise floor. Nothing can respond before the command, so the scatter over those acausal lags is what the onset threshold and the peak/noise ratio are judged against. It is not just sensor noise -- the linear autocorrelation of a finite 127-chip m-sequence has sidelobes of a few percent.",
+			"_note2": "quiet_frames 257 is both the rest between bursts and the room the correlator needs. Its odd, non-round window walk also reduces the chance of locking to a periodic source chop.",
+			"_note3": "neg_lags 64 gives a much stronger acausal noise-floor estimate. Order 9 supplies 511 chips per burst and about four times the driven samples of the former order-7 test.",
+			"_quality": "Strict calibration gates: peak/noise >=10, phase residual <=12 deg over at least 40 bins, >=75% independently usable bursts, peak MAD <=0.2 frame, >=70% live frames, no holes, and phase/peak separation <=1.5 frames. The suite additionally runs 35/50/75 mV and requires <=0.2-frame delay spread.",
 			"_phase_band": "20-200 Hz. The top matches the freq_end of conf_bode_par_x.json's sweep, so this tau and that one are fit over the same band and are directly comparable. Raising phase_f_hi past the plant's own roll-off starts fitting noise, not delay.",
 			"uri": "anyloop:prbs_test",
 			"params": {
 				"index_cmd": 1,
 				"index_err": 1,
 				"out_size": 2,
-				"amplitude": 0.05,
+				"amplitude": 0.15,
 				"bias": 0.0,
-				"order": 7,
+				"order": 9,
 				"chip_frames": 1,
 				"n_bursts": 64,
-				"quiet_frames": 128,
+				"quiet_frames": 257,
 				"warmup": 10.0,
-				"max_lag": 48,
-				"neg_lags": 24,
+				"max_lag": 64,
+				"neg_lags": 64,
 				"onset_frac": 0.2,
 				"phase_f_lo": 20.0,
 				"phase_f_hi": 200.0,
+				"phase_notch_hz": 100.0,
+				"phase_notch_width_hz": 5.0,
 				"_use_rejected": "false, the default, spelled out because it is the whole reason this config can run on the chopped source: frames fit_com flagged are excluded from the ensemble mean and from every correlation. Set true ONLY to measure what the chop is costing, by running it both ways on the same source and comparing -- see _chop in the header.",
 				"use_rejected": false,
+				"min_pair_frac": 0.5,
+				"min_peak_snr": 10.0,
+				"max_phase_resid_deg": 12.0,
+				"min_phase_bins": 40,
+				"min_burst_frac": 0.5,
+				"max_peak_mad": 0.2,
+				"min_live_frac": 0.2,
+				"max_holes": 0,
+				"max_phase_peak_delta": 1.5,
 				"volts_per_unit": 1.0,
-				"pixel_scale": 31.5,
+				"pixel_scale": 47.5,
 				"config": "x/tilt loop delay through the PARPORT DAC (DAC81404, spi link, mmio, +-5 V range, mirror parked at 0 V), no coarse stage, ch0=y parked / ch1=x driven at scale +1.0 V/unit. ASI290MM 64x64 ROI 1076/404, exp 400, gain 0, fs ~2310 Hz, fit_com whole-frame sigma_init 9.33 max_iter 12. Compare the phase-slope tau IN FRAMES against a bode sweep TAKEN ON THIS SAME CAMERA/ROI/EXPOSURE -- the 2026-08-07 refit of fsm_bodex_par5/par6.dat gives 3.018 fr for x -- and against the fsp delay/delay_frac in steering_par_fsp.json (3 + 0.02). Do NOT compare against fsm_bodex_par2.dat's 2.763 fr: that was 32x32/exp50 at fs 3788 Hz on the pre-swap camera, and neither its frame count nor its 0.729 ms survives the change.",
 				"output_file": "fsm_prbsx_par.pdf"
 			}
@@ -133,10 +162,22 @@
 				"pci": "0000:05:00.2",
 				"backend": "mmio",
 				"link": "spi",
-				"channel": [0, 1],
-				"index": [0, 1],
-				"scale": [-1, 1],
-				"offset": [0, 0],
+				"channel": [
+					0,
+					1
+				],
+				"index": [
+					0,
+					1
+				],
+				"scale": [
+					-1,
+					1
+				],
+				"offset": [
+					0,
+					0
+				],
 				"range": "+-5",
 				"verify": false,
 				"skip_unchanged": false,

@@ -96,6 +96,29 @@ struct aylp_fit_com_data {
 	double sigma_init, sigma_min, sigma_max;
 	double min_amplitude;		// fitted amp below this => no beam
 	double max_residual;		// rms residual (counts) above this => reject
+	double max_step;		// maximum accepted centre motion per frame (px), 0 off
+	bool moment_output;		// report robust intensity centroid
+	bool fit_gaussian;		// run Gaussian LM solver; false requires moment_output
+	double moment_cut;		// counts above fitted background used by centroid
+	double moment_max_y_skew;	// identify rolling-shutter fragments; 0 disables
+	double moment_min_y_width;	// fragment if measured/fitted row width is below this
+	bool moment_reject_inferred;	// publish inferred centre but exclude it from control
+	double pwm_period_frames;	// rolling-shutter PWM period; 0 disables phase tracker
+	double pwm_dark_flux, pwm_bright_flux;
+	size_t pwm_full_start, pwm_full_end_margin, pwm_phase;
+	bool pwm_prev_dark, pwm_phase_locked, pwm_filter_have;
+	double pwm_y, pwm_x, pwm_py, pwm_px;
+	double pwm_qy, pwm_qx, pwm_ry_full, pwm_rx_full;
+	double moment_dy, moment_dx;	// filtered full-frame motion for sliced-frame prediction
+	double moment_full_y, moment_full_x;
+	size_t moment_full_age;
+	bool moment_have_full;
+	double *moment_row_template;
+	size_t moment_template_cap, moment_template_n, moment_template_org_y;
+	double moment_template_y;
+	double *moment_image_template;
+	size_t moment_image_cap, moment_template_w, moment_template_org_x;
+	double moment_template_x;
 	size_t reacquire_after;
 	size_t lost;
 
@@ -114,6 +137,7 @@ struct aylp_fit_com_data {
 	// --- last good output, normalized [-1,1] ---
 	double last_y, last_x;
 	double last_rms;		// residual rms of the last accepted fit
+	bool inferred_last;		// accepted output inferred a shutter-sliced centre
 	size_t n_iter_last;
 	bool budget_hit;		// max_us cut the last frame short
 

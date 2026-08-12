@@ -29,10 +29,24 @@ struct aylp_prbs_test_data {
 	double onset_frac;	// fraction of the peak that counts as onset
 	double phase_f_lo;	// band for the cross-spectrum phase-slope fit
 	double phase_f_hi;
+	double phase_notch_hz;	// optional periodic-light fundamental to exclude
+	double phase_notch_width_hz;
+	bool use_correlation_delay;
 	double volts_per_unit;	// DAC scale of the swept channel, for reporting
 	double pixel_scale;	// px per response unit, for reporting
 	bool use_rejected;	// correlate held samples too, as if they were data
 	double min_pair_frac;	// fraction of the window a lag needs to be fit
+	// Optional final-result quality gates. Zero disables a gate. These are
+	// deliberately separate from the 4-sigma peak detector: finding a lobe
+	// is not the same thing as proving a controller-quality delay.
+	double min_peak_snr;
+	double max_phase_resid_deg;
+	size_t min_phase_bins;
+	double min_burst_frac;
+	double max_peak_mad;
+	double min_live_frac;
+	size_t max_holes;
+	double max_phase_peak_delta;
 	char *output_file;	// PDF path; the .dat is written alongside it
 	char *config;		// free-text note copied into the .dat header
 
@@ -92,6 +106,8 @@ struct aylp_prbs_test_data {
 	double lag_onset_mad;
 	size_t n_burst_ok;
 	bool have_result;
+	bool quality_ok;
+	char quality_reason[512];
 };
 
 int prbs_test_init(struct aylp_device *self);

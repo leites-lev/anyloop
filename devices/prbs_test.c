@@ -54,6 +54,7 @@
 // Params: see doc/devices/prbs_test.md.
 
 #include <math.h>
+#include <stdarg.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
@@ -356,13 +357,24 @@ static void pt_phase_slope(struct aylp_prbs_test_data *data, double sign)
 	// halfcomplex layout: re(k) = a[k], im(k) = a[nfft-k]
 	double sw = 0, swf = 0, swf2 = 0, swp = 0, swfp = 0;
 	size_t n = 0;
-	double prev = 0.0;
+	// The correlation peak is an independent, time-domain delay estimate.
+	// Use it to select the phase branch at every frequency independently.
+	// Sequential unwrapping lets one corrupted bin (notably a PWM-lighting
+	// harmonic) cycle-slip every later bin by 2*pi.
+	double tau_seed = data->lag_peak / data->fs;
 	double *fs_ = xmalloc((nfft/2) * sizeof *fs_);
 	double *ph_ = xmalloc((nfft/2) * sizeof *ph_);
 	double *w_ = xmalloc((nfft/2) * sizeof *w_);
 	for (size_t k = 1; k < nfft/2; k++) {
 		double f = k * data->fs / nfft;
 		if (f < data->phase_f_lo || f > data->phase_f_hi) continue;
+		if (data->phase_notch_hz > 0.0 &&
+			data->phase_notch_width_hz > 0.0) {
+			double harmonic = round(f / data->phase_notch_hz);
+			if (harmonic >= 1.0 && fabs(f - harmonic *
+				data->phase_notch_hz) <= data->phase_notch_width_hz)
+				continue;
+		}
 		double cr = cf[k], ci = -cf[nfft-k];	// conj(C)
 		double rr = rf[k], ri = rf[nfft-k];
 		double sr = rr*cr - ri*ci;
@@ -373,9 +385,8 @@ static void pt_phase_slope(struct aylp_prbs_test_data *data, double sign)
 		// a plant with negative DC gain sits at pi; take it out before
 		// unwrapping or the fit chases a constant offset
 		if (sign < 0.0) phi += M_PI;
-		if (n) phi += 2.0*M_PI * round((prev - phi) / (2.0*M_PI));
-		else phi -= 2.0*M_PI * round(phi / (2.0*M_PI));
-		prev = phi;
+		double expected = -2.0*M_PI * f * tau_seed;
+		phi += 2.0*M_PI * round((expected - phi) / (2.0*M_PI));
 		fs_[n] = f;
 		ph_[n] = phi;
 		w_[n] = mag;
@@ -448,6 +459,11 @@ static int pt_write_dat(struct aylp_prbs_test_data *data, const char *path,
 				? fabs(data->rho_peak)/data->rho_noise : 0.0);
 		fprintf(f, "# centroid %.3f fr = %.4f ms\n",
 			data->lag_centroid, data->lag_centroid * dt_ms);
+		fprintf(f, "# recommended_delay %.3f fr source %s\n",
+			data->use_correlation_delay ? data->lag_centroid :
+				(data->tau_phase_ms / dt_ms),
+			data->use_correlation_delay ? "correlation_centroid" :
+				"phase_slope");
 		if (data->phase_n)
 			fprintf(f, "# phase_slope tau %.4f ms = %.3f fr over "
 				"%G-%G Hz (%zu bins, residual %.2f deg)\n",
@@ -460,6 +476,10 @@ static int pt_write_dat(struct aylp_prbs_test_data *data, const char *path,
 			data->lag_onset_med, data->lag_onset_mad,
 			data->lag_peak_med, data->lag_peak_mad,
 			data->n_burst_ok, data->n_bursts);
+		fprintf(f, "# quality %s%s%s\n",
+			data->quality_ok ? "PASS" : "FAIL",
+			data->quality_ok ? "" : ": ",
+			data->quality_ok ? "" : data->quality_reason);
 	} else {
 		fprintf(f, "# NO RESULT: correlation never left the noise\n");
 	}
@@ -562,6 +582,24 @@ static void pt_fill_holes(struct aylp_prbs_test_data *data)
 	}
 }
 
+static void pt_quality_fail(struct aylp_prbs_test_data *data, size_t *used,
+	const char *fmt, ...)
+{
+	size_t cap = sizeof data->quality_reason;
+	if (*used >= cap - 1) return;
+	if (*used) {
+		data->quality_reason[(*used)++] = ';';
+		if (*used < cap - 1) data->quality_reason[(*used)++] = ' ';
+	}
+	va_list ap;
+	va_start(ap, fmt);
+	int nw = vsnprintf(data->quality_reason + *used, cap - *used, fmt, ap);
+	va_end(ap);
+	if (nw <= 0) return;
+	size_t add = (size_t)nw;
+	*used += add < cap - *used ? add : cap - *used - 1;
+}
+
 /** Average the bursts, correlate, fit, log, and write the files. */
 static void pt_analyze(struct aylp_prbs_test_data *data)
 {
@@ -618,6 +656,8 @@ static void pt_analyze(struct aylp_prbs_test_data *data)
 		&data->rho_noise, &data->n_thin_lags);
 	data->lag_centroid = lag_cent;
 	data->have_result = !ok;
+	data->quality_ok = false;
+	data->quality_reason[0] = '\0';
 
 	if (!data->have_result) {
 		log_error("prbs_test: the correlation never left its noise "
@@ -649,6 +689,61 @@ static void pt_analyze(struct aylp_prbs_test_data *data)
 			&data->lag_onset_mad);
 		xfree(pk);
 		xfree(on);
+
+		// A correlation peak is only a candidate result. Calibration runs can
+		// demand enough SNR, phase linearity, independent-burst support and
+		// live coverage to make that candidate safe to copy into a controller.
+		// Keep every failed condition in one message so a bench run says what
+		// needs fixing instead of making the operator play whack-a-mole.
+		size_t used = 0;
+#define PT_QUALITY_FAIL(...) \
+	pt_quality_fail(data, &used, __VA_ARGS__)
+		double snr = data->rho_noise > 0.0
+			? fabs(data->rho_peak) / data->rho_noise : INFINITY;
+		double live_frac = data->n_frames
+			? (double)data->n_live / data->n_frames : 0.0;
+		double burst_frac = nb ? (double)data->n_burst_ok / nb : 0.0;
+		double phase_frames = data->fs > 0.0
+			? data->tau_phase_ms * data->fs / 1e3 : 0.0;
+		if (data->min_peak_snr > 0.0 && snr < data->min_peak_snr)
+			PT_QUALITY_FAIL("peak/noise %.2f < %.2f", snr,
+				data->min_peak_snr);
+		if (!data->phase_n && !data->use_correlation_delay)
+			PT_QUALITY_FAIL("no phase-slope fit");
+		else if (!data->use_correlation_delay) {
+			if (data->max_phase_resid_deg > 0.0
+					&& data->phase_resid_deg
+					> data->max_phase_resid_deg)
+				PT_QUALITY_FAIL("phase residual %.2f deg > %.2f deg",
+					data->phase_resid_deg,
+					data->max_phase_resid_deg);
+			if (data->min_phase_bins
+					&& data->phase_n < data->min_phase_bins)
+				PT_QUALITY_FAIL("phase bins %zu < %zu", data->phase_n,
+					data->min_phase_bins);
+			if (data->max_phase_peak_delta > 0.0
+					&& fabs(phase_frames - data->lag_peak)
+					> data->max_phase_peak_delta)
+				PT_QUALITY_FAIL("phase/peak delta %.3f fr > %.3f fr",
+					fabs(phase_frames - data->lag_peak),
+					data->max_phase_peak_delta);
+		}
+		if (data->min_burst_frac > 0.0
+				&& burst_frac < data->min_burst_frac)
+			PT_QUALITY_FAIL("usable bursts %.1f%% < %.1f%%",
+				100.0 * burst_frac, 100.0 * data->min_burst_frac);
+		if (data->max_peak_mad > 0.0
+				&& data->lag_peak_mad > data->max_peak_mad)
+			PT_QUALITY_FAIL("peak MAD %.3f fr > %.3f fr",
+				data->lag_peak_mad, data->max_peak_mad);
+		if (data->min_live_frac > 0.0 && live_frac < data->min_live_frac)
+			PT_QUALITY_FAIL("live frames %.1f%% < %.1f%%",
+				100.0 * live_frac, 100.0 * data->min_live_frac);
+		if (data->n_holes > data->max_holes)
+			PT_QUALITY_FAIL("holes %zu > %zu", data->n_holes,
+				data->max_holes);
+		data->quality_ok = !used;
+#undef PT_QUALITY_FAIL
 	}
 
 	double dt_ms = data->fs > 0.0 ? 1e3 / data->fs : 0.0;
@@ -701,6 +796,17 @@ static void pt_analyze(struct aylp_prbs_test_data *data)
 			"to fit (min_pair_frac %G) and were dropped from the "
 			"correlogram", data->n_thin_lags, data->min_pair_frac);
 	if (!data->have_result) goto write;
+	if (!data->quality_ok) {
+		log_error("prbs_test: QUALITY GATES FAILED: %s. Do not copy this "
+			"delay into a controller.", data->quality_reason);
+		goto write;
+	}
+	log_info("prbs_test: QUALITY GATES PASSED");
+	log_info("prbs_test: RECOMMENDED DELAY %.3f frames from %s",
+		data->use_correlation_delay ? data->lag_centroid :
+			(data->tau_phase_ms / dt_ms),
+		data->use_correlation_delay ? "dropout-safe correlation centroid" :
+			"phase slope");
 	log_info("prbs_test: ONSET (transport delay) %.3f frames = %.4f ms",
 		data->lag_onset, data->lag_onset * dt_ms);
 	log_info("prbs_test: PEAK (delay + plant rise) %.3f frames = %.4f ms; "
@@ -739,7 +845,8 @@ write:
 	char *traces_path = xmalloc(base + 12);
 	memcpy(traces_path, out, base);
 	memcpy(traces_path + base, "_traces.dat", 12);
-	if (!pt_write_dat(data, dat_path, traces_path) && data->have_result)
+	if (!pt_write_dat(data, dat_path, traces_path)
+			&& data->have_result && data->quality_ok)
 		pt_plot(data, dat_path, traces_path);
 	xfree(dat_path);
 	xfree(traces_path);
@@ -771,6 +878,7 @@ int prbs_test_init(struct aylp_device *self)
 	data->volts_per_unit = 1.0;
 	data->pixel_scale = 1.0;
 	data->min_pair_frac = 0.25;
+	data->max_holes = SIZE_MAX;
 	data->output_file = xstrdup("prbs_test.pdf");
 
 	if (self->params) { json_object_object_foreach(self->params, key, val) {
@@ -805,6 +913,12 @@ int prbs_test_init(struct aylp_device *self)
 			data->phase_f_lo = json_object_get_double(val);
 		} else if (!strcmp(key, "phase_f_hi")) {
 			data->phase_f_hi = json_object_get_double(val);
+		} else if (!strcmp(key, "phase_notch_hz")) {
+			data->phase_notch_hz = json_object_get_double(val);
+		} else if (!strcmp(key, "phase_notch_width_hz")) {
+			data->phase_notch_width_hz = json_object_get_double(val);
+		} else if (!strcmp(key, "use_correlation_delay")) {
+			data->use_correlation_delay = json_object_get_boolean(val);
 		} else if (!strcmp(key, "volts_per_unit")) {
 			data->volts_per_unit = json_object_get_double(val);
 		} else if (!strcmp(key, "pixel_scale")) {
@@ -813,6 +927,22 @@ int prbs_test_init(struct aylp_device *self)
 			data->use_rejected = json_object_get_boolean(val);
 		} else if (!strcmp(key, "min_pair_frac")) {
 			data->min_pair_frac = json_object_get_double(val);
+		} else if (!strcmp(key, "min_peak_snr")) {
+			data->min_peak_snr = json_object_get_double(val);
+		} else if (!strcmp(key, "max_phase_resid_deg")) {
+			data->max_phase_resid_deg = json_object_get_double(val);
+		} else if (!strcmp(key, "min_phase_bins")) {
+			data->min_phase_bins = json_object_get_uint64(val);
+		} else if (!strcmp(key, "min_burst_frac")) {
+			data->min_burst_frac = json_object_get_double(val);
+		} else if (!strcmp(key, "max_peak_mad")) {
+			data->max_peak_mad = json_object_get_double(val);
+		} else if (!strcmp(key, "min_live_frac")) {
+			data->min_live_frac = json_object_get_double(val);
+		} else if (!strcmp(key, "max_holes")) {
+			data->max_holes = json_object_get_uint64(val);
+		} else if (!strcmp(key, "max_phase_peak_delta")) {
+			data->max_phase_peak_delta = json_object_get_double(val);
 		} else if (!strcmp(key, "output_file")) {
 			// an empty name means "log the numbers, write nothing"
 			const char *v = json_object_get_string(val);
@@ -841,6 +971,14 @@ int prbs_test_init(struct aylp_device *self)
 	}
 	if (data->min_pair_frac <= 0.0 || data->min_pair_frac > 1.0) {
 		log_error("prbs_test: min_pair_frac must be in (0, 1]");
+		return -1;
+	}
+	if (data->min_peak_snr < 0.0 || data->max_phase_resid_deg < 0.0
+			|| data->min_burst_frac < 0.0 || data->min_burst_frac > 1.0
+			|| data->max_peak_mad < 0.0 || data->min_live_frac < 0.0
+			|| data->min_live_frac > 1.0
+			|| data->max_phase_peak_delta < 0.0) {
+		log_error("prbs_test: invalid quality-gate parameter");
 		return -1;
 	}
 	if (data->order < 5 || data->order > 16) {
