@@ -58,9 +58,10 @@ import numpy as np
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__)))))
 PROBE_CFG = os.path.join(
-    ROOT, "contrib", "configs", "calibration", "probe_frame.json")
+    ROOT, "contrib", "calibration-scripts", "configurations",
+    "probe_frame.json")
 REF_CFG = os.path.join(
-    ROOT, "contrib", "configs", "steering", "steering_par_fsp.json")
+    ROOT, "contrib", "steering", "configurations", "steering_par_fsp.json")
 ANYLOOP = os.path.join(ROOT, "build", "anyloop")
 
 # a camera_name no real camera can match, so asi_source enumerates the lot and
@@ -138,7 +139,7 @@ def sensor_size(camera):
     return None
 
 
-def capture(exposure, gain=None, camera=None, sensor=None):
+def capture(exposure, gain=None, camera=None, sensor=None, index=None):
     """Run probe_frame.json (with overrides applied) -> aylp path."""
     os.makedirs(os.path.join(ROOT, "data/calibration/run_staging"), exist_ok=True)
     cfg = json.load(open(PROBE_CFG))
@@ -149,6 +150,9 @@ def capture(exposure, gain=None, camera=None, sensor=None):
         params["gain"] = gain
     if camera is not None:
         params["camera_name"] = camera
+    if index is not None:
+        # two cameras of one model share a name; only the index separates them
+        params["camera_index"] = index
     if sensor is not None:
         params["width"], params["height"] = sensor
         # a full-sensor probe must not inherit a crop from the config it was
@@ -182,9 +186,18 @@ def capture(exposure, gain=None, camera=None, sensor=None):
     return out
 
 
-def read_frames(path):
+def read_frames(path, skip=8):
     """Parse an .aylp file: 40-byte header (magic u32, 4x u8, log_dim y/x u64 at
-    offset 8), then y*x uint8 pixels, repeated per frame."""
+    offset 8), then y*x uint8 pixels, repeated per frame.
+
+    The first `skip` frames are discarded. ASIGetVideoData hands back the
+    OLDEST queued frame, so the frames immediately after ASIStartVideoCapture
+    were still exposed under whatever the camera was last set to -- asi_source's
+    own auto-ROI probe skips them for the same reason (asi_probe_grab). A probe
+    short enough to consist only of those frames shows no beam at any real
+    brightness, which is exactly what a 5-frame probe_frame.json produced.
+    Falls back to averaging everything when the file is too short to trim.
+    """
     d = open(path, "rb").read()
     off, fr = 0, []
     while off + 40 <= len(d):
@@ -196,6 +209,13 @@ def read_frames(path):
         off = o + n
     if not fr:
         sys.exit(f"no frames parsed from {path}")
+    if len(fr) > skip:
+        fr = fr[skip:]
+    else:
+        print(f"# WARNING: {os.path.basename(path)} has only {len(fr)} frames, "
+              f"too few to drop the {skip} settling frames -- the beam may be "
+              "missing from the capture entirely; re-probe with a longer "
+              "stop_after_count", file=sys.stderr)
     return np.mean(fr, axis=0)
 
 
@@ -231,16 +251,45 @@ def dominant_component(mask):
     return points[:, 0], points[:, 1]
 
 
+def flatten(img, radius=64):
+    """Subtract the sensor's large-scale glow, returning (residual, background).
+
+    A flat scalar background is not enough on the ASI290MM: amp glow ramps the
+    frame smoothly from one corner to the other (measured 5.2 -> 8.1 DN at gain
+    100, and it scales with gain like signal does). Because the glow's peak is
+    the brightest thing on a dark sensor, a half-of-global-peak threshold
+    selects the glow corner and the beam never enters the running -- that is
+    how this tool came to report a 200000 px "beam" of 2 DN in the corner while
+    the real spot sat at (1275,535).
+
+    The glow varies over hundreds of pixels and the beam spans tens, so a wide
+    box mean estimates the glow while barely absorbing the beam: at radius 64
+    a few-hundred-pixel spot contributes ~2% of its own amplitude back into its
+    own background. Falls back to the scalar median without scipy.
+    """
+    try:
+        from scipy.ndimage import uniform_filter
+    except ImportError:
+        return np.full(img.shape, float(np.median(img)), np.float32)
+    return uniform_filter(img.astype(np.float32), size=2 * radius + 1,
+                          mode="nearest")
+
+
 def beam_com(img):
     """Locate the dominant spatially coherent half-peak spot."""
-    background = float(np.median(img))
-    sub = np.maximum(img - background, 0)
+    bg_map = flatten(img)
+    background = float(np.median(bg_map))
+    # Noise from the UNCLIPPED residual: clipping at 0 makes over half the
+    # pixels exactly zero, which drives the median absolute deviation to 0.
+    residual = img - bg_map
+    noise = float(1.4826 * np.median(np.abs(residual - np.median(residual))))
+    sub = np.maximum(residual, 0)
     raw_peak_signal = float(sub.max())
     if raw_peak_signal <= 0:
         return 0.0, 0.0, float(img.max()), {
             "valid": False, "support": 0, "threshold_support": 0,
             "dominance": 0.0, "peak_signal": raw_peak_signal,
-            "background": background,
+            "background": background, "noise": noise, "snr": 0.0,
         }
 
     # Find the brightest 3x3 neighbourhood first.  Basing the threshold on the
@@ -252,6 +301,18 @@ def beam_com(img):
     neighbourhood = sub[max(0, py - 1):py + 2, max(0, px - 1):px + 2]
     peak_signal = float(neighbourhood.max())
     mask = sub >= peak_signal * 0.5
+    # Drop pixels with no selected neighbour. At the gains a dim beam needs,
+    # thousands of isolated pixels cross the half-peak line all over the frame
+    # (8445 of 10656 in the 2026-08-14 gain-300 probe, scattered, against 826
+    # in the beam). They are single pixels, so each is its own component and
+    # none competes for "largest" -- but they inflate the denominator of
+    # `dominance` and sank an otherwise clean detection to 7.8%. A real spot
+    # spans several pixels and keeps every one of them.
+    neighbours = sum(
+        np.pad(mask, 1)[dy:dy + mask.shape[0], dx:dx + mask.shape[1]]
+        for dy in range(3) for dx in range(3)
+    ) - mask
+    mask &= neighbours >= 2
     threshold_support = int(mask.sum())
     # A near-uniform image has no localisable spot and would make the Python
     # component walk needlessly expensive.
@@ -260,6 +321,8 @@ def beam_com(img):
             "valid": False, "support": 0,
             "threshold_support": threshold_support, "dominance": 0.0,
             "peak_signal": peak_signal, "background": background,
+            "noise": noise,
+            "snr": peak_signal / noise if noise > 0 else float("inf"),
         }
 
     ys, xs = dominant_component(mask)
@@ -281,14 +344,24 @@ def beam_com(img):
     # half of all selected pixels. The wider/speckled case retains the older
     # 25-pixel / 35% rule. Both branches exclude isolated hot pixels and thin
     # readout streaks through the 2-D span requirement.
+    snr = peak_signal / noise if noise > 0 else float("inf")
     resolved = span_x >= 3 and span_y >= 3
     compact = support >= 9 and dominance >= 0.40
     extended = support >= 25 and dominance >= 0.35
-    valid = resolved and (compact or extended)
+    # Dominance is a RATIO, so it punishes a real beam for the company it
+    # keeps: on a dim frame at high gain, hundreds of unrelated pixels clear
+    # half-peak and the beam's own share falls even though the beam itself got
+    # no worse. On 2026-08-14 this refused a 164 px spot sitting 46 sigma over
+    # the flattened noise for owning "only" 25%. A spot that far above the
+    # noise is not a coincidence of scattered pixels, whatever its share, so
+    # judge it on its own strength instead.
+    strong = support >= 25 and snr >= 12.0
+    valid = resolved and (compact or extended or strong)
     return cx, cy, float(img.max()), {
         "valid": valid, "support": support,
         "threshold_support": threshold_support, "dominance": dominance,
         "peak_signal": peak_signal, "background": background,
+        "noise": noise, "snr": snr,
     }
 
 
@@ -347,6 +420,11 @@ def main():
     ap.add_argument("--camera", default=None,
                     help="camera_name substring to probe with (default: whatever "
                          "--ref-config asks for)")
+    ap.add_argument("--camera-index", type=int, default=None,
+                    help="enumeration index to probe, overriding --camera. Two "
+                         "cameras of the same model share a name and the first "
+                         "match always wins, so this is the only way to reach "
+                         "the second one")
     ap.add_argument("--ref-config", default=REF_CFG,
                     help="config whose camera the probe should match "
                          f"(default {os.path.relpath(REF_CFG, ROOT)})")
@@ -371,7 +449,17 @@ def main():
         if not args.camera:
             print(f"# camera \"{camera}\" taken from "
                   f"{os.path.relpath(args.ref_config, ROOT)}", file=sys.stderr)
-        sensor = sensor_size(camera)
+        if args.camera_index is not None:
+            cams = list_cameras()
+            if not 0 <= args.camera_index < len(cams):
+                sys.exit(f"--camera-index {args.camera_index} is out of range; "
+                         f"{len(cams)} camera(s) connected")
+            name, sw, sh = cams[args.camera_index]
+            print(f"# camera: [{args.camera_index}] {name} (sensor {sw}x{sh})",
+                  file=sys.stderr)
+            sensor = (sw, sh)
+        else:
+            sensor = sensor_size(camera)
         if sensor is None:
             print("# WARNING: falling back to probe_frame.json's width/height "
                   "-- if they are not this sensor's full size the CoM will be "
@@ -384,16 +472,17 @@ def main():
         exposure = (args.exposure if args.exposure is not None
                     else ref_params.get("exposure"))
         gain = args.gain if args.gain is not None else ref_params.get("gain")
-        path = capture(exposure, gain, camera, sensor)
+        path = capture(exposure, gain, camera, sensor, args.camera_index)
 
     img = read_frames(path)
     bx, by, mx, detection = beam_com(img)
     H, W = img.shape
     if args.write and not detection["valid"]:
         sys.exit(f"refusing --write: probe signal {detection['peak_signal']:.1f} "
-                 f"DN above background, dominant half-peak support "
-                 f"{detection['support']} px ({detection['dominance']:.0%} of "
-                 "selected pixels); no spatially coherent beam was found")
+                 f"DN above background ({detection['snr']:.1f} sigma), dominant "
+                 f"half-peak support {detection['support']} px "
+                 f"({detection['dominance']:.0%} of selected pixels); no "
+                 "spatially coherent beam was found")
     if not detection["valid"]:
         print("# WARNING: no spatially coherent beam was found; do not use the "
               "reported position", file=sys.stderr)
@@ -401,7 +490,9 @@ def main():
     print(f"# dominant half-peak support: {detection['support']} / "
           f"{detection['threshold_support']} px "
           f"({detection['dominance']:.0%}); signal "
-          f"{detection['peak_signal']:.1f} DN above background")
+          f"{detection['peak_signal']:.1f} DN above background = "
+          f"{detection['snr']:.1f} sigma of the flattened noise "
+          f"({detection['noise']:.2f} DN)")
     print(f"# offset = beam position minus frame centre (dim-1)/2, in ROI px:"
           f" 0.0 means the loop sees zero error with the beam parked.")
     print(f"# x is limited to +-2.0 by the 4-px ASI grid, y to +-1.0 by the"
@@ -410,7 +501,7 @@ def main():
           f"   offset(x,y)  margin")
 
     files = args.configs or glob.glob(
-        os.path.join(ROOT, "contrib", "configs", "**", "*.json"),
+        os.path.join(ROOT, "contrib", "**", "configurations", "**", "*.json"),
         recursive=True)
     files = [f if os.path.isabs(f) else os.path.join(ROOT, f) for f in files]
     for f in sorted(set(files)):
@@ -436,7 +527,7 @@ def main():
         ox = (bx - sx) - (w - 1) / 2
         oy = (by - sy) - (h - 1) / 2
         win = com_window(cfg)
-        if win:
+        if win and all(isinstance(v, int) for v in win):
             rh, rw = win
             # clearance between the tracking window's furthest edge and the
             # ROI's; negative means the window is running off the sensor crop
@@ -445,6 +536,9 @@ def main():
             m = min(mx, my)
             marg = f"{m:5.1f}px" + ("  CLIPS!" if m < 0 else
                                     "  TIGHT" if m < 1.0 else "")
+        elif win:
+            # a self-sizing tracking window has no size to measure against yet
+            marg = "    auto"
         else:
             marg = "     n/a"
         print(f"  {os.path.basename(f):28s} {w:4d}x{h:<4d}  {sx:7d}  {sy:7d}"

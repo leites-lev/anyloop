@@ -39,8 +39,8 @@
 				"camera_name": "ASI290MM",
 				"width": 64,
 				"height": 64,
-				"start_x": 1188,
-				"start_y": 422,
+				"start_x": 1252,
+				"start_y": 504,
 				"exposure": 400,
 				"gain": 0,
 				"bandwidth": 100,
@@ -112,6 +112,7 @@
 			"_note": "Byte-identical to conf_bode_par_y.json's DAC block, deliberately: K is measured in error units per command unit, so any change to scale, offset or range would make the result incomparable with the 0.1/0.05 V points it exists to be compared against.",
 			"uri": "anyloop:parport_dac",
 			"params": {
+				"delay_ns": 1000,
 				"pci":            "0000:06:00.2",
 				"backend":        "mmio",
 				"link":           "spi",

@@ -11,10 +11,21 @@
 # What --on does (all runtime sysfs, reversible, NOT persistent across reboot):
 #   1. CPU governor -> performance on every core (no freq-ramp latency)
 #   2. disable CPU idle C-states with >15 us exit latency (keep POLL/C1/C1E)
-#   3. pin the xhci USB IRQ(s) to CPU $IRQ_CPU, off the loop core + its sibling
+#   3. park EVERY movable device IRQ off the loop core + its sibling, then pin
+#      the xhci USB IRQ(s) specifically to CPU $IRQ_CPU. Added 2026-08-14: the
+#      parport DAC write is ~52 bit-banged MMIO stores held inline on the loop
+#      thread (~14-57 us per frame depending on parport_dac's delay_ns), so any
+#      unrelated IRQ landing on the loop core stretches a frame. Pinning only
+#      xhci left every other device free to land there.
 #   4. OFFLINE the loop core's hyperthread SIBLING so nothing contends for the
 #      shared execution units mid-measurement (the runtime equivalent of
 #      isolating the physical core; taskset+chrt alone leave the sibling live)
+#
+# NOTE the parallel card itself has no IRQ to pin: anyloop unbinds parport_pc
+# and bit-bangs the BAR directly, keeping port interrupts masked, so its PCI
+# IRQ line never has a handler. There is no separate parport thread either --
+# "giving the parport its own core" means making the LOOP core exclusive, which
+# is what steps 3 and 4 do.
 # --off restores this box's defaults: powersave, all C-states, IRQ on all CPUs,
 # sibling back online.
 #
@@ -43,6 +54,7 @@ LOOP_CPU=2          # core you should taskset the loop onto (kept clear of the I
 IRQ_CPU=3           # park the xhci USB IRQ here, off the loop core + sibling
 OFF_GOVERNOR=powersave   # this box's default; change if yours differs
 STATE_FILE=/run/perf_mode.offlined   # sibling CPUs we offlined, so --off can restore them
+IRQ_STATE_FILE=/run/perf_mode.irqaffinity  # "irq oldmask" lines, so --off can restore them
 
 # the loop core's hyperthread sibling(s): everything in its thread_siblings_list
 # except LOOP_CPU itself. Offlined in --on so the physical core is ours alone.
@@ -71,6 +83,76 @@ irq_mask() { printf '%x' $(( 1 << $1 )); }          # CPU index -> hex affinity 
 all_cpus_mask() { printf '%x' $(( (1 << $(nproc)) - 1 )); }
 xhci_irqs() { awk -F: '/xhci/ {gsub(/ /,"",$1); print $1}' /proc/interrupts; }
 
+# Every CPU the kernel knows about, online or not. nproc counts only ONLINE
+# CPUs, so it shrinks once --on offlines the sibling -- using it to build an
+# "all CPUs" mask would silently drop the top core from the mask.
+possible_cpus() { awk -F- '{print $NF + 1}' /sys/devices/system/cpu/possible; }
+possible_mask() { printf '%x' $(( (1 << $(possible_cpus)) - 1 )); }
+
+# The loop's physical core: LOOP_CPU plus its hyperthread sibling(s).
+loop_core_mask() {
+	local m=$(( 1 << LOOP_CPU )) s
+	for s in $(target_siblings); do m=$(( m | (1 << s) )); done
+	printf '%x' "$m"
+}
+
+# Everything EXCEPT the loop's physical core -- where all movable device IRQs
+# get parked, so no unrelated interrupt can land on the loop core mid-frame.
+# The parport DAC write is a bit-banged sequence of ~52 MMIO stores held
+# inline on the loop thread; an IRQ landing in the middle stretches the frame.
+# (SPI is synchronous, so a stretched frame is not corrupted -- this is about
+# loop jitter, not about the DAC missing writes.)
+irq_isolate_mask() {
+	printf '%x' $(( 0x$(possible_mask) & ~0x$(loop_core_mask) ))
+}
+
+# Park every IRQ that will accept it. Per-CPU and chained interrupts (timer,
+# IPIs, some managed MSI queues) reject affinity writes with EIO or EROFS --
+# that is expected and not an error, so failures are counted, not fatal.
+isolate_irqs() {
+	local mask=$1 irq old moved=0 pinned=0
+	: | sudo tee "$IRQ_STATE_FILE" >/dev/null
+	for irq in /proc/irq/[0-9]*; do
+		[ -f "$irq/smp_affinity" ] || continue
+		old=$(cat "$irq/smp_affinity" 2>/dev/null) || continue
+		if echo "$mask" | sudo tee "$irq/smp_affinity" >/dev/null 2>&1; then
+			echo "${irq##*/} $old" | sudo tee -a "$IRQ_STATE_FILE" >/dev/null
+			moved=$((moved + 1))
+		else
+			pinned=$((pinned + 1))
+		fi
+	done
+	echo "parked $moved IRQ(s) off the loop core (mask $mask); $pinned are per-CPU and cannot move"
+	# new IRQs registered later inherit this
+	echo "$mask" | sudo tee /proc/irq/default_smp_affinity >/dev/null 2>&1 || true
+}
+
+restore_irqs() {
+	[ -f "$IRQ_STATE_FILE" ] || return 0
+	local irq old n=0
+	while read -r irq old; do
+		[ -n "${irq:-}" ] || continue
+		echo "$old" | sudo tee "/proc/irq/$irq/smp_affinity" >/dev/null 2>&1 || true
+		n=$((n + 1))
+	done < "$IRQ_STATE_FILE"
+	sudo rm -f "$IRQ_STATE_FILE"
+	echo "$(all_cpus_mask)" | sudo tee /proc/irq/default_smp_affinity >/dev/null 2>&1 || true
+	echo "restored affinity on $n IRQ(s)"
+}
+
+# How many IRQs could still fire on the loop core -- 0 is the goal.
+irqs_on_loop_core() {
+	local irq aff n=0 lm
+	lm=0x$(loop_core_mask)
+	for irq in /proc/irq/[0-9]*; do
+		[ -f "$irq/smp_affinity" ] || continue
+		aff=$(tr -d ',' < "$irq/smp_affinity" 2>/dev/null) || continue
+		[ -n "$aff" ] || continue
+		if (( 0x$aff & lm )); then n=$((n + 1)); fi
+	done
+	echo "$n"
+}
+
 set_governor() {
 	# skip offline CPUs: their scaling_governor node is present but EBUSY, which
 	# would abort under set -e (matters when a sibling is offlined by --on)
@@ -91,6 +173,7 @@ status() {
 	for irq in $(xhci_irqs); do
 		echo "xhci IRQ $irq: affinity $(cat /proc/irq/$irq/smp_affinity)"
 	done
+	echo "IRQs on loop core: $(irqs_on_loop_core) still able to fire on cpu$LOOP_CPU/sibling (0 = good)"
 	echo -n "loop core $LOOP_CPU sibling(s):"
 	for s in $(target_siblings); do
 		echo -n " cpu$s=$(cat /sys/devices/system/cpu/cpu$s/online 2>/dev/null || echo '?')"
@@ -112,6 +195,10 @@ on() {
 		lat=$(cat "$s/latency" 2>/dev/null || echo 0)
 		if [ "$lat" -gt 15 ]; then echo 1 | sudo tee "$s/disable" >/dev/null; fi
 	done
+	# Park EVERY movable IRQ off the loop's physical core first, then put the
+	# xhci one specifically on IRQ_CPU. Order matters: the blanket pass would
+	# otherwise overwrite the xhci pin with the generic mask.
+	isolate_irqs "$(irq_isolate_mask)"
 	m=$(irq_mask "$IRQ_CPU")
 	for irq in $(xhci_irqs); do echo "$m" | sudo tee /proc/irq/$irq/smp_affinity >/dev/null; done
 	# offline the loop core's HT sibling(s) so the physical core is ours alone.
@@ -149,6 +236,7 @@ off() {
 	for s in /sys/devices/system/cpu/cpu*/cpuidle/state*/disable; do
 		echo 0 | sudo tee "$s" >/dev/null
 	done
+	restore_irqs
 	m=$(all_cpus_mask)
 	for irq in $(xhci_irqs); do echo "$m" | sudo tee /proc/irq/$irq/smp_affinity >/dev/null; done
 	echo "perf mode OFF (restored defaults)"

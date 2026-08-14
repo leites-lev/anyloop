@@ -24,7 +24,7 @@
 # than move. That is an artifact of this viewer, not of the control loop -- judge
 # the loop from watch_error_ts.jl or the logged .aylp, never from this heatmap.
 
-include("anyloop.jl")
+include(joinpath(@__DIR__, "anyloop-examples", "source", "anyloop.jl"))
 using .Anyloop
 using ArgParse
 using Plots; gr()

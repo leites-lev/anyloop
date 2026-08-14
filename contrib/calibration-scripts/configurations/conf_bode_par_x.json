@@ -36,8 +36,8 @@
 				"camera_name": "ASI290MM",
 				"width": 64,
 				"height": 64,
-				"start_x": 1188,
-				"start_y": 422,
+				"start_x": 1252,
+				"start_y": 504,
 				"_roi_note": "ROI 64x64 at start_x 644 / start_y 318, centring full-sensor (676, 350) -- the beam position every ASI662MM config agreed on, carried over unverified. THE 662 AND THE 290 ARE DIFFERENT SENSORS ON A DIFFERENT MOUNT: re-probe with contrib/calibration-scripts/configurations/probe_frame.json and re-derive with contrib/calibration-scripts/tools/find_roi.py before the first real run. The beam also walks several px per hour, so re-derive again once |park| exceeds ~2 px.",
 				"_roi_2026_08_07": "start 1084/414 MEASURED AT THE OPERATING ROI, not from a full-sensor probe. A 6000-frame 64x64 capture at start 1072/404 put the beam at in-frame (42.0, 43.1), i.e. full-sensor (446, 1115); centring that gives start_y = 446-31.5 = 414 (grid 2) and start_x = 1115-31.5 = 1084 (grid 4), landing the beam at (32.0, 31.5). NOTE THE TRAP: a full-sensor probe_frame.json capture taken minutes earlier read the beam at (436, 1105) -- 10 px off in BOTH axes from what the cropped ROI says. The cropped frame is the one that matters, since it is the frame the loop actually sees. Verify any find_roi.py output against a capture at the operating ROI before trusting it.",
 				"exposure": 400,
@@ -125,6 +125,7 @@
 			"_scale_sign": "x keeps the NEGATIVE sign the piplate config used (was -2, now -1.0). That inversion is a property of the optical/mechanical path, not of the converter, so it carries over even though the magnitude does not. It is what made Kx come out sign-positive. If the push test now says otherwise, fix it HERE and re-run -- do not fix it by flipping the sign of K.",
 			"uri": "anyloop:parport_dac",
 			"params": {
+				"delay_ns": 1000,
 				"pci": "0000:06:00.2",
 				"backend": "mmio",
 				"link": "spi",

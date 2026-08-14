@@ -37,8 +37,8 @@
 				"width":   64,
 				"height":   64,
 				"_retuned_2026_08_07": "Camera, tracker and drive settings brought into line with conf_bode_par_x.json's 2026-08-07 retune -- see the four dated _ notes in that file for the measurements behind each one. Summary: ROI 1084/414 (measured AT the operating ROI, not from a full-sensor probe, which read 10 px off in both axes); gain 0 -> 50 (the chopped source's dim phase was falling under min_amplitude and re-acquiring with the mirror PARKED, before any drive existed); fit_com gates re-derived for the current beam, which is wider (sigma ~8.2) and was dimmer than the 08-06 survey; max_iter 4 -> 12 and max_us -> 0 because a 4-iteration warm-started LM under-reports fast beam motion and its compute time sits INSIDE the measured tau; amplitude 0.4 -> 0.15, which the x-axis drive ladder showed is inside the linear range. freq_end 100 -> 200: tau is a FULL-BAND phase slope and 5-100 Hz is not enough lever arm -- this is the same trap the _delay_warning in steering_par_fsp.json describes for the *_small* sweeps. avoid_freqs was null here and is now populated from the x config's measured bench-line list.",
-				"start_x": 1188,
-				"start_y": 422,
+				"start_x": 1252,
+				"start_y": 504,
 				"_camera_note": "ASI290MM (IMX290, 1936x1096) as of 2026-08-06, back from the ASI662MM (IMX662, 1920x1080) this file ran on 2026-08-02..08-05. EVERY MEASURED NUMBER IN THIS FILE NOW PREDATES TWO CAMERA SWAPS AND AN ROI CHANGE and must be re-taken: fs (both the 3788 Hz of the 290 at 32x32/exp50/bw100 and anything measured on the 662 are wrong here -- 64x64 at exposure 400 is a different frame rate again, and fs sets the loop period, K's units, the delay in FRAMES and broad_lp all at once), delay, K, and the pixel scale. Re-run the bodes before trusting a run.",
 				"_roi_note": "ROI 64x64 at start_x 644 / start_y 318, centring full-sensor (676, 350) -- the beam position every ASI662MM config agreed on, carried over unverified. THE 662 AND THE 290 ARE DIFFERENT SENSORS ON A DIFFERENT MOUNT: re-probe with contrib/calibration-scripts/configurations/probe_frame.json and re-derive with contrib/calibration-scripts/tools/find_roi.py before the first real run. The beam also walks several px per hour, so re-derive again once |park| exceeds ~2 px.",
 				"exposure":  400,
@@ -120,6 +120,7 @@
 			"_scale_sign": "x keeps the NEGATIVE sign the piplate config used (was -2, now -1.0). That inversion is a property of the optical/mechanical path, not of the converter, so it carries over even though the magnitude does not. It is what made Kx come out sign-positive. If the push test now says otherwise, fix it HERE and re-run -- do not fix it by flipping the sign of K.",
 			"uri": "anyloop:parport_dac",
 			"params": {
+				"delay_ns": 1000,
 				"pci": "0000:06:00.2",
 				"backend": "mmio",
 				"link": "spi",

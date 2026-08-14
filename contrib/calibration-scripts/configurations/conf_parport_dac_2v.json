@@ -80,9 +80,11 @@
 	"channel": [0, 1],
 	"index":   [0, 0],
     "_range": "+-5, matching the steering/bode par configs; 76 uV/LSB instead of the +-10 range's 305 uV, which matters for a DC park-and-measure check. `offset` is the voltage under test and is left at 3.0 V rather than moved to the 2.5 V bias -- it is this file's whole parameter. Anything in 0..5 V is valid.",
-    "range": "0-5",
+    "range": "+-5",
     "scale": [0, 0],				
     "offset": [0,0],
+    "_delay_ns": "The replacement AX99100 card at 0000:06:00.2 writes the DAC only intermittently at the default full speed (~123 ns/edge, ~4 MHz SCLK), unlike the card it replaced; 1000 ns of extra dwell per edge fixed it on the bench 2026-08-14. Measured free-running: 156k frames/s at delay_ns=0 (6.4 us/frame), 17.6k at 1000 (56.7 us/frame, ~1.09 us/edge, ~459 kHz SCLK) -- an 8.9x slowdown, ~101 us added per two-channel iteration. Negligible for the 100 Hz configs, ~11% of the period at 1 kHz. The breaking point between 4 MHz and 459 kHz was never bisected, so this is a working value, not a characterized margin.",
+    "delay_ns": 1000,
     "flush_config": false,
     "verify": false
    }

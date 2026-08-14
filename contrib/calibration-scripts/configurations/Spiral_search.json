@@ -27,8 +27,8 @@
 				"camera_name": "ASI290MM",
 				"width": 64,
 				"height": 64,
-				"start_x": 1188,
-				"start_y": 422,
+				"start_x": 1252,
+				"start_y": 504,
 				"exposure": 400,
 				"gain": 0,
 				"bandwidth": 80,
@@ -70,6 +70,7 @@
 			"_comment": "Fast steering-mirror DAC (TI DAC81404) over the parallel-port SPI link (devices/parport_dac.c) -- link/pci/bar/offsets/sclk_bit/sdin_bit/sync_bit below are that file's own documented defaults, not guesses. CALIBRATE channel/index/scale/offset/range against the real mirror amplifier: channel 0/1 assumed to be DACA=y, DACB=x; scale/offset/range are the device defaults (1.0 V/unit, 0 V at zero, unipolar 0-10 V) and very likely wrong for this mirror's driver -- verify polarity and range on the bench (DAC output disconnected from the mirror) before connecting it.",
 			"uri": "anyloop:parport_dac",
 			"params": {
+				"delay_ns": 1000,
 				"backend": "mmio",
 				"link": "spi",
 				"pci": "0000:06:00.2",

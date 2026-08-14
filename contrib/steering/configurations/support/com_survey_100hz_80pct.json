@@ -15,12 +15,12 @@
 			"params": {
 				"camera_name": "ASI290MM",
 				"_roi": "64x64 at start_x 1073 / start_y 418, RE-CENTRED 2026-08-06. The previous 1092/418 put the beam at x 12.7 of 64 with its left wing running off the frame edge -- flux in column 0, estimators disagreeing by 5-15 px, and a relative residual of 0.124 that was partly truncation rather than beam shape. After the move the average CoM sits at (33.3, 32.1) against a target of 31.5, the brightest edge pixel is 9.2% of peak, and 1.08% of the flux is in the outer 2-px border. VERIFY THIS BEFORE EVERY SURVEY: a clipped beam silently corrupts sigma, the window suggestion and the gaussian residual all at once.",
-				"width": "auto",
-				"height": "auto",
-				"start_x": "auto",
-				"start_y": "auto",
+				"width": 384,
+				"height": 384,
+				"start_x": 1104,
+				"start_y": 402,
 				"exposure": 280,
-				"gain": "auto",
+				"gain": 100,
 				"bandwidth": 100,
 				"high_speed": 1,
 				"die_on_stall": 0

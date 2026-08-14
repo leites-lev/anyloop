@@ -41,8 +41,8 @@
 				"camera_name": "ASI290MM",
 				"width": 128,
 				"height": 128,
-				"start_x": 1156,
-				"start_y": 390,
+				"start_x": 1220,
+				"start_y": 472,
 				"_roi_note": "ROI, exposure AND gain copied from steering_par_fsp.json as of 2026-08-07 19:42, so this measures the plant the loop actually runs against. start 1076/404 lands the beam at in-frame (32.2, 31.3) against the 31.5 centre, re-probed from a capture AT THE OPERATING ROI. THE 1084/418 THIS FILE CARRIED WAS NEVER A TREE VALUE -- it took x from the bode configs (1084/414) and y from com_survey (1073/418), and both predate the 08-07 refocus. gain stays 0 because at the current source brightness every higher setting saturates the core (measured amp p50/saturation: gain 0 -> 137/1.66%, gain 50 -> 254/3.61%, saturated in over half of all frames). The beam walks several px per hour AND the park offset eats the same margin as the staircase, which is tighter on this axis than on x: re-probe with contrib/calibration-scripts/configurations/probe_frame.json AND confirm against a capture at the operating ROI once |park| exceeds ~2 px. On 2026-08-07 a full-sensor probe and a cropped capture disagreed by 10 px in BOTH axes, so never re-derive from find_roi.py alone.",
 				"exposure": 25,
 				"gain": 0,
@@ -127,6 +127,7 @@
 			"_avss_note": "AVSS must be -12 V on this rig for the bipolar range, as in every other parport_dac config here.",
 			"uri": "anyloop:parport_dac",
 			"params": {
+				"delay_ns": 1000,
 				"pci": "0000:06:00.2",
 				"backend": "mmio",
 				"link": "spi",

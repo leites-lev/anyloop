@@ -49,13 +49,13 @@
 			"uri": "file:/home/fsl/anyloop_levfork/anyloop/build/asi_source.so",
 			"params": {
 				"camera_name": "ASI290MM",
-				"width": "auto",
-				"height": "auto",
-				"start_x": "auto",
-				"start_y": "auto",
+				"width": 384,
+				"height": 384,
+				"start_x": 1104,
+				"start_y": 402,
 				"_roi_note": "ROI, exposure AND gain copied from steering_par_fsp.json as of 2026-08-07 19:42, so this measures the plant the loop actually runs against. Exposure is part of the delay being measured: change it and this number changes. start 1076/404 lands the beam at in-frame (32.2, 31.3) against the 31.5 centre, re-probed from a capture AT THE OPERATING ROI. THE 1084/418 THIS FILE CARRIED WAS NEVER A TREE VALUE -- it took x from the bode configs (1084/414) and y from com_survey (1073/418), and both predate the 08-07 refocus. gain stays 0 because at the current source brightness every higher setting saturates the core (measured amp p50/saturation: gain 0 -> 137/1.66%, gain 50 -> 254/3.61%, saturated in over half of all frames). Re-probe with contrib/calibration-scripts/configurations/probe_frame.json AND confirm against a capture at the operating ROI once |park| exceeds ~2 px; on 2026-08-07 a full-sensor probe and a cropped capture disagreed by 10 px in BOTH axes.",
 				"exposure": 1000,
-				"gain": "auto",
+				"gain": 100,
 				"bandwidth": 100,
 				"high_speed": 1,
 				"die_on_stall": 0
@@ -147,6 +147,7 @@
 			"_range": "+-5 fixed, no auto-ranging: a range change mid-burst would put a one-frame glitch into the response and land in the correlogram as a spurious lag.",
 			"uri": "anyloop:parport_dac",
 			"params": {
+				"delay_ns": 1000,
 				"pci": "0000:06:00.2",
 				"backend": "mmio",
 				"link": "spi",

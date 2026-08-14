@@ -13,6 +13,7 @@
 		{
 			"uri": "anyloop:parport_dac",
 			"params": {
+				"delay_ns": 1000,
 				"backend": "mmio",
 				"pci": "0000:06:00.2",
 				"link": "spi",

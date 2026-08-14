@@ -24,7 +24,7 @@
 # SO_REUSEPORT) split the datagrams between them, which would starve the
 # heatmap. The panel is skipped silently when nothing arrives, so configs
 # without the sink behave exactly as before.
-include("anyloop.jl")
+include(joinpath(@__DIR__, "anyloop-examples", "source", "anyloop.jl"))
 using .Anyloop
 using Plots; gr()
 using Sockets

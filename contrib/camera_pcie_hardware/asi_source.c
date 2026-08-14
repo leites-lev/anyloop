@@ -7,6 +7,12 @@
 //
 // Parameters:
 //   "camera_name" (string): name substring to match (default: "ASI290MM")
+//   "camera_index" (int):   enumeration index to open, overriding camera_name.
+//                 Default -1 = match by name. Two cameras of the same model
+//                 report the SAME name, so a substring cannot tell them apart
+//                 and the first match always wins -- on a rig with two
+//                 ASI290MMs that silently pins you to one of them. The
+//                 startup log lists every camera with its index; use that.
 //   "width"       (int|"auto"): ROI width; auto sizes it to the beam
 //   "height"      (int|"auto"): ROI height; auto sizes it to the beam
 //   "start_x"     (int|"auto"): ROI left edge; auto centers it on the beam
@@ -692,6 +698,7 @@ int asi_source_init(struct aylp_device *self)
 
 	// parameter defaults
 	const char *camera_name = "ASI290MM";
+	int camera_index = -1;   // <0 = select by camera_name substring
 	int width     = 256;
 	int height    = 256;
 	int start_x   = -1;   // <0 → center on sensor (the no-beam fallback)
@@ -721,6 +728,8 @@ int asi_source_init(struct aylp_device *self)
 			// comment key
 		} else if (!strcmp(key, "camera_name")) {
 			camera_name = json_object_get_string(val);
+		} else if (!strcmp(key, "camera_index")) {
+			camera_index = json_object_get_int(val);
 		} else if (!strcmp(key, "width")) {
 			if (is_auto) auto_width = 1;
 			else width = json_object_get_int(val);
@@ -819,15 +828,42 @@ int asi_source_init(struct aylp_device *self)
 		log_info("  [%d] %s (ID %d, %ldx%ld)",
 			i, info.Name, info.CameraID, info.MaxWidth, info.MaxHeight
 		);
-		if (data->camera_id < 0 && strstr(info.Name, camera_name)) {
+		// An explicit index beats the name: two cameras of the same
+		// model share a name, so the substring cannot separate them.
+		int match = camera_index >= 0
+			? i == camera_index
+			: strstr(info.Name, camera_name) != NULL;
+		if (data->camera_id < 0 && match) {
 			data->camera_id = info.CameraID;
 			sensor_w = info.MaxWidth;
 			sensor_h = info.MaxHeight;
 		}
 	}
 	if (data->camera_id < 0) {
-		log_error("No camera matching \"%s\" found", camera_name);
+		if (camera_index >= 0)
+			log_error("camera_index %d is out of range; %d "
+				"camera(s) are connected", camera_index, n_cams);
+		else
+			log_error("No camera matching \"%s\" found", camera_name);
 		return -1;
+	}
+	if (camera_index < 0) {
+		// Warn when the name was ambiguous: picking the first match is
+		// arbitrary, and on a two-camera rig it is a coin flip whether
+		// the beam is on the one that got opened.
+		int n_match = 0;
+		for (int i = 0; i < n_cams; i++) {
+			ASI_CAMERA_INFO info;
+			ASIGetCameraProperty(&info, i);
+			if (strstr(info.Name, camera_name)) n_match++;
+		}
+		if (n_match > 1)
+			log_warn("asi_source: \"%s\" matches %d connected "
+				"cameras; opening ID %d, the first. Set "
+				"\"camera_index\" to choose deliberately -- a "
+				"dark frame here usually means the beam is on "
+				"the other one.", camera_name, n_match,
+				data->camera_id);
 	}
 
 	ASI_ERROR_CODE err;

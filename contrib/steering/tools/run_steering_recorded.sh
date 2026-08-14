@@ -18,6 +18,8 @@ Config selection (default: --live):
   --beam NAME        Beam label for --live (default: unspecified)
   --session NAME     Session folder (default: today_YYYY-MM-DD)
   -l, --label NAME   Additional descriptive run label
+  --no-recenter      Skip the find_roi ROI recentre and run on the config's
+                     existing start_x/start_y
 
 Examples:
   contrib/steering/tools/run_steering_recorded.sh --1000
@@ -30,8 +32,11 @@ PROFILE=live
 LABEL=
 BEAM=
 SESSION=
+RECENTER=1
+SETTLE=3
 while [ "$#" -gt 0 ]; do
 	case "$1" in
+		--no-recenter) RECENTER=0 ;;
 		--live) PROFILE=live ;;
 		--1000) PROFILE=1000 ;;
 		--100) PROFILE=100 ;;
@@ -97,6 +102,22 @@ case "$PROFILE" in
 	*) echo "unknown config profile: $PROFILE" >&2; usage >&2; exit 2 ;;
 esac
 [ -f "$CONFIG" ] || { echo "config not found: $CONFIG" >&2; exit 1; }
+
+# Recentre the ROI on the beam before anything is recorded. A run archived
+# against a stale ROI is misleading data rather than merely a worse run: the
+# centroid is normalized over the frame, so every rejection number derived from
+# it is quoted against whatever the ROI happened to be. Runs before the probe
+# writes so a refusal costs nothing -- no record directory, no half-run to
+# explain later. find_roi exits non-zero when it cannot find a coherent beam,
+# and set -e stops us here; pass --no-recenter to run on the config as it
+# stands. SETTLE gives the beam time to park before the probe.
+if [ "$RECENTER" = 1 ]; then
+	echo "recentering ROI on $CONFIG (find_roi, ${SETTLE}s settle)"
+	python3 contrib/calibration-scripts/tools/find_roi.py \
+		--settle "$SETTLE" --ref-config "$CONFIG" \
+		--write --config "$CONFIG"
+fi
+
 [ -n "$LABEL" ] || LABEL=$DEFAULT_LABEL
 [ -n "$BEAM" ] || BEAM=$DEFAULT_BEAM
 [ -n "$SESSION" ] || SESSION="today_$(date +%Y-%m-%d)"

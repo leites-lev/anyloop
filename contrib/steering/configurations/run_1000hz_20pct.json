@@ -2,7 +2,7 @@
 	"_1 isolate cores (after every reboot)": "contrib/camera_pcie_hardware/perf_mode.sh --on   [--status to check, --off to revert]",
 	"_2 calibrate for a new beam": "sudo chrt -f 80 taskset -c 2 python3 contrib/calibration-scripts/tools/run_calibration_suite.py contrib/steering/configurations/support/calibrate_1000hz_20pct.json --skip-delay   [writes K into ALL FOUR steering profiles, not just this one -- the plant is physical and they share it. Drop --skip-delay to re-measure the delay too, which updates delay_ident_ms everywhere the same way.]",
 	"_3 run without saving": "sudo python3 contrib/steering/tools/run_steering.py 1000hz_20pct",
-	"_4 run and archive": "contrib/steering/tools/run_steering_recorded.sh --1000 --label <label>",
+	"_4 run and archive": "contrib/steering/tools/run_steering_recorded.sh --1000",
 	"_why": "doc/steering_runbook.md -- what each step does, what to check in the gain .dat before closing the loop, and what is measured at startup rather than configured. Superseded bench numbers: doc/steering_bench_history.md.",
 	"_waveform": "1000 Hz, 20% duty cycle; camera exposure 1000 us integrates one complete optical cycle; provisional camera rate 1000 Hz",
 	"_comment": {
@@ -18,13 +18,13 @@
 			"uri": "file:/home/fsl/anyloop_levfork/anyloop/build/asi_source.so",
 			"params": {
 				"camera_name": "ASI290MM",
-				"width": "auto",
-				"height": "auto",
-				"start_x": "auto",
-				"start_y": "auto",
+				"width": 384,
+				"height": 384,
+				"start_x": 1104,
+				"start_y": 402,
 				"_exposure_1000hz_20pct": "1000 us equals one complete 1000 Hz source period. Each exposure therefore integrates the full 20% on-window instead of sampling individual bright/dark phases. Confirm the camera-reported achieved rate; it will be at most about 1000 Hz and invalidates the 1457 Hz controller timing.",
 				"exposure": 1000,
-				"gain": "auto",
+				"gain": 100,
 				"bandwidth": 100,
 				"high_speed": 1,
 				"die_on_stall": 0,
@@ -272,6 +272,7 @@
 				"_skip_unchanged": "kept, but expect it to skip far LESS than on the BRIDGEplate: at 153 uV/LSB the command changes the code far more often than 1 mV codes did. That is fine -- a frame is ~6.4 us against a ~264 us period -- but it does mean the DAC sees more traffic than the piplate config did.",
 				"skip_unchanged": false,
 				"sync_update": false,
+				"delay_ns": 1000,
 				"start_delay": [
 					2.0,
 					2.0

@@ -35,8 +35,9 @@
 			"params": { "filename": "data/calibration/run_staging/probe_full.aylp" }
 		},
 		{
+			"_count": "24, not 5. ASIGetVideoData returns the OLDEST queued frame, so the frames right after ASIStartVideoCapture were still taken under the camera's PREVIOUS exposure/gain -- see the skip in asi_probe_grab() in asi_source.c. At count 5 this probe recorded nothing but those stale frames: the beam was invisible however bright it actually was, and the captures came out either flat-dark or flat-bright depending on what the last run had left set. find_roi averages only the tail of this file, so the extra frames are the discard budget.",
 			"uri": "anyloop:stop_after_count",
-			"params": { "count": 5 }
+			"params": { "count": 24 }
 		}
 	]
 }
