@@ -164,8 +164,7 @@ total output is railed at `clamp`, and are zeroed during `start_delay`.
     function's phase advance is significant, so give an explicit phase.
     Default 0.
 
-Validated 2026-07-10 on the FSM loop (see `contrib/steering_tuned.json`):
+Validated 2026-07-10 on the FSM loop (see `contrib/legacy/legacy_steering_profiles/steering_tuned.json`):
 kills targeted stable lines 2–9× in PSD power. It cannot help broadband
 disturbance, lines whose frequency wanders faster than the notch tracks, or
 motion that isn't correctable from that axis's actuator (cross-axis leakage).
-

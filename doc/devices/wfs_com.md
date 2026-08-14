@@ -154,7 +154,7 @@ The legacy `row_time` parameter's magnitude does not matter -- only whether it
 is positive.
 This was assumed otherwise in an earlier draft of this doc and disproven by
 actually running the calibration sweep in
-`contrib/test_wfs_com_rolling_shutter.c`: every positive value tested (0.25x
+`contrib/diagnostics/test_wfs_com_rolling_shutter.c`: every positive value tested (0.25x
 through 2x the true per-row skew) produced *identical* tracking error, and
 only `row_time <= 0` (correction disabled) differed. The reason is algebraic,
 not empirical noise: the regression fits `shift` against `row_time * row

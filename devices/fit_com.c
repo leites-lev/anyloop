@@ -830,6 +830,7 @@ int fit_com_init(struct aylp_device *self)
 	data->moment_output = false;
 	data->fit_gaussian = true;
 	data->moment_cut = 5.0;
+	data->moment_col_stride = 1;
 	data->moment_max_y_skew = 0.0;
 	data->moment_min_y_width = 0.0;
 	data->pwm_period_frames = 0.0;
@@ -893,6 +894,8 @@ int fit_com_init(struct aylp_device *self)
 			data->fit_gaussian = json_object_get_boolean(val);
 		} else if (!strcmp(key, "moment_cut")) {
 			data->moment_cut = json_object_get_double(val);
+		} else if (!strcmp(key, "moment_col_stride")) {
+			data->moment_col_stride = json_object_get_uint64(val);
 		} else if (!strcmp(key, "moment_max_y_skew")) {
 			data->moment_max_y_skew = json_object_get_double(val);
 		} else if (!strcmp(key, "moment_min_y_width")) {
@@ -984,6 +987,10 @@ int fit_com_init(struct aylp_device *self)
 	}
 	if (!isfinite(data->moment_cut) || data->moment_cut < 0.0) {
 		log_error("fit_com: moment_cut must be finite and non-negative");
+		return -1;
+	}
+	if (!data->moment_col_stride) {
+		log_error("fit_com: moment_col_stride must be nonzero");
 		return -1;
 	}
 	if (!isfinite(data->moment_max_y_skew)
@@ -1345,28 +1352,36 @@ int fit_com_proc(struct aylp_device *self, struct aylp_state *state)
 					bs += img->data[(org_y+i)*img->tda + org_x+j]; bn++;
 				}
 		double bg = bn ? bs/bn : 0.0, sy = 0.0, sx = 0.0;
+		double syy = 0.0, syyy = 0.0;
 		double sw2 = 0.0, sy2 = 0.0, sx2 = 0.0;
-		for (size_t i = 0; i < data->win_h; i++)
-			for (size_t j = 0; j < data->win_w; j++) {
+		for (size_t i = 0; i < data->win_h; i++) {
+			double row_sum = 0.0;
+			for (size_t j = 0; j < data->win_w;
+					j += data->moment_col_stride) {
 				double v = (double)img->data[(org_y+i)*img->tda + org_x+j] - bg;
 				if (v > moment_peak) moment_peak = v;
 				if (v > 2.0) {
 					sw2 += v; sy2 += v*(org_y+i); sx2 += v*(org_x+j);
-					row_flux[i] += v;
+					row_sum += v;
 				}
 				if (v <= data->moment_cut) continue;
-				moment_sum += v; sy += v*(org_y+i); sx += v*(org_x+j);
+				moment_sum += v;
+				double ay = (double)(org_y+i);
+				sy += v*ay; sx += v*(org_x+j);
+				syy += v*ay*ay; syyy += v*ay*ay*ay;
 			}
+			row_flux[i] = row_sum;
+		}
 		if (moment_sum > 100.0) { out_y = sy/moment_sum; out_x = sx/moment_sum; }
 		double y2 = 0.0, y3 = 0.0;
-		if (moment_sum > 100.0)
-			for (size_t i = 0; i < data->win_h; i++)
-				for (size_t j = 0; j < data->win_w; j++) {
-					double v = (double)img->data[(org_y+i)*img->tda + org_x+j] - bg;
-					if (v <= data->moment_cut) continue;
-					double dy = (double)(org_y+i) - out_y;
-					y2 += v*dy*dy; y3 += v*dy*dy*dy;
-				}
+		if (moment_sum > 100.0) {
+			// Derive central moments from the raw moments accumulated above.
+			// This removes a full-window pass from the sensor-to-command path.
+			y2 = syy - 2.0*out_y*sy + out_y*out_y*moment_sum;
+			y3 = syyy - 3.0*out_y*syy + 3.0*out_y*out_y*sy
+				- out_y*out_y*out_y*moment_sum;
+			if (y2 < 0.0 && y2 > -1e-9*syy) y2 = 0.0;
+		}
 		double moment_y_width = moment_sum > 0.0 ? sqrt(y2/moment_sum) : 0.0;
 		double moment_y_skew = y2 > 0.0
 			? fabs((y3/moment_sum) / pow(y2/moment_sum, 1.5)) : INFINITY;
@@ -1469,19 +1484,6 @@ int fit_com_proc(struct aylp_device *self, struct aylp_state *state)
 			data->moment_template_n = data->win_h;
 			data->moment_template_org_y = org_y;
 			data->moment_template_y = out_y;
-			size_t ni=data->win_h*data->win_w;
-			if (data->moment_image_cap < ni) {
-				data->moment_image_template=xrealloc(data->moment_image_template,
-					ni*sizeof *data->moment_image_template);
-				data->moment_image_cap=ni;
-			}
-			for (size_t i=0;i<data->win_h;i++) for(size_t j=0;j<data->win_w;j++) {
-				double v=(double)img->data[(org_y+i)*img->tda+org_x+j]-bg;
-				data->moment_image_template[i*data->win_w+j]=v>0.0?v:0.0;
-			}
-			data->moment_template_w=data->win_w;
-			data->moment_template_org_x=org_x;
-			data->moment_template_x=out_x;
 		}
 		}
 	}
@@ -1556,7 +1558,6 @@ int fit_com_fini(struct aylp_device *self)
 		xfree(data->resid_alt);
 		xfree(data->scratch);
 		xfree(data->moment_row_template);
-		xfree(data->moment_image_template);
 		if (data->com) xfree_type(gsl_vector, data->com);
 	}
 	xfree(self->device_data);

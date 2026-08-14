@@ -46,6 +46,6 @@ limitations.
 Reproduce the calculation with:
 
 ```sh
-python3 contrib/analyze_steering_ab.py steering_par_err.aylp \
+python3 contrib/data-analysis-tools/analyze_steering_ab.py steering_par_err.aylp \
   --fs 1457 --pixel-scale 55.5 --open-start 13 --closed-start 78
 ```

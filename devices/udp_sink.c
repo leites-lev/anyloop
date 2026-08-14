@@ -127,6 +127,7 @@ int udp_sink_init(struct aylp_device *self)
 	memset(&(data->dest_sa), 0, sizeof(data->dest_sa));
 	data->dest_sa.sin_family = AF_INET;
 	data->decimation = 1;
+	data->downsample = 1;
 	int got_params = 0;	// use this to check for params in case ip is 0
 	if (!self->params) {
 		log_error("No params object found.");
@@ -153,6 +154,9 @@ int udp_sink_init(struct aylp_device *self)
 		} else if (!strcmp(key, "decimation")) {
 			data->decimation = json_object_get_uint64(val);
 			log_trace("decimation = %zu", data->decimation);
+		} else if (!strcmp(key, "downsample")) {
+			data->downsample = json_object_get_uint64(val);
+			log_trace("downsample = %zu", data->downsample);
 		} else if (!strcmp(key, "reduce")) {
 			const char *s = json_object_get_string(val);
 			if (!s || !strcmp(s, "none")) {
@@ -176,6 +180,10 @@ int udp_sink_init(struct aylp_device *self)
 	}
 	if (!data->decimation) {
 		log_error("decimation must be nonzero.");
+		return -1;
+	}
+	if (!data->downsample) {
+		log_error("downsample must be nonzero.");
 		return -1;
 	}
 	// we're not using sendto(), so we need to connect() the socket first
@@ -221,10 +229,47 @@ int udp_sink_proc(struct aylp_device *self, struct aylp_state *state)
 		data->iovecs[1].iov_len = sizeof(data->stats);
 		ssize_t err = writev(data->sock, data->iovecs, 2);
 		if (err < 0) {
+			// A connected UDP socket reports ECONNREFUSED when no viewer is
+			// listening. Monitoring is optional: its absence must neither fail
+			// the pipeline nor synchronously spam stderr from the RT thread.
+			if (errno == ECONNREFUSED)
+				return 0;
 			log_error("Couldn't send stats: %s", strerror(errno));
 			return -1;
 		}
 		return 0;
+	}
+	if (data->downsample > 1 && state->header.type == AYLP_T_MATRIX_UCHAR) {
+		gsl_matrix_uchar *m = state->matrix_uchar;
+		size_t out_h = (m->size1 + data->downsample - 1) / data->downsample;
+		size_t out_w = (m->size2 + data->downsample - 1) / data->downsample;
+		size_t need = out_h * out_w;
+		if (need > 65467) {
+			log_error("Downsampled preview is still too large for UDP: %zu bytes", need);
+			return -1;
+		}
+		if (need > data->preview_size) {
+			data->preview = xrealloc(data->preview, need);
+			data->preview_size = need;
+		}
+		for (size_t y = 0; y < out_h; y++)
+			for (size_t x = 0; x < out_w; x++)
+				data->preview[y*out_w + x] =
+					gsl_matrix_uchar_get(m, y*data->downsample,
+						x*data->downsample);
+		data->preview_head = state->header;
+		data->preview_head.log_dim.y = out_h;
+		data->preview_head.log_dim.x = out_w;
+		data->iovecs[0].iov_base = &data->preview_head;
+		data->iovecs[0].iov_len = sizeof(data->preview_head);
+		data->iovecs[1].iov_base = data->preview;
+		data->iovecs[1].iov_len = need;
+		ssize_t err = writev(data->sock, data->iovecs, 2);
+		if (err < 0 && errno == ECONNREFUSED)
+			return 0;
+		if (err < 0)
+			log_error("Couldn't send preview: %s", strerror(errno));
+		return err < 0 ? -1 : 0;
 	}
 	// make data contiguous
 	int needs_free = get_contiguous_bytes(&data->bytes, state);
@@ -239,6 +284,11 @@ int udp_sink_proc(struct aylp_device *self, struct aylp_state *state)
 	size_t n = data->iovecs[0].iov_len + data->iovecs[1].iov_len;
 	log_trace("Writing %zu bytes to UDP", n);
 	ssize_t err = writev(data->sock, data->iovecs, 2);
+	if (err < 0 && errno == ECONNREFUSED) {
+		if (needs_free)
+			xfree(data->bytes.data);
+		return 0;
+	}
 	if (err < 0) {
 		// if n > SSIZE_MAX, this will fire, so we don't need to check
 		// the sign of (ssize_t)n ourselves
@@ -259,7 +309,8 @@ int udp_sink_proc(struct aylp_device *self, struct aylp_state *state)
 
 int udp_sink_fini(struct aylp_device *self)
 {
+	struct aylp_udp_sink_data *data = self->device_data;
+	xfree(data->preview);
 	xfree(self->device_data);
 	return 0;
 }
-

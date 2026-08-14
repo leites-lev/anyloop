@@ -1,0 +1,169 @@
+{
+	"_comment": {
+		"1": "Tip/tilt loop, integrator-only, designed from the 2026-07-10",
+		"2": "measurements (fsm2310_bode_{x,y}.dat, latency_test): both axes",
+		"3": "are flat gain + pure delay up to 300 Hz -- x |P|=0.43, y |P|=0.30",
+		"4": "(minmax per command unit), delay ~1.4 ms plus ~0.6 ms of DAC",
+		"5": "update ZOH at baud 460800. No resonance below 300 Hz, so no",
+		"6": "biquad/notch is needed (the old 64/94/120 Hz numbers were from",
+		"7": "stale sweeps with different DAC step sizes and serial bufferbloat).",
+		"8": "Loop rate ~2400 Hz at 64x64. Crossover = i*|P|/2pi. Gains below",
+		"9": "are the winners of the 2026-07-10 closed-loop trials (30 s runs,",
+		"10": "PSD-scored): x residual 0.63 px, y 0.27 px vs 0.75/0.48 open.",
+		"11": "Do NOT raise i past ~600: the residual is dominated by vibration",
+		"12": "lines at 59.6 and 87.5 Hz that sit in the waterbed -- x gets",
+		"13": "WORSE at i=800 (0.68) and 900 (0.81). iy saturates at 1300",
+		"14": "(1700 is no better). Error-path notches at the lines helped the",
+		"15": "lines but their phase spill re-amplified 40-55 Hz; net wash.",
+		"16": "The real fixes for the lines are mechanical (59.6 is ~mains) or",
+		"17": "narrowband internal-model rejection, not more integrator gain.",
+		"18": "2026-07-10 (later): pid now has that internal-model rejection",
+		"19": "(lines/line_gain/line_phase params below). A/B-validated: kills",
+		"20": "x 22.08 Hz ~2-9x, x 59.63 ~3-5x, y 30.8 ~3-6x in PSD. Total RMS",
+		"21": "gain is small because the residual is broadband 25-100 Hz",
+		"22": "vibration, which narrowband rejection cannot touch. Lessons:",
+		"23": "keep oscillators >2 Hz apart (20.24+22.08 overlap and fight);",
+		"24": "keep gain <=20 on lines near crossover or the notch's local",
+		"25": "waterbed pumps 62-70 Hz; y 59.63 is NOT correctable from the y",
+		"26": "command (likely x crosstalk) -- do not add it back.",
+		"27": "VERIFIED 2026-07-10 evening, 120 s open + 120 s closed runs of",
+		"28": "exactly this config (steady state t>25 s, no rails, fs checked",
+		"29": "against the mains line): pointing error about the setpoint",
+		"30": "x 1.17 -> 0.63 px, y 5.18 -> 0.28 px (open loop parks ~5 px off",
+		"31": "in y and drifts ~1 px in x). Jitter about the mean: y 0.42 ->",
+		"32": "0.28; x 0.63 -> 0.63 -- a WASH in a quiet environment: closing",
+		"33": "x trades its line kills (22.08 Hz /2.8, via predictor+oscillator)",
+		"34": "against waterbed growth of the broadband 20-200 Hz floor. The x",
+		"35": "loop's real value is holding DC/drift and clamping the bad times:",
+		"36": "open-loop x jitter varied 0.63-0.91 px over the day while closed",
+		"37": "stayed 0.59-0.63. Do not judge tuning changes on <60 s runs or",
+		"38": "without a back-to-back baseline; the vibration environment is",
+		"39": "nonstationary (lines vary several-fold within hours)."
+	},
+	"pipeline": [
+		{
+			"uri": "file:/home/fsl/anyloop_levfork/anyloop/build/asi_source.so",
+			"params": {
+				"camera_name": "ASI290MM",
+				"width":   64,
+				"height":   64,
+				"start_x": 1188,
+				"start_y": 422,
+				"_camera_note": "ASI290MM (IMX290, 1936x1096) as of 2026-08-06, back from the ASI662MM (IMX662, 1920x1080) this file ran on 2026-08-02..08-05. EVERY MEASURED NUMBER IN THIS FILE NOW PREDATES TWO CAMERA SWAPS AND AN ROI CHANGE and must be re-taken: fs (both the 3788 Hz of the 290 at 32x32/exp50/bw100 and anything measured on the 662 are wrong here -- 64x64 at exposure 400 is a different frame rate again, and fs sets the loop period, K's units, the delay in FRAMES and broad_lp all at once), delay, K, and the pixel scale. Re-run the bodes before trusting a run.",
+				"_roi_note": "ROI 64x64 at start_x 644 / start_y 318, centring full-sensor (676, 350) -- the beam position every ASI662MM config agreed on, carried over unverified. THE 662 AND THE 290 ARE DIFFERENT SENSORS ON A DIFFERENT MOUNT: re-probe with contrib/calibration-scripts/configurations/probe_frame.json and re-derive with contrib/calibration-scripts/tools/find_roi.py before the first real run. The beam also walks several px per hour, so re-derive again once |park| exceeds ~2 px.",
+				"exposure":  500,
+				"gain":        0,
+				"bandwidth":   100,
+				"high_speed":  1,
+				"die_on_stall": 0
+			}
+		},
+		{
+			"_comment": "Send raw frame to watch_steering.jl on port 64730",
+			"_note": "decimation must MATCH the 64731 sink below, so the frame and the CoM cross drawn together come from the same iteration. 64 gives ~36 Hz at a 2310 Hz loop -- about what a GR heatmap can redraw.",
+			"uri": "anyloop:udp_sink",
+			"params": {
+				"ip":         "127.0.0.1",
+				"port":       "64730",
+				"decimation": 64
+			}
+		},
+		{
+			"_choice": "fit_com CHOSEN 2026-08-06 on measured data, re-confirmed on the stable centred beam. Same 60 s capture: fit_com hf 0.271 px / 11.4% rejected, wfs_com hf 0.814 / 79.9%, thresholded center_of_mass hf 0.639 / 22.9%. hf is the frame-to-frame difference, i.e. what the loop must reject -- fit_com is 3x quieter than wfs_com. wfs_com's rejection is NOT a geometry error: re-run at 3x3 and 5x5 grids with 6/8/14 px cells it stayed 82-88%, and only reached 35.9% with every quality gate disabled. Cost p50 17.4 us / p99 27.0 us against a 433 us frame period. The 11.4% rejection is the 4.7 Hz source modulation, not the tracker -- see com_survey.json.",
+			"_provenance": "MEASURED 2026-08-06 by contrib/calibration-scripts/tools/com_survey_run.sh over a 60 s / 138600-frame capture at 64x64, exp 400, gain 0, fs 2310 Hz, with the ROI auto-centred first (find_roi put it at 1088/406, beam landing at (28.39, 29.95) against a 31.5 centre -- the residual is the 4-px/2-px ASI ROI grid, not an error): beam sigma 6.55 px / FWHM 15.43, amplitude 213.9 over background 1.74, saturation 2.68%. window 55 = +/-4 sigma; sigma_min/max and min_amplitude are 0.3x/4x/0.1x of measured, which is how com_survey derives its own suggestions. RE-RUN contrib/calibration-scripts/tools/com_survey_run.sh AND RE-DERIVE after any refocus or source change -- these are beam properties. An EARLIER set (sigma 6.31, window 53) was taken while the beam was being moved by hand and is superseded.",
+			"_shutter": "NOTE ON THE CHOPPED SOURCE: the center_of_mass this replaces used ref_cut to drop frames the rolling shutter cuts through the source's on-window. fit_com has no ref_cut. It handles those frames through robust (Tukey) reweighting and the min_amplitude gate instead, and the 20.8% rejection above ALREADY INCLUDES them -- that number was measured on these same chopped frames. Watch it if the chop duty changes.",
+			"_replaced": "Replaced this center_of_mass block, kept for reversibility: {\"region_height\":20,\"region_width\":20,\"threshold\":10,\"track\":true,\"reacquire_after\":30000}",
+			"uri": "anyloop:fit_com",
+			"params": {
+				"_budget": "max_us 25 is ABOVE the measured p99 of 27.2 us only just -- expect the guard to bite on the slowest few percent of frames, truncating those fits to fewer LM iterations. The survey's numbers were taken at the 10 us DEFAULT, so 25 lets the fit converge FURTHER than what was benchmarked, not less. Set 0 to remove the cap entirely, at the cost of a variable measurement latency that a fixed-delay model downstream will read as a wobbling loop delay.",
+				"window_height": 55,
+				"window_width": 55,
+				"sigma_init": 6.55,
+				"sigma_min": 1.965,
+				"sigma_max": 26.2,
+				"min_amplitude": 21.39,
+				"_reacquire": "reacquire_after 300 frames = 130 ms at 2310 Hz, NOT the 10 that com_survey's benchmark harness uses. This is the difference between the two failure paths downstream. A rejected frame (fsp.c:2141) holds the actuator command and advances the delay and modal state without training the observer -- correct for a frame the beam was briefly too dim to fit. BEAM_LOST (fsp.c:1960) zeroes the output, calls fsp_reset_after_beam_loss (xhat, the ucmd delay ring, plant and drift states, all transient state) and ramps back over beam_recover_ramp 0.5 s. MEASURED 2026-08-06: the 4.70 Hz source modulation produces 6 dark stretches per second, median 3 frames but p90 49 and max 201 (87 ms). At reacquire_after 10 every stretch over 4.3 ms takes the catastrophic path -- about 9 full observer resets per second, each starting a 0.5 s recovery that the next reset interrupts, so the loop never converges and the log fills with 'fit failed'. 300 sits above the longest observed stretch, so modulation routes to the hold path and BEAM_LOST means the beam is actually gone. Cost: a genuine loss takes 130 ms to declare instead of 4.3 ms. RE-DERIVE THIS from the dark-stretch distribution if the source changes; on a CW source it can go back down.",
+				"max_iter": 4,
+				"max_us": 25,
+				"robust_k": 2.5,
+				"robust_iter": 1,
+				"fit_slope": true,
+				"row_time": 0,
+				"reacquire_after": 300
+			}
+		},
+		{
+			"_comment": "Send [y, x] CoM vector to watch_steering.jl on port 64731",
+			"_note": "keep decimation equal to the 64730 sink above",
+			"uri": "anyloop:udp_sink",
+			"params": {
+				"ip":         "127.0.0.1",
+				"port":       "64731",
+				"decimation": 64
+			}
+		},
+		{
+			"_comment": "Send [y, x] CoM vector to watch_error_ts.jl on port 64732",
+			"_note": "NOT decimated: this is a time series, and dropping samples without an anti-alias filter folds high-frequency error back down into the band you're trying to read. The packets are ~48 bytes, so full rate is ~110 kB/s -- cheap.",
+			"uri": "anyloop:udp_sink",
+			"params": {
+				"ip":   "127.0.0.1",
+				"port": "64732"
+			}
+		},
+		{
+			"_note": "start_delay must be >= the piplate start_delay below. Holding the fine DAC channels without also holding the pid is useless: the integrator keeps winding on the large startup error behind the parked output, and the fine channel is at its rail the instant the hold expires. Base params are the x axis (element 1), *y the y axis (element 0). i sets the crossover: f_c = i*|P|/2pi. Lead-compensated design 2026-07-14 evening (plant from the fine bodes @ bias 2.52/1.62: Kx=0.427, Ky=0.300, tau_loop=1.81 ms; grid search over the attenuation9 open PSD with PM>=45, Ms<=2.0): C(s) = i/s * (s+2pi*8)/(s+2pi*32) on both axes -- the lead's +37 deg buys fc 46->64 Hz (x) / 24->65 Hz (y) at PM 67, paid with 4x less gain below 8 Hz (affordable: 0-10 Hz closed was 0.05 px). Oscillator phases are plant+sensitivity WITH the lead in L: phi = -360*f*tau + angle(1/(1+L)); RECOMPUTE if i/iy/lead/bias change (attenuation8 lesson, validated by attenuation9: x 0.400->0.282 px). Line centers on multi-run measured positions (wander ~0.5 Hz/run); y 11.3 oscillator added (0.095 px line, steady across runs). Rollback = attenuation9 tune: i=680/iy=500, no lead, see attenuation_test.json _note4. Full rationale there.",
+			"uri": "anyloop:pid",
+			"params": {
+				"type": "vector",
+"_pi_2026_08_07": "PI DERIVED 2026-08-07 from this session's measured plant. The plant is flat gain plus pure delay below 300 Hz (no resonance in either bode), so for a pure integrator the design is closed-form: pid accumulates a += dt*e and outputs -i*a (pid.c:520), i.e. C(s) = p + i/s with i in rad/s, giving crossover w_c = i*K and PM = 90 deg - 360*fc*tau. Inputs: Kx 0.579 / Ky 0.8156 units/V and delay 3.018 fr (x) / 3.127 fr (y) at fs 2310, i.e. tau 1.3065 / 1.3537 ms. METHOD CHECK: the same formula reproduces the documented 2026-07-14 retune exactly -- i=680 at K 0.427 and tau 1.81 ms gives fc 46.2 Hz and PM 60, against the 'fc 46, PM60' recorded for it. CHOSEN, at PM 60 (the target this rig has always used): i = 692 -> fc 63.8 Hz, PM 60, Ms 1.63, |S| -16.1 dB @10 Hz / -6.5 @30 / -0.5 @60. iy = 474 -> fc 61.6 Hz, PM 60, Ms 1.63, |S| -15.8 dB @10 Hz / -6.2 @30 / -0.2 @60. p AND py STAY 0, deliberately: against a pure-delay plant the proportional term makes the loop behave proportionally at crossover, so PM stops binding until fc ~1.6 kHz, far outside where the bode has data or fit_com is trustworthy. Constrained to Ms <= 2 and fc <= 100 Hz the best PI (p 0.25, i 1072/751) buys only ~1.3 dB at 10-30 Hz over the pure integrator, while adding flat high-frequency gain that amplifies tracker noise and the 383 Hz regeneration band. NOTE pid DEFAULTS p TO 1.0, so leaving p unset is not the same as p = 0 -- it leaves a live proportional loop (the 497 Hz limit cycle of 2026-07-30). WHY NOT MORE AGGRESSIVE: Ms <= 2 would admit PM 50 (i 924 / 633, fc ~85 Hz) for about 2 dB more at 10-30 Hz, but K here predates today's refocus and w_c scales directly with K. Effect of a K error on this design: K x0.7 -> PM 69 / Ms 1.39; x1.0 -> PM 60 / Ms 1.63; x1.3 -> PM 51 / Ms 1.95; x1.6 -> PM 42 / Ms 2.40. PM 60 therefore survives K being 30% high and still lands inside Ms 2, where the PM 50 variant would be at PM 38 / Ms ~2.6. Re-derive after fresh sweeps: i = 2*pi*fc/K with fc = (90 - PM)/(360*tau).",
+"p": 0,
+"py": 0,
+"i": 692,
+"iy": 474,
+"clamp": 10,
+"park_after": 300,
+"park_value": 0	}
+		},
+		{
+			
+			"uri": "anyloop:clamp",
+			"params": {
+				"type": "vector",
+				"min": -10.0,
+				"max": 10.0
+			}
+		},
+		{
+      "uri": "anyloop:file_sink",
+      "params": { "filename": "dac_cmd_check.aylp" }
+},
+		{
+			"_note": "PARPORT DAC. TWO channels only -- there is no coarse stage: ch0 = y/tip (DACA), ch1 = x/tilt (DACB). Here y is parked (scale 0) and x is driven.",
+			"_range": "0-5 (unipolar, DACRANGE code 0x0), biased at mid-range 2.5 V so the command has 2.5 V of headroom in BOTH directions without needing a bipolar range. 76 uV/LSB over the 5 V span -- 2x finer than +-5 would give, since the whole 16 bits now cover 5 V instead of 10. The 2.4..2.6 V sweep is ~2600 codes, plenty of resolution and nowhere near either rail.",
+			"_avss_note": "AVSS MUST BE -12 V (NOT grounded) on this rig: the steering configs auto-range to +-10 so the mirror can be driven negative on an impact, and the supply is shared. That means this 0-5 sweep also runs with a negative AVSS, which is OUTSIDE the condition SLASEH2A 7.5 characterizes the unipolar figures at (TUE +-0.07 %FSR, offset, zero-code 0.15 %FSR are given at AVSS = 0 V; the -21.5 V <= AVSS < 0 rows are the bipolar ones). It is inside Recommended Operating Conditions (7.3: AVDD 4.5..41.5, AVSS -21.5..0, AVDD-AVSS 4.5..43) and the bipolar TUE at negative AVSS is tighter, so the part is likely fine -- but the bode measures the plant THROUGH this converter, so if absolute gain accuracy ever looks suspect, this is one thing that is not datasheet-guaranteed.",
+			"_footroom_note": "The 1.25-1.5 V output headroom/footroom figure does NOT set a floor here: SLASEH2A 7.5 conditions it on -10 mA <= load <= 10 mA (1.25 V) or +-15 mA (1.5 V). Unloaded -- the EC table's own condition, and near enough true when driving an amplifier input -- zero code sits within the 0.15 %FSR zero-code error, about 7.5 mV of ground on a 5 V range. Only if the FSM driver actually pulls ~10 mA AND the output must reach 0 V under that load does a negative AVSS buy anything, and then it costs the characterized condition above.",
+			"_scale_sign": "x keeps the NEGATIVE sign the piplate config used (was -2, now -1.0). That inversion is a property of the optical/mechanical path, not of the converter, so it carries over even though the magnitude does not. It is what made Kx come out sign-positive. If the push test now says otherwise, fix it HERE and re-run -- do not fix it by flipping the sign of K.",
+			"uri": "anyloop:parport_dac",
+			"params": {
+				"pci": "0000:06:00.2",
+				"backend": "mmio",
+				"link": "spi",
+				"channel": [0, 1],
+				"index": [0, 1],
+				"_scale_2026_08_07": "scale [0, 0] -> [-1, 1]. Both channels were parked, so this config could not drive the mirror at all and the PI gains above would have done nothing. Signs are [ch0 y, ch1 x], matching every other parport_dac config as of 2026-08-07 -- CONFIRMED CORRECT ON THE BENCH 2026-08-07. To take this file open-loop again, zero i/iy rather than scale, so the actuator path stays honest.",
+				"scale": [-1, 1],
+				"offset": [0, 0],
+				"_range_2026_08_07": "range -> +-5, the standard base range across every parport_dac config as of 2026-08-07 (153 uV/LSB over 10 V, mirror parked at 0 V). This is the range both bode sweeps measured K and tau through, so a loop running any other base range is not driving the plant that was characterised.",
+				"range": "+-5",
+				"_no_range_max": "auto-ranging deliberately NOT enabled for a sweep. A mid-sweep range change would glitch the output for a frame and step the quantization, both of which land straight in the lock-in as a bogus data point. The sweep never leaves 2.4..2.6 V anyway, deep inside 0-5. Note the STEERING configs DO auto-range (range_max +-10) -- the bode measures the plant at a fixed 0-5 range and fixed 76 uV/LSB on purpose, so K and tau are not entangled with a range change.",
+				"_verify": "off in a swept/timed run: verify turns each write into 3 frames (write, read-command, NOP) plus a non-posted status read per bit. Use it in a bench smoke config, not here.",
+				"verify": false,
+				"_skip_unchanged": "still worth having, but expect it to skip far LESS than on the BRIDGEplate: at 153 uV/LSB a swept sine changes the code almost every iteration, where 1 mV codes often repeated. Costs ~6.4 us/frame, against a ~264 us loop period.",
+				"skip_unchanged": false,
+				"_sync_update": "left off. Only ONE channel is driven in this sweep, so there is no inter-channel skew to remove and sync_update would just add a SOFT-LDAC frame per iteration.",
+				"sync_update": false
+			}
+		}
+	]
+}

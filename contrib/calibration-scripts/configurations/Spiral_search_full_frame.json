@@ -1,0 +1,66 @@
+{
+	"_comment": {
+		"1": "Full-frame FSM acquisition scan. Run with:",
+		"2": "  sudo build/anyloop -l INFO contrib/calibration-scripts/configurations/Spiral_search_full_frame.json",
+		"3": "The ASI290MM supplies its complete 1936x1096 frame. The FSM is",
+		"4": "sampled on an outward square spiral over the DAC's documented",
+		"5": "+-10 V recovery range. The first pass uses 1 V spacing; later",
+		"6": "passes refine around the brightest sampled position. On completion",
+		"7": "the FSM remains parked at the brightest position and anyloop exits.",
+		"8": "If all frames have equal brightness, the device parks at 0 V.",
+		"9": "This scan reaches +-10 V on both FSM axes. Confirm that this is safe",
+		"10": "for the connected mirror and amplifier before running it."
+	},
+	"pipeline": [
+		{
+			"uri": "file:/home/fsl/anyloop_levfork/anyloop/build/asi_source.so",
+			"params": {
+				"camera_name": "ASI290MM",
+				"width": 1936,
+				"height": 1096,
+				"start_x": 0,
+				"start_y": 0,
+				"exposure": 400,
+				"gain": 0,
+				"bandwidth": 80,
+				"high_speed": 1,
+				"die_on_stall": 0
+			}
+		},
+		{
+			"uri": "anyloop:spiral_search",
+			"params": {
+				"step": 0.1,
+				"radius": 10,
+				"passes": 4,
+				"settle_frames": 5,
+				"threshold": 5,
+				"units": "minmax"
+			}
+		},
+		{
+			"uri": "anyloop:clamp",
+			"params": {
+				"type": "vector",
+				"min": -1.0,
+				"max": 1.0
+			}
+		},
+		{
+			"uri": "anyloop:parport_dac",
+			"params": {
+				"backend": "mmio",
+				"link": "spi",
+				"pci": "0000:06:00.2",
+				"channel": [0, 1],
+				"index": [0, 1],
+				"scale": [-10, 10],
+				"offset": [0.0, 0.0],
+				"range": "+-10",
+				"verify": false,
+				"skip_unchanged": false,
+				"sync_update": true
+			}
+		}
+	]
+}

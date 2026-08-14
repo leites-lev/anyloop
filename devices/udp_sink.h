@@ -31,6 +31,13 @@ struct aylp_udp_sink_data {
 	// reduction output and its header, reused every iteration
 	double stats[3];
 	struct aylp_header stats_head;
+	// Optional nearest-neighbour image preview. A 384x384 RAW8 frame cannot
+	// fit in one UDP datagram; factor 2 produces 192x192 while preserving the
+	// complete field of view and normalized centroid coordinates.
+	size_t downsample;
+	unsigned char *preview;
+	size_t preview_size;
+	struct aylp_header preview_head;
 };
 
 // initialize udp_sink device
@@ -43,4 +50,3 @@ int udp_sink_proc(struct aylp_device *self, struct aylp_state *state);
 int udp_sink_fini(struct aylp_device *self);
 
 #endif
-

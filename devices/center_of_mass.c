@@ -85,6 +85,7 @@ int center_of_mass_init(struct aylp_device *self)
 	data->ref_floor = 0.25;
 	data->had_beam = true;	// so the first loss logs
 	data->track = false;
+	data->registration = false;
 	data->init_y = -1;	// <0 => acquire from the brightest pixel
 	data->init_x = -1;
 	data->reacquire_after = 30;
@@ -100,10 +101,16 @@ int center_of_mass_init(struct aylp_device *self)
 		if (key[0] == '_') {
 			// keys starting with _ are comments
 		} else if (!strcmp(key, "region_height")) {
-			data->region_height = json_object_get_uint64(val);
+			data->auto_region_height=json_object_is_type(val,json_type_string)
+				&& !strcmp(json_object_get_string(val),"auto");
+			data->region_height=data->auto_region_height?0:
+				json_object_get_uint64(val);
 			log_trace("region_height = %zu", data->region_height);
 		} else if (!strcmp(key, "region_width")) {
-			data->region_width = json_object_get_uint64(val);
+			data->auto_region_width=json_object_is_type(val,json_type_string)
+				&& !strcmp(json_object_get_string(val),"auto");
+			data->region_width=data->auto_region_width?0:
+				json_object_get_uint64(val);
 			log_trace("region_width = %zu", data->region_width);
 		} else if (!strcmp(key, "thread_count")) {
 			data->thread_count = json_object_get_uint64(val);
@@ -113,10 +120,16 @@ int center_of_mass_init(struct aylp_device *self)
 			}
 			log_trace("thread_count = %zu", data->thread_count);
 		} else if (!strcmp(key, "threshold")) {
-			data->threshold = (unsigned char)json_object_get_int(val);
+			data->auto_threshold=json_object_is_type(val,json_type_string)
+				&& !strcmp(json_object_get_string(val),"auto");
+			data->threshold=data->auto_threshold?0:
+				(unsigned char)json_object_get_int(val);
 			log_trace("threshold = %u", data->threshold);
 		} else if (!strcmp(key, "min_peak")) {
-			data->min_peak = (unsigned char)json_object_get_int(val);
+			data->auto_min_peak=json_object_is_type(val,json_type_string)
+				&& !strcmp(json_object_get_string(val),"auto");
+			data->min_peak=data->auto_min_peak?0:
+				(unsigned char)json_object_get_int(val);
 			log_trace("min_peak = %u", data->min_peak);
 		} else if (!strcmp(key, "ref_cut")) {
 			data->ref_cut = json_object_get_double(val);
@@ -151,14 +164,26 @@ int center_of_mass_init(struct aylp_device *self)
 		} else if (!strcmp(key, "track")) {
 			data->track = json_object_get_boolean(val);
 			log_trace("track = %d", data->track);
+		} else if (!strcmp(key, "registration")) {
+			data->registration = json_object_get_boolean(val);
+		} else if (!strncmp(key, "registration_", 13)) {
+			log_warn("%s is obsolete: registration now derives sampling, "
+				"noise, conditioning and robust scale automatically", key);
 		} else if (!strcmp(key, "init_y")) {
-			data->init_y = json_object_get_int64(val);
+			data->init_y=json_object_is_type(val,json_type_string)
+				&& !strcmp(json_object_get_string(val),"auto") ? -1
+				: json_object_get_int64(val);
 			log_trace("init_y = %ld", data->init_y);
 		} else if (!strcmp(key, "init_x")) {
-			data->init_x = json_object_get_int64(val);
+			data->init_x=json_object_is_type(val,json_type_string)
+				&& !strcmp(json_object_get_string(val),"auto") ? -1
+				: json_object_get_int64(val);
 			log_trace("init_x = %ld", data->init_x);
 		} else if (!strcmp(key, "reacquire_after")) {
-			data->reacquire_after = json_object_get_uint64(val);
+			data->auto_reacquire=json_object_is_type(val,json_type_string)
+				&& !strcmp(json_object_get_string(val),"auto");
+			data->reacquire_after=data->auto_reacquire?30:
+				json_object_get_uint64(val);
 			if (!data->reacquire_after) {
 				log_error("reacquire_after must be nonzero");
 				return -1;
@@ -181,7 +206,8 @@ int center_of_mass_init(struct aylp_device *self)
 			log_warn("Unknown parameter \"%s\"", key);
 		}
 	}
-	if (!data->region_height || !data->region_width) {
+	if ((!data->region_height && !data->auto_region_height)
+	|| (!data->region_width && !data->auto_region_width)) {
 		log_error("You must provide nonzero region_height and "
 			"region_width params"
 		);
@@ -209,7 +235,18 @@ int center_of_mass_init(struct aylp_device *self)
 		log_warn("ref_cut only applies in track mode; ignoring it");
 		data->ref_cut = 0.0;
 	}
-	if (data->ref_cut > 0.0) {
+	if (data->registration && !data->track) {
+		log_error("registration requires track mode");
+		return -1;
+	}
+	if (data->registration && !data->auto_region_height
+			&& !data->auto_region_width && (data->region_height < 7
+			|| data->region_width < 7)) {
+		log_error("registration needs a tracking window at least 7x7");
+		return -1;
+	}
+	if (data->ref_cut > 0.0 && !data->auto_region_height
+			&& !data->auto_region_width) {
 		if (data->region_height < 4) {
 			// with three rows or fewer there is no meaningful
 			// profile to compare against, and after ref_floor
@@ -226,6 +263,32 @@ int center_of_mass_init(struct aylp_device *self)
 	}
 
 	if (data->track) {
+		if (data->registration && !data->auto_region_height
+				&& !data->auto_region_width) {
+			data->registration_ref = xcalloc(data->region_height
+				* data->region_width, sizeof(double));
+			// Every pixel with a two-pixel derivative margin is a valid
+			// candidate.  Size the work arrays from the configured window:
+			// a fixed cap makes feature selection depend on ROI size.
+			data->registration_sample_capacity =
+				(data->region_height - 4) * (data->region_width - 4);
+			data->registration_sample_y = xcalloc(
+				data->registration_sample_capacity,
+				sizeof(size_t));
+			data->registration_sample_x = xcalloc(
+				data->registration_sample_capacity,
+				sizeof(size_t));
+			data->registration_sample_ref = xcalloc(
+				data->registration_sample_capacity, sizeof(double));
+			data->registration_sample_gy = xcalloc(
+				data->registration_sample_capacity, sizeof(double));
+			data->registration_sample_gx = xcalloc(
+				data->registration_sample_capacity, sizeof(double));
+			data->registration_residuals = xcalloc(
+				data->registration_sample_capacity, sizeof(double));
+			data->registration_errors = xcalloc(
+				data->registration_sample_capacity, sizeof(double));
+		}
 		// the tracking window is a single region by definition, so there
 		// is nothing to hand out to a thread pool
 		if (data->thread_count > 1) {
@@ -351,6 +414,14 @@ int center_of_mass_fini(struct aylp_device *self)
 		xfree(data->ref);
 		xfree(data->rows);
 		xfree(data->rho);
+		xfree(data->registration_ref);
+		xfree(data->registration_sample_y);
+		xfree(data->registration_sample_x);
+		xfree(data->registration_sample_ref);
+		xfree(data->registration_sample_gy);
+		xfree(data->registration_sample_gx);
+		xfree(data->registration_residuals);
+		xfree(data->registration_errors);
 	}
 	xfree(self->device_data);
 	return 0;
@@ -365,6 +436,17 @@ static bool acquire_window(
 	struct aylp_center_of_mass_data *data, gsl_matrix_uchar *img
 ) {
 	unsigned char best = 0;
+	unsigned char auto_gate=0;
+	if(data->auto_threshold||data->auto_min_peak) {
+		size_t bins[256]={0},n=0,acc=0,q=0;
+		for(size_t y=0;y<img->size1;y++)for(size_t x=0;x<img->size2;x++)
+			if(!y||!x||y+1==img->size1||x+1==img->size2) {
+				bins[img->data[y*img->tda+x]]++;n++;
+			}
+		while(q<255&&(acc+=bins[q])<(95*n+99)/100)q++;
+		if(data->auto_threshold)data->threshold=(unsigned char)q;
+		auto_gate=(unsigned char)fmin(255,q+3);
+	}
 	size_t by = img->size1 / 2;
 	size_t bx = img->size2 / 2;
 	for (size_t i = 0; i < img->size1; i++) {
@@ -378,7 +460,8 @@ static bool acquire_window(
 	// there is worse than not moving at all: if the beam returns where it
 	// left, an unmoved window is already on it. Park at the image centre
 	// only when we have never had a placement to keep.
-	if (data->min_peak && best < data->min_peak) {
+	if ((data->min_peak && best < data->min_peak)
+			|| (data->auto_min_peak && best < auto_gate)) {
 		if (!data->acquired) {
 			data->win_y = img->size1 / 2;
 			data->win_x = img->size2 / 2;
@@ -414,6 +497,42 @@ static double com_monotonic_s(void)
 	struct timespec t;
 	clock_gettime(CLOCK_MONOTONIC, &t);
 	return t.tv_sec + 1e-9 * t.tv_nsec;
+}
+
+/** Calibrate the two brightness gates from the window border. The border is
+ * deliberately used instead of the whole image so the beam cannot raise its
+ * own noise floor. The 95th percentile tolerates isolated hot pixels while
+ * following ordinary sensor/background changes. */
+static void com_auto_gates(
+	struct aylp_center_of_mass_data *data, const gsl_matrix_uchar *img,
+	size_t org_y, size_t org_x, size_t h, size_t w
+)
+{
+	if(!data->auto_threshold&&!data->auto_min_peak)return;
+	size_t bins[256]={0},n=0,acc=0,q=0;
+	for(size_t y=0;y<h;y++)for(size_t x=0;x<w;x++)
+		if(!y||!x||y+1==h||x+1==w) {
+			bins[img->data[(org_y+y)*img->tda+org_x+x]]++;n++;
+		}
+	if(!n)return;
+	while(q<255&&(acc+=bins[q])<(95*n+99)/100)q++;
+	if(data->auto_threshold)data->threshold=(unsigned char)q;
+	if(data->auto_min_peak) {
+		double signal=data->auto_peak_samples
+			? data->auto_mean_peak-q : 0.0;
+		double gate=q+fmax(3.0,ceil(0.10*fmax(0.0,signal)));
+		data->min_peak=(unsigned char)fmin(255.0,gate);
+	}
+}
+
+static void com_auto_accept_peak(
+	struct aylp_center_of_mass_data *data, unsigned char peak
+)
+{
+	if(!data->auto_min_peak)return;
+	if(!data->auto_peak_samples)data->auto_mean_peak=peak;
+	else data->auto_mean_peak+=0.05*(peak-data->auto_mean_peak);
+	data->auto_peak_samples++;
 }
 
 
@@ -528,6 +647,322 @@ static void com_reset_ref(struct aylp_center_of_mass_data *data)
 /** Seconds between beam-lost/beam-back log lines. */
 #define COM_LOG_INTERVAL 1.0
 
+static double com_bilinear(
+	const gsl_matrix_uchar *img, double y, double x
+) {
+	size_t y0 = (size_t)y, x0 = (size_t)x;
+	double fy = y-y0, fx = x-x0;
+	const unsigned char *a = img->data + y0*img->tda + x0;
+	return (1-fy)*((1-fx)*a[0] + fx*a[1])
+		+ fy*((1-fx)*a[img->tda] + fx*a[img->tda+1]);
+}
+
+/** Solve a dense 4x4 system with partial pivoting. */
+static bool com_solve4(double a[4][4], double b[4], double x[4])
+{
+	for (size_t k=0; k<4; k++) {
+		size_t p=k;
+		for (size_t i=k+1; i<4; i++)
+			if (fabs(a[i][k]) > fabs(a[p][k])) p=i;
+		if (fabs(a[p][k]) < 1e-9) return false;
+		if (p != k) {
+			for (size_t j=k; j<4; j++) {
+				double t=a[k][j]; a[k][j]=a[p][j]; a[p][j]=t;
+			}
+			double t=b[k]; b[k]=b[p]; b[p]=t;
+		}
+		for (size_t i=k+1; i<4; i++) {
+			double q=a[i][k]/a[k][k];
+			for (size_t j=k; j<4; j++) a[i][j]-=q*a[k][j];
+			b[i]-=q*b[k];
+		}
+	}
+	for (int i=3; i>=0; i--) {
+		double s=b[i];
+		for (size_t j=i+1; j<4; j++) s-=a[i][j]*x[j];
+		x[i]=s/a[i][i];
+	}
+	return true;
+}
+
+static inline void com_normal_add(
+	double n[4][4], double r[4], double gy, double gx, double ref,
+	double e, double wt
+)
+{
+	double wy=wt*gy,wxx=wt*gx,wr=wt*ref;
+	n[0][0]+=wy*gy; n[0][1]+=wy*gx; n[0][2]+=wy*ref; n[0][3]+=wy;
+	n[1][1]+=wxx*gx; n[1][2]+=wxx*ref; n[1][3]+=wxx;
+	n[2][2]+=wr*ref; n[2][3]+=wr; n[3][3]+=wt;
+	double we=wt*e;
+	r[0]+=gy*we; r[1]+=gx*we; r[2]+=ref*we; r[3]+=we;
+}
+
+static inline void com_normal_mirror(double n[4][4])
+{
+	for(size_t i=1;i<4;i++)for(size_t j=0;j<i;j++)n[i][j]=n[j][i];
+}
+
+struct com_feature { double g, gy, gx; size_t y, x; };
+static int com_feature_desc(const void *a, const void *b)
+{
+	double x=((const struct com_feature*)a)->g;
+	double y=((const struct com_feature*)b)->g;
+	return x>y?-1:x<y;
+}
+static int com_double_asc(const void *a, const void *b)
+{
+	double x=*(const double*)a,y=*(const double*)b;
+	return x<y?-1:x>y;
+}
+
+/** In-place selection of the kth value. Residual scale only needs a median;
+ * sorting every residual made the robust pass O(n log n) on every frame. */
+static double com_select_kth(double *a, size_t n, size_t k)
+{
+	size_t lo=0, hi=n-1;
+	while (lo < hi) {
+		double pivot=a[lo+(hi-lo)/2];
+		size_t i=lo, j=hi;
+		for (;;) {
+			while (a[i] < pivot) i++;
+			while (a[j] > pivot) j--;
+			if (i >= j) break;
+			double t=a[i]; a[i++]=a[j]; a[j--]=t;
+		}
+		if (k <= j) hi=j;
+		else lo=j+1;
+	}
+	return a[k];
+}
+
+/** Choose as many keyframe gradients as the measured noise and two-axis
+* information require. The stop rule is expressed in predicted translation
+* uncertainty, not pixels-per-beam, brightness, diameter or pattern class. */
+static bool com_select_registration_samples(
+	struct aylp_center_of_mass_data *data
+) {
+	size_t h=data->region_height,w=data->region_width,n=0;
+	size_t cap=data->registration_sample_capacity;
+	struct com_feature *f=xmalloc(cap*sizeof *f);
+	double bg=0,n_bg=0;
+	for(size_t y=0;y<h;y++)for(size_t x=0;x<w;x++)
+		if(!y||!x||y+1==h||x+1==w) {
+			bg+=data->registration_ref[y*w+x];n_bg++;
+		}
+	if(n_bg)bg/=n_bg;
+	// Second differences vanish on real linear structure but retain sensor
+	// noise. Their median supplies a pattern-independent noise estimate.
+	size_t noise[1021]={0},nn=0;
+	for(size_t y=2;y+2<h;y++) for(size_t x=2;x+2<w;x++) {
+			double gy=.5*(data->registration_ref[(y+1)*w+x]
+				-data->registration_ref[(y-1)*w+x]);
+			double gx=.5*(data->registration_ref[y*w+x+1]
+				-data->registration_ref[y*w+x-1]);
+		struct com_feature z={gy*gy+gx*gx,gy,gx,y,x};
+		if(n<cap) {
+			size_t k=n++;f[k]=z;
+			while(k){size_t p=(k-1)/2;if(f[p].g<=f[k].g)break;struct com_feature q=f[p];f[p]=f[k];f[k]=q;k=p;}
+		} else if(z.g>f[0].g) {
+			f[0]=z;
+			for(size_t k=0;;){size_t a=2*k+1,b=a+1;if(a>=n)break;size_t m=b<n&&f[b].g<f[a].g?b:a;if(f[k].g<=f[m].g)break;struct com_feature q=f[k];f[k]=f[m];f[m]=q;k=m;}
+		}
+		double ly=data->registration_ref[(y+1)*w+x]
+			-2*data->registration_ref[y*w+x]
+			+data->registration_ref[(y-1)*w+x];
+		double lx=data->registration_ref[y*w+x+1]
+			-2*data->registration_ref[y*w+x]
+			+data->registration_ref[y*w+x-1];
+		size_t q=(size_t)fmin(1020.0,fabs(ly)+fabs(lx));noise[q]++;nn++;
+	}
+	size_t acc=0,med=0;while(med<1020&&(acc+=noise[med])<nn/2)med++;
+	double sigma=fmax(0.5,med/1.349);
+	data->registration_noise=sigma;
+	qsort(f,n,sizeof *f,com_feature_desc);
+	double yy=0,xx=0,yx=0; size_t keep=0;
+	// A larger window contains more independent places where structure can
+	// deform or be occluded. Require four square-root sample budgets so robust
+	// fitting does not collapse to the same 16 brightest pixels at every ROI.
+	// This grows sublinearly (112 -> 432, 384 -> 1520) and is derived entirely
+	// from the available candidate population.
+	size_t min_keep=4*(size_t)ceil(sqrt((double)cap));
+	if(min_keep<16)min_keep=16;
+	// 0.05 px is an output-precision contract, not a beam property. Stop as
+	// soon as both eigen-directions of translation meet it.  The candidate
+	// count comes from the window dimensions, not a preferred ROI size.
+	double need=sigma*sigma/(0.05*0.05);
+	data->registration_info_need=need;
+	for(size_t k=0;k<n&&keep<cap;k++) {
+		if(f[k].g<=sigma*sigma) break;
+		if(fabs(data->registration_ref[f[k].y*w+f[k].x]-bg)
+				<=fmax(2.0,3.0*sigma))continue;
+		data->registration_sample_y[keep]=f[k].y;
+		data->registration_sample_x[keep]=f[k].x;
+		data->registration_sample_ref[keep]=
+			data->registration_ref[f[k].y*w+f[k].x];
+		data->registration_sample_gy[keep]=f[k].gy;
+		data->registration_sample_gx[keep]=f[k].gx;
+		keep++;
+		yy+=f[k].gy*f[k].gy;xx+=f[k].gx*f[k].gx;yx+=f[k].gy*f[k].gx;
+		double tr=yy+xx,disc=sqrt(fmax(0.0,(yy-xx)*(yy-xx)+4*yx*yx));
+		if(keep>=min_keep && .5*(tr-disc)>=need) break;
+	}
+	xfree(f);data->registration_n_samples=keep;
+	if(keep<16) return false;
+	double tr=yy+xx,disc=sqrt(fmax(0.0,(yy-xx)*(yy-xx)+4*yx*yx));
+	data->registration_condition=(tr+disc)/fmax(1e-12,tr-disc);
+	return .5*(tr-disc)>=need;
+}
+
+static bool com_registration_overlap_ok(
+	struct aylp_center_of_mass_data *data, const gsl_matrix_uchar *img,
+	size_t org_y,size_t org_x
+) {
+	double yy=0,xx=0,yx=0;
+	for(size_t k=0;k<data->registration_n_samples;k++) {
+		size_t y=data->registration_sample_y[k],x=data->registration_sample_x[k];
+		double cy=org_y+y+data->registration_y,cx=org_x+x+data->registration_x;
+		// A handoff is cheap compared with losing correspondence. Keep every
+		// selected informative feature inside the interpolation domain; this is
+		// determined by the selected pattern itself, not a displacement limit.
+		if(cy<1||cx<1||cy+1>=img->size1||cx+1>=img->size2)continue;
+		double gy=data->registration_sample_gy[k];
+		double gx=data->registration_sample_gx[k];
+		yy+=gy*gy;xx+=gx*gx;yx+=gy*gx;
+	}
+	double tr=yy+xx,disc=sqrt(fmax(0.0,(yy-xx)*(yy-xx)+4*yx*yx));
+	return .5*(tr-disc)>=data->registration_info_need;
+}
+
+static bool com_install_registration_keyframe(
+	struct aylp_center_of_mass_data *data, const gsl_matrix_uchar *img,
+	size_t org_y, size_t org_x, double abs_y, double abs_x
+) {
+	size_t h=data->region_height,w=data->region_width;
+	for(size_t y=0;y<h;y++)for(size_t x=0;x<w;x++)
+		data->registration_ref[y*w+x]=img->data[(org_y+y)*img->tda+org_x+x];
+	data->registration_ref_y=abs_y;data->registration_ref_x=abs_x;
+	data->registration_y=0.0;data->registration_x=0.0;
+	return com_select_registration_samples(data);
+}
+
+/** Background-invariant absolute centre for the slow registration tether.
+ * The registration fit treats offset as a nuisance parameter, so its absolute
+ * reference must do the same: an unsubtracted frame pedestal pulls an ordinary
+ * centroid toward the ROI centre and attenuates real motion. */
+static bool com_registration_anchor_centroid(
+	const gsl_matrix_uchar *img, size_t org_y, size_t org_x,
+	size_t h, size_t w, double *cy, double *cx
+)
+{
+	size_t n_border=2*h+2*w-4,nb=0,n_hot=0;
+	double *border=xmalloc(n_border*sizeof *border);
+	for(size_t y=0;y<h;y++)for(size_t x=0;x<w;x++)
+		if(!y||!x||y+1==h||x+1==w) {
+			border[nb++]=img->data[(org_y+y)*img->tda+org_x+x];
+		}
+	if(!nb){xfree(border);return false;}
+	qsort(border,nb,sizeof *border,com_double_asc);
+	double bg=border[nb/2];
+	// A centroid is not an absolute observation when the target intersects the
+	// ROI boundary: translating it changes how much flux is clipped. Detect
+	// sustained edge signal against the robust border background and withhold
+	// the tether; local registration remains valid on the visible structure.
+	for(size_t k=0;k<nb;k++)if(border[k]>bg+5.0)n_hot++;
+	xfree(border);
+	if(n_hot>=2)return false;
+	double s=0,sy=0,sx=0;
+	for(size_t y=0;y<h;y++)for(size_t x=0;x<w;x++) {
+		double v=img->data[(org_y+y)*img->tda+org_x+x]-bg;
+		if(v<=2.0)continue;
+		s+=v;sy+=v*(org_y+y);sx+=v*(org_x+x);
+	}
+	if(s<=0)return false;
+	*cy=sy/s;*cx=sx/s;return true;
+}
+
+/** Brightness-affine Lucas--Kanade translation against a fixed keyframe.
+* Gain and offset are fitted alongside y/x, so uniform illumination changes
+* cannot become position. The sparse grid bounds cost independently of beam
+* shape; the only requirement is nonzero spatial structure in both axes. */
+static bool com_register(
+	struct aylp_center_of_mass_data *data, const gsl_matrix_uchar *img,
+	size_t org_y, size_t org_x
+) {
+	double d[4]={0};
+	double trial_y=data->registration_y,trial_x=data->registration_x;
+	size_t used=0;
+	double span=fmin(data->region_height,data->region_width);
+	// Re-linearize several times. Two updates were sufficient for broad smooth
+	// beams but attenuated known ±4-pixel motion on compact real patterns.
+	for(size_t iter=0;iter<1;iter++) {
+		double n[4][4]={{0}},r[4]={0};used=0;
+		for (size_t k=0;k<data->registration_n_samples;k++) {
+			size_t y=data->registration_sample_y[k],x=data->registration_sample_x[k];
+			double cy=org_y+y+trial_y,cx=org_x+x+trial_x;
+			if (cy<1 || cx<1 || cy+1>=img->size1 || cx+1>=img->size2) continue;
+			double cur=com_bilinear(img,cy,cx);
+			double ref=data->registration_sample_ref[k];
+			double rgy=data->registration_sample_gy[k];
+			double rgx=data->registration_sample_gx[k];
+			// Use keyframe gradients: an exposure boundary present only in the
+			// destination is an outlier, not evidence of rigid image motion.
+			double gy=rgy,gx=rgx,e=ref-cur;
+			com_normal_add(n,r,gy,gx,ref,e,1.0);
+			used++;
+		}
+		com_normal_mirror(n);
+		if(used<16||!com_solve4(n,r,d)||!isfinite(d[0])||!isfinite(d[1])
+				||hypot(d[0],d[1])>span/8.0)return false;
+		trial_y+=d[0];trial_x+=d[1];
+		if(hypot(d[0],d[1])<0.01)break;
+	}
+
+	// Median absolute residual estimates this frame's scale without a noise or
+	// deformation knob. Tukey's 4.685-sigma consistency constant then removes
+	// samples that do not share the dominant rigid motion.
+	used=0;
+	for(size_t k=0;k<data->registration_n_samples;k++) {
+		size_t y=data->registration_sample_y[k],x=data->registration_sample_x[k];
+		double cy=org_y+y+trial_y,cx=org_x+x+trial_x;
+		if(cy<1||cx<1||cy+1>=img->size1||cx+1>=img->size2)continue;
+		double ref=data->registration_sample_ref[k];
+		double e=ref-com_bilinear(img,cy,cx)-d[2]*ref-d[3];
+		data->registration_errors[k]=e;
+		data->registration_residuals[used++]=fabs(e);
+	}
+	if(used<16)return false;
+	data->registration_residual_scale=
+		1.4826*com_select_kth(data->registration_residuals,used,used/2);
+	double cut=4.685*fmax(0.25,data->registration_residual_scale);
+	double nn[4][4]={{0}},rr[4]={0},dd[4]={0};size_t inliers=0;
+	for(size_t k=0;k<data->registration_n_samples;k++) {
+		size_t y=data->registration_sample_y[k],x=data->registration_sample_x[k];
+		double cy=org_y+y+trial_y,cx=org_x+x+trial_x;
+		if(cy<1||cx<1||cy+1>=img->size1||cx+1>=img->size2)continue;
+		double ref=data->registration_sample_ref[k];
+		double rgy=data->registration_sample_gy[k];
+		double rgx=data->registration_sample_gx[k];
+		double gy=rgy,gx=rgx;
+		double e=data->registration_errors[k],q=fabs(e)/cut;
+		double one_minus_q2=1-q*q;
+		double wt=q<1?one_minus_q2*one_minus_q2:0;
+		if(wt<=0)continue;
+		inliers++;
+		com_normal_add(nn,rr,gy,gx,ref,e,wt);
+	}
+	com_normal_mirror(nn);
+	if(inliers<16||!com_solve4(nn,rr,dd)||!isfinite(dd[0])||!isfinite(dd[1])
+			||hypot(dd[0],dd[1])>span/16.0)return false;
+	data->registration_quality=(double)inliers/used;
+	// Commit atomically.  A rejected frame must not poison the starting point
+	// for the next one; this matters especially at the faster 112-pixel ROI,
+	// where one failed solve is followed by appreciably more real motion.
+	data->registration_y=trial_y+dd[0];
+	data->registration_x=trial_x+dd[1];
+	return true;
+}
+
 /** True at most once per COM_LOG_INTERVAL, so the beam-lost and beam-back
 * transitions can be logged without flooding.
 *
@@ -568,6 +1003,35 @@ int center_of_mass_proc_track(struct aylp_device *self, struct aylp_state *state
 	gsl_matrix_uchar *img = state->matrix_uchar;
 	size_t max_y = img->size1;
 	size_t max_x = img->size2;
+	if (UNLIKELY(data->auto_region_height || data->auto_region_width)) {
+		// A 243-pixel window preserves the bounded registration cost used by
+		// the steering profiles; smaller camera ROIs use their full extent.
+		if (data->auto_region_height)
+			data->region_height = max_y < 243 ? max_y : 243;
+		if (data->auto_region_width)
+			data->region_width = max_x < 243 ? max_x : 243;
+		data->auto_region_height = data->auto_region_width = false;
+		if (data->registration) {
+			data->registration_ref = xcalloc(data->region_height
+				* data->region_width, sizeof(double));
+			data->registration_sample_capacity =
+				(data->region_height - 4) * (data->region_width - 4);
+			data->registration_sample_y = xcalloc(
+				data->registration_sample_capacity, sizeof(size_t));
+			data->registration_sample_x = xcalloc(
+				data->registration_sample_capacity, sizeof(size_t));
+			data->registration_sample_ref = xcalloc(
+				data->registration_sample_capacity, sizeof(double));
+			data->registration_sample_gy = xcalloc(
+				data->registration_sample_capacity, sizeof(double));
+			data->registration_sample_gx = xcalloc(
+				data->registration_sample_capacity, sizeof(double));
+			data->registration_residuals = xcalloc(
+				data->registration_sample_capacity, sizeof(double));
+			data->registration_errors = xcalloc(
+				data->registration_sample_capacity, sizeof(double));
+		}
+	}
 	if (UNLIKELY(data->region_height > max_y
 			|| data->region_width > max_x)) {
 		log_error("Tracking window is %zu by %zu but image is only "
@@ -622,6 +1086,7 @@ int center_of_mass_proc_track(struct aylp_device *self, struct aylp_state *state
 	clamp_window(data, win_h, win_w, max_y, max_x);
 	size_t org_y = data->win_y - win_h/2;
 	size_t org_x = data->win_x - win_w/2;
+	com_auto_gates(data,img,org_y,org_x,win_h,win_w);
 
 	// The row profile is only kept when the partial-beam test is armed and
 	// the window is at its configured size. During the acquisition phase the
@@ -631,24 +1096,36 @@ int center_of_mass_proc_track(struct aylp_device *self, struct aylp_state *state
 
 	double y = 0.0, x = 0.0, s = 0.0;
 	unsigned char peak = 0;
-	for (size_t l = 0; l < win_h; l++) {
-		double row = 0.0;
-		for (size_t m = 0; m < win_w; m++) {
-			unsigned char raw = img->data[
-				(org_y + l) * img->tda + org_x + m
-			];
-			if (raw > peak) peak = raw;
-			unsigned char el = raw > data->threshold
-				? raw - data->threshold : 0;
-			// accumulate in image coordinates, not window ones
-			y += (org_y + l)*el;
-			x += (org_x + m)*el;
-			s += el;
-			row += el;
+	if (data->registration_ready && !data->acquiring && !profile) {
+		// Once registration has an absolute origin, the flux centroid is not
+		// an output. The normal path only needs the peak for the signal gate;
+		// avoiding three floating-point moments over the whole ROI is material
+		// at 384x384 and lets the compiler vectorize this contiguous max scan.
+		for (size_t l=0;l<win_h;l++) {
+			const unsigned char *p=img->data+(org_y+l)*img->tda+org_x;
+			for(size_t m=0;m<win_w;m++) if(p[m]>peak)peak=p[m];
 		}
-		// win_h == region_height whenever `profile` is set, so this
-		// cannot run off the end of the array
-		if (profile) data->rows[l] = row;
+		s=peak>data->threshold;
+	} else {
+		for (size_t l = 0; l < win_h; l++) {
+			double row = 0.0;
+			for (size_t m = 0; m < win_w; m++) {
+				unsigned char raw = img->data[
+					(org_y + l) * img->tda + org_x + m
+				];
+				if (raw > peak) peak = raw;
+				unsigned char el = raw > data->threshold
+					? raw - data->threshold : 0;
+				// accumulate in image coordinates, not window ones
+				y += (org_y + l)*el;
+				x += (org_x + m)*el;
+				s += el;
+				row += el;
+			}
+			// win_h == region_height whenever `profile` is set, so this
+			// cannot run off the end of the array
+			if (profile) data->rows[l] = row;
+		}
 	}
 
 	// "Is the beam in frame?" is a question about brightness, and a nonzero
@@ -685,15 +1162,113 @@ int center_of_mass_proc_track(struct aylp_device *self, struct aylp_state *state
 	// only whole frames teach the reference what a whole beam looks like
 	if (profile && beam)
 		com_update_ref(data, win_h);
+	double abs_y = s > 0.0 ? y/s : 0.0, abs_x = s > 0.0 ? x/s : 0.0;
+	if (beam && data->registration && !data->acquiring) {
+		if (!data->registration_ready) {
+			// Start the absolute coordinate from the same background-invariant
+			// measurement used by the long-term tether. Otherwise a frame pedestal
+			// becomes a permanent initial offset that the tether later appears to
+			// "drift" away from.
+			double anchor_y,anchor_x;
+			if(com_registration_anchor_centroid(img,org_y,org_x,
+					win_h,win_w,&anchor_y,&anchor_x)) {
+				abs_y=anchor_y;abs_x=anchor_x;
+			}
+			data->registration_ready=com_install_registration_keyframe(
+				data,img,org_y,org_x,abs_y,abs_x);
+			if(!data->registration_ready) { why="registration"; beam=false; }
+		} else {
+			if(!com_register(data,img,org_y,org_x)) {
+				double reacquire_y,reacquire_x;
+				if(com_registration_anchor_centroid(img,org_y,org_x,
+						win_h,win_w,&reacquire_y,&reacquire_x)) {
+					abs_y=reacquire_y;abs_x=reacquire_x;
+					data->registration_rolls++;
+					data->registration_ready=com_install_registration_keyframe(
+						data,img,org_y,org_x,abs_y,abs_x);
+					if(!data->registration_ready){why="registration";beam=false;}
+				} else {
+					why="registration";
+					beam=false;
+				}
+			} else {
+			abs_y=data->registration_ref_y+data->registration_y;
+			abs_x=data->registration_ref_x+data->registration_x;
+			// Registration is a locally precise displacement measurement, but a
+			// rolling chain is dead reckoning: a tiny signed error in every link
+			// accumulates without bound. Keep a robust history of its disagreement
+			// with the independent flux centre. The median rejects isolated rolling
+			// exposures and asymmetric shape excursions; only a persistent offset
+			// becomes a slow absolute correction.
+			double anchor_cy=0,anchor_cx=0;
+			bool overlap_ok=com_registration_overlap_ok(data,img,org_y,org_x);
+			bool have_anchor=false;
+			// The absolute tether is irrelevant until a keyframe handoff has
+			// occurred. Avoiding this full-window centroid scan is the normal
+			// path's largest speedup. We still obtain it before any handoff.
+			if(data->registration_rolls || !overlap_ok)
+				have_anchor=com_registration_anchor_centroid(
+					img,org_y,org_x,win_h,win_w,&anchor_cy,&anchor_cx);
+			size_t ap=data->registration_anchor_pos;
+			if(have_anchor&&data->registration_rolls) {
+				data->registration_anchor_y[ap]=anchor_cy-abs_y;
+				data->registration_anchor_x[ap]=anchor_cx-abs_x;
+			}
+			data->registration_anchor_pos=(ap+1)%31;
+			if(have_anchor&&data->registration_rolls
+					&&data->registration_anchor_n<31)
+				data->registration_anchor_n++;
+			if(data->registration_anchor_n==31) {
+				double ay[31],ax[31];
+				memcpy(ay,data->registration_anchor_y,sizeof ay);
+				memcpy(ax,data->registration_anchor_x,sizeof ax);
+				qsort(ay,31,sizeof *ay,com_double_asc);
+				qsort(ax,31,sizeof *ax,com_double_asc);
+				double anchor_y=ay[15]/16.0,anchor_x=ax[15]/16.0;
+				double anchor_r=hypot(anchor_y,anchor_x);
+				if(anchor_r>0.25) {
+					anchor_y*=0.25/anchor_r;
+					anchor_x*=0.25/anchor_r;
+				}
+				data->registration_ref_y+=anchor_y;
+				data->registration_ref_x+=anchor_x;
+				abs_y+=anchor_y;abs_x+=anchor_x;
+				// Stored disagreements are against the pre-correction origin.
+				// Translate them with it so the median represents residual bias.
+				for(size_t a=0;a<31;a++) {
+					data->registration_anchor_y[a]-=anchor_y;
+					data->registration_anchor_x[a]-=anchor_x;
+				}
+			}
+			// Keep the original keyframe while it still provides enough visible
+			// two-axis information. Chaining otherwise-valid keyframes integrates
+			// tiny fit errors. When overlap is genuinely exhausted, re-anchor only
+			// from an unclipped independent centroid; a clipped centroid is not an
+			// absolute position measurement.
+			if(!overlap_ok) {
+				if(have_anchor) {
+					abs_y=anchor_cy;abs_x=anchor_cx;
+					data->registration_rolls++;
+					data->registration_ready=com_install_registration_keyframe(
+						data,img,org_y,org_x,abs_y,abs_x);
+				}
+			}
+			}
+		}
+	}
 
 	data->n_frames++;
 	if (LIKELY(beam)) {
-		double abs_y = y/s, abs_x = x/s;
+		com_auto_accept_peak(data,peak);
 		data->last_y = -1.0 + 2*abs_y/(max_y - 1);
 		data->last_x = -1.0 + 2*abs_x/(max_x - 1);
 		// recentre the window for the next frame
-		data->win_y = (size_t)(abs_y + 0.5);
-		data->win_x = (size_t)(abs_x + 0.5);
+		// Registration is expressed against a fixed keyframe/window. Moving
+		// that window would change coordinates underneath the fit.
+		if (!data->registration || data->acquiring) {
+			data->win_y = (size_t)(abs_y + 0.5);
+			data->win_x = (size_t)(abs_x + 0.5);
+		}
 		if (UNLIKELY(!data->had_beam)) {
 			if (com_log_ok(data))
 				log_info("center_of_mass: beam back after %zu "
@@ -733,6 +1308,10 @@ int center_of_mass_proc_track(struct aylp_device *self, struct aylp_state *state
 						peak, data->min_peak,
 						data->last_y, data->last_x
 					);
+				else if (!strcmp(why, "registration"))
+					log_warn("center_of_mass: image registration was "
+						"ill-conditioned; holding centroid (%.4f,%.4f)",
+						data->last_y, data->last_x);
 				else
 					log_warn("center_of_mass: beam cut across "
 						"rows (dimmest of %zu rows is %.2f "
@@ -753,6 +1332,9 @@ int center_of_mass_proc_track(struct aylp_device *self, struct aylp_state *state
 					"for %zu frames; re-acquiring",
 					data->lost
 				);
+				if(data->auto_reacquire)
+					data->reacquire_after=fmin(100000,
+						2*data->reacquire_after);
 				// re-enter the wide phase: whatever stranded the
 				// window will likely strand it again if we drop
 				// straight back to the narrow one
@@ -762,6 +1344,7 @@ int center_of_mass_proc_track(struct aylp_device *self, struct aylp_state *state
 				// window position, which is exactly what we
 				// have just stopped believing in
 				com_reset_ref(data);
+				data->registration_ready=false;
 			}
 			acquire_window(data, img);
 		}

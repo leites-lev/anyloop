@@ -23,6 +23,7 @@ project_source_files = [
 	'libaylp/pretty.c',
 	'libaylp/types.c',
 	'libaylp/thread_pool.c',
+	'libaylp/timing.c',
 	'libaylp/xalloc.c',
 	'libaylp/profile.c',
 	'devices/center_of_mass.c',
@@ -72,7 +73,7 @@ executable('anyloop', project_source_files,
 # `ninja -C build test` is safe to run on any machine.
 test_center_of_mass = executable('test_center_of_mass',
 	[
-		'tests/test_center_of_mass.c',
+		'devices/center_of_mass_test.c',
 		'devices/center_of_mass.c',
 		'libaylp/logging.c',
 		'libaylp/thread_pool.c',
@@ -87,7 +88,7 @@ test('center_of_mass', test_center_of_mass)
 
 test_pid_park = executable('test_pid_park',
 	[
-		'tests/test_pid_park.c',
+		'devices/pid_park_test.c',
 		'devices/pid.c',
 		'libaylp/logging.c',
 		'libaylp/types.c',
@@ -101,9 +102,10 @@ test('pid_park', test_pid_park)
 
 test_gain_test = executable('test_gain_test',
 	[
-		'tests/test_gain_test.c',
+		'devices/gain_test_test.c',
 		'devices/gain_test.c',
 		'libaylp/logging.c',
+		'libaylp/timing.c',
 		'libaylp/xalloc.c'
 	],
 	install: false,
@@ -114,7 +116,7 @@ test('gain_test', test_gain_test)
 
 test_prbs_test = executable('test_prbs_test',
 	[
-		'tests/test_prbs_test.c',
+		'devices/prbs_test_test.c',
 		'devices/prbs_test.c',
 		'libaylp/logging.c',
 		'libaylp/xalloc.c'
@@ -127,9 +129,10 @@ test('prbs_test', test_prbs_test)
 
 test_fsp_dark = executable('test_fsp_dark',
 	[
-		'tests/test_fsp_dark.c',
+		'devices/fsp_dark_test.c',
 		'devices/fsp.c',
 		'libaylp/logging.c',
+		'libaylp/timing.c',
 		'libaylp/types.c',
 		'libaylp/xalloc.c'
 	],
@@ -141,16 +144,16 @@ test('fsp_dark', test_fsp_dark, timeout: 120)
 
 python = import('python').find_installation('python3')
 test('steering_ab_analysis', python,
-	args: [files('tests/test_analyze_steering_ab.py')])
+	args: [files('contrib/data-analysis-tools/test_analyze_steering_ab.py')])
 
 parport_dac_range_test = executable('parport_dac_range_test',
-	['test/parport_dac_range.c', 'devices/parport_dac_range.c'],
+	['devices/parport_dac_range_test.c', 'devices/parport_dac_range.c'],
 	install: false,
 	include_directories: include_directories('.'))
 test('parport_dac_range', parport_dac_range_test)
 
 fit_com_test = executable('fit_com_test',
-	['test/fit_com_test.c', 'devices/fit_com.c', 'libaylp/logging.c',
+	['devices/fit_com_test.c', 'devices/fit_com.c', 'libaylp/logging.c',
 		'libaylp/xalloc.c'],
 	install: false,
 	dependencies: [dependency('gsl'), dependency('json-c')],
@@ -158,7 +161,7 @@ fit_com_test = executable('fit_com_test',
 test('fit_com', fit_com_test)
 
 fit_com_bench = executable('fit_com_bench',
-	['test/fit_com_bench.c', 'devices/fit_com.c', 'libaylp/logging.c',
+	['contrib/diagnostics/benchmark_fit_com.c', 'devices/fit_com.c', 'libaylp/logging.c',
 		'libaylp/xalloc.c'],
 	install: false,
 	dependencies: [dependency('gsl'), dependency('json-c'),
@@ -166,11 +169,11 @@ fit_com_bench = executable('fit_com_bench',
 	include_directories: [incdir, include_directories('devices')])
 
 # Standalone offline broadband/dark-frame controller replay.
-executable('fsp_replay', 'contrib/fsp_replay.c',
+executable('fsp_replay', 'contrib/diagnostics/fsp_replay.c',
 	install: false,
 	dependencies: [c.find_library('m', required: false)])
 
-shared_library('plugin_example', 'contrib/plugin_example.c',
+shared_library('plugin_example', 'contrib/anyloop-examples/source/plugin_example.c',
 	name_prefix: '',
 	install: true,
 	install_dir: get_option('libdir') / 'anyloop',
@@ -185,7 +188,7 @@ shared_library('plugin_example', 'contrib/plugin_example.c',
 # itself, so it needs no anyloop deps, only libm for lround/llround. Built here
 # purely so `ninja -C build` covers it; it is not installed, since it is a
 # diagnostic you run from the build tree with sudo.
-executable('dac_square', 'contrib/dac_square.c',
+executable('dac_square', 'contrib/camera_pcie_hardware/dac_square.c',
 	install: false,
 	dependencies: [c.find_library('m', required: false)]
 )
@@ -193,12 +196,12 @@ executable('dac_square', 'contrib/dac_square.c',
 # parport_pins: standalone bench tool that parks SCLK/SDIN/SYNC at a static
 # level so the DB25 pins can be metered. Same standalone posture as dac_square
 # (maps the BAR itself, no libaylp, not installed), and needs no libm.
-executable('parport_pins', 'contrib/parport_pins.c',
+executable('parport_pins', 'contrib/camera_pcie_hardware/parport_pins.c',
 	install: false
 )
 
 executable('com_survey',
-	['contrib/com_survey.c', 'devices/fit_com.c',
+	['contrib/diagnostics/com_survey.c', 'devices/fit_com.c',
 		'libaylp/logging.c', 'libaylp/xalloc.c'],
 	install: false,
 	dependencies: [dependency('gsl'), dependency('json-c'),
@@ -206,7 +209,7 @@ executable('com_survey',
 	include_directories: [incdir, include_directories('devices')])
 
 executable('test_wfs_com_rolling_shutter',
-	['contrib/test_wfs_com_rolling_shutter.c', 'devices/wfs_com.c',
+	['contrib/diagnostics/test_wfs_com_rolling_shutter.c', 'devices/wfs_com.c',
 		'libaylp/logging.c', 'libaylp/xalloc.c'],
 	install: false,
 	dependencies: [dependency('gsl'), dependency('json-c')],
@@ -215,8 +218,8 @@ executable('test_wfs_com_rolling_shutter',
 asi_sdk_dir = '/home/fsl/ASIStudio/lib'
 asi_lib = c.find_library('ASICamera2', dirs: [asi_sdk_dir], required: false)
 fs = import('fs')
-if asi_lib.found() and fs.exists('contrib/asi_source.c')
-	shared_library('asi_source', 'contrib/asi_source.c',
+if asi_lib.found() and fs.exists('contrib/camera_pcie_hardware/asi_source.c')
+	shared_library('asi_source', 'contrib/camera_pcie_hardware/asi_source.c',
 		name_prefix: '',
 		install: true,
 		install_dir: get_option('libdir') / 'anyloop',
@@ -233,8 +236,8 @@ endif
 # aylp_alsa: soundcard (ALSA playback) actuator plugin, for the AC path of a
 # dual-actuator FSM drive. Built only if alsa-lib and the source are present.
 alsa_dep = dependency('alsa', required: false)
-if alsa_dep.found() and fs.exists('contrib/aylp_alsa.c')
-	shared_library('aylp_alsa', 'contrib/aylp_alsa.c',
+if alsa_dep.found() and fs.exists('contrib/camera_pcie_hardware/aylp_alsa.c')
+	shared_library('aylp_alsa', 'contrib/camera_pcie_hardware/aylp_alsa.c',
 		name_prefix: '',
 		install: true,
 		install_dir: get_option('libdir') / 'anyloop',

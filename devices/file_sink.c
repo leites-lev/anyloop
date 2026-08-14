@@ -21,7 +21,7 @@
 * configured name is then created fresh, rather than this run being diverted to
 * a new name. That ordering matters: the configured filename always holds the
 * current run, so everything that reads a recording back by the name in the
-* config -- contrib/find_roi.py, the analysis scripts -- keeps working and keeps
+* config -- contrib/calibration-scripts/tools/find_roi.py, the analysis scripts -- keeps working and keeps
 * seeing the newest data, while every earlier run survives beside it.
 *
 * An existing but empty file is left alone and simply reused; rotating those

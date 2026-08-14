@@ -20,7 +20,7 @@ What the staircase buys over a two-level step:
 
 - **compression is visible**, as curvature in the per-level residuals. The FSM
   on this rig loses a few percent of gain above ~50 mV, and the `_K_warning` in
-  `contrib/attenuation_par_fsp.json` is a long note about how that bit an
+  `contrib/steering/configurations/support/attenuation_par_fsp.json` is a long note about how that bit an
   earlier run. The largest residual is reported as a fraction of the response
   span, and the residual panel of the PDF shows its shape.
 - **`fit_range`** re-fits the small-signal region the closed loop actually
@@ -142,12 +142,34 @@ Parameters
   - The DAC `scale` of the driven channel, used only for reporting: it converts
     the fit into units/V, px/V and mV/px, and carries the sign of the optical
     path. Default 1.
-- `pixel_scale` (float) (optional)
+- `pixel_scale` (float | `"auto"`) (optional)
   - Pixels per response unit, `(dim - 1)/2` for a `center_of_mass` output —
     31.5 at a 64×64 ROI. Default 1. Same convention as `attenuation_test`.
+    `"auto"` takes it from the frame the source publishes (see
+    `libaylp/timing.h`), using the height for `index_err` 0 and the width for 1.
+    Use it whenever the source sizes its own ROI — an `asi_source` with an auto
+    ROI settles its frame size at startup, so no number written here can be
+    trusted to match it. Reporting only: it scales the px columns of the `.dat`
+    and the plot, never the fitted gain.
 - `output_file` (string) (optional)
   - PDF path; the `.dat` is written alongside it. Default `"gain_test.pdf"`.
     `""` writes nothing.
+- `write_config` (string) (optional)
+  - Path to a run config whose `anyloop:fsp` stage should receive the measured
+    gain, so a gain run leaves the controller ready instead of leaving a number
+    to be transcribed. Writes `|small-signal slope|` into the axis's `K` — the
+    closed loop lives near the bias, and `K` is positive by convention here with
+    the sign carried by the DAC stage's `scale`. Also leaves an
+    `_auto_gain_write` note recording the fit and the previous value. Written
+    through a temporary file and renamed, so an interrupted write cannot leave a
+    half-written controller behind.
+  - Refuses to write, and says why, unless: there is a fit; the small-signal fit
+    covers ≥ 5 levels; R² ≥ 0.90; the small-signal uncertainty is within 15%;
+    and small-signal and full-span gains agree within 25%. The `.dat` still has
+    everything either way. Same gates the calibration suite applies.
+- `write_axis` (`"x"` | `"y"`) (optional)
+  - Which axis of the target config `write_config` updates. Defaults to
+    `index_err` (0 → `y`, 1 → `x`).
 - `config` (string) (optional)
   - Free text copied into the `.dat` header — the operating point, biases,
     camera settings, why the run was made.
@@ -155,7 +177,7 @@ Parameters
 Example
 -------
 
-See `contrib/conf_gain_par_x.json` and `contrib/conf_gain_par_y.json` for
+See `contrib/calibration-scripts/configurations/conf_gain_par_x.json` and `contrib/calibration-scripts/configurations/conf_gain_par_y.json` for
 complete pipelines (`asi_source → center_of_mass → gain_test → parport_dac`).
 
 ```json
@@ -175,7 +197,7 @@ complete pipelines (`asi_source → center_of_mass → gain_test → parport_dac
 Tests
 -----
 
-`tests/test_gain_test.c` drives the device against a simulated plant of known
+`devices/gain_test_test.c` drives the device against a simulated plant of known
 gain and checks that the reported slope is that gain — including under
 compression, sensor saturation and beam drift. `ninja -C build test` runs it
 with no hardware.

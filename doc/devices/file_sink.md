@@ -40,7 +40,7 @@ frames.0002.aylp   <- the second
 The old run is moved aside rather than the new run being diverted to a new name.
 That ordering is deliberate: the configured filename always holds the *current*
 run, so anything that reads a recording back by the name in the config —
-`contrib/find_roi.py`, the analysis scripts — keeps working and keeps seeing the
+`contrib/calibration-scripts/tools/find_roi.py`, the analysis scripts — keeps working and keeps seeing the
 newest data, while every earlier run survives beside it.
 
 An existing but *empty* file is reused in place, so runs that fail during startup

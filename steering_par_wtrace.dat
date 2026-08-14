@@ -1,6 +1,0 @@
-# fsp observer convergence trace, every 5 s
-# broad_order=512 broad_mu=0.03 broad_lp=7 fs=2310 start_delay=10 ramp=5
-# ||dw|| is the tap change since the previous sample: it flattening is the observer having converged
-# t_s n_closed y_wnorm y_wnextnorm y_dwnorm x_wnorm x_wnextnorm x_dwnorm y_drift x_drift y_guard x_guard y_trans x_trans mu
-0.000 0 0 0 0 0 0 0 0 0 0 0 0 0 0.5
-1.257 0 0 0 0 0 0 0 0 0 0 0 0 0 0.5

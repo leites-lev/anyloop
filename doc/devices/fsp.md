@@ -75,8 +75,54 @@ Parameters
   uses a first-order Thiran all-pass, preserving command magnitude while
   matching the fractional group delay; the full-band observer blends its
   adjacent horizon predictions. Per-axis override allowed as with `delay`.
+- `delay`: `"auto"` — measure the delay from the running loop instead of
+  fitting it, setting both `delay` and `delay_frac`. Works globally or on one
+  axis. Two of the three terms are measured: the **compute** time, published by
+  the source device (only the device that blocks for the frame can tell work
+  from waiting — for anything downstream the gap since its own return is
+  identically the loop period minus its own duration), and the **loop period**,
+  measured here. The third, `delay_auto_bias`, is the part no device in the
+  loop can see: sensor integration and readout, the DAC's zero-order hold, and
+  actuator lag. Measurement runs at the start of the hold and is installed as
+  soon as its window closes — still inside the hold, so the broadband filter
+  spends the rest of the hold training at the horizon it will run at;
+  `start_delay` is raised at init if it is too short. The source must publish `libaylp/timing.h`
+  timing — `asi_source` does — or init falls back, loudly, to the configured
+  value. **An auto delay is an estimate, not an identification**: the compute
+  term includes sinks running after the DAC, and the bias term is assumed.
+  Verify with a Bode sweep before quoting an attenuation number.
+- `delay_auto_bias`: frames of sensor + ZOH + actuator latency added to the
+  measured compute term. Default 1.5 (one frame of sensor, half a frame of
+  hold). `"auto"` recovers it from `delay_ident_ms` instead —
+  `(identified delay − measured compute)`, converted at the measured rate — so
+  it stays right when the frame rate moves. A frame count written by hand is
+  only valid at the rate it was written for.
+- `delay_ident_ms`: the last **identified** end-to-end transport delay, in
+  milliseconds, from a Bode sweep or a PRBS run. Used by
+  `delay_auto_bias: "auto"`. Milliseconds because that is the unit that does
+  not move with the frame rate. `"auto"` means no identification is being
+  asserted: the sensor path is modelled from the source's published exposure as
+  `exposure/2 + 2.5 frames`. The 2.5 is measured, not assumed — removing the
+  exposure half from four Bode identifications on this bench leaves 2.53–2.67
+  frames across an 8× range of frame rate, i.e. ~2 frames of camera pipelining
+  plus the half-frame ZOH, and the model reproduces those to within 4%. It is
+  still a model: it cannot see actuator lag and it assumes this camera's
+  pipelining. The calibration suite replaces it with a measured number on the
+  first PRBS delay run.
+- `delay_auto_max`: ceiling the estimate is clamped to, and the delay every
+  ring is sized for while the real one is unknown. Default 16.
+- `delay_auto_settle`, `delay_auto_window`: seconds of hold discarded before
+  measuring, and seconds measured. Defaults 0.5 and 1.0.
 - `fs`: loop rate (Hz); must match, so AR coefficients land on the right digital
-  frequencies.
+  frequencies. `"auto"` measures it from the same startup pass as the delay and
+  rebuilds everything derived from it — mode coefficients and their Riccati
+  gains, the burst guard, the command filter, and the EWMA weights converted
+  from time constants. Use it with a self-sizing camera ROI, where the frame
+  rate is not knowable when the config is written.
+- `gap_trip`: seconds between `proc()` calls past which the source is taken to
+  have dropped frames. `"auto"` sets it to 1.5 measured frame periods, so a
+  normal frame passes and a single missed one trips — a fixed number of seconds
+  only means one thing at one frame rate.
 - `clamp`: command magnitude limit — the symmetric shorthand for
   `[-clamp, +clamp]`. Default 1.0.
 - `clamp_min`, `clamp_max`: the actual output bounds, for an **asymmetric**
@@ -195,6 +241,11 @@ Parameters
   propagates the rate through the command horizon. This embeds DC integral and
   ramp-drift rejection in the normal Smith predictor; it does not enable or
   depend on the event-only transient integral controller.
+- `transient_mode`: `manual` (default) honors the configured values; `off`
+  disables event recovery regardless of retained tuning; `auto` enables the
+  conservative default detector (`transient_sigma = 6` when unset) while
+  retaining the other explicit values/defaults. Use `off` in an unvalidated
+  control profile rather than relying on several zero-valued fields.
 - `transient_sigma`, `transient_floor`: enable large-event recovery and set its
   innovation threshold to
   `max(transient_sigma * quiet_innovation_rms, transient_floor)`, in normalized
@@ -321,14 +372,14 @@ Parameters
   unlike an attenuation PSD, it scores the transient directly.
 
 The full-rate error and applied-command records from
-`contrib/push_event_par_fsp.json` can also validate whether the modal frequencies
+`contrib/legacy/legacy_steering_profiles/push_event_par_fsp.json` can also validate whether the modal frequencies
 survive a move to a new environment:
 
 ```sh
-python3 contrib/analyze_push_events.py push_modal_events.csv \
+python3 contrib/data-analysis-tools/analyze_push_events.py push_modal_events.csv \
   --frequency-test --error-aylp push_modal_error.aylp \
   --command-aylp push_modal_command.aylp \
-  --config contrib/push_event_par_fsp.json --strict
+  --config contrib/legacy/legacy_steering_profiles/push_event_par_fsp.json --strict
 ```
 
 For every detected push, the analyzer uses the same `K`, integer/fractional
@@ -348,8 +399,8 @@ run instead. The fitter reads the pre-FSP AYLP record and obtains the open-windo
 boundaries and sample rate from the run configuration:
 
 ```sh
-python3 contrib/fit_fsp_modes.py atten_par_err6.aylp \
-  --config contrib/attenuation_par_fsp.json \
+python3 contrib/data-analysis-tools/fit_fsp_modes.py atten_par_err6.aylp \
+  --config contrib/steering/configurations/support/attenuation_par_fsp.json \
   --output fitted_fsp_modes.json
 ```
 
@@ -499,6 +550,7 @@ The adaptation refreshes q from the measured mode state energy **divided by
 Gv** (the stationary variance gain) — feeding state energy in directly
 re-creates the q/r ~ 1 regime and its ×3 waterbed.
 
-Validate with `contrib/attenuation_fsp.json` (open-vs-closed A/B) and compare
+Validate with `contrib/legacy/outdated_scripts/attenuation_fsp.json`
+(open-vs-closed A/B) and compare
 the closed RMS-about-mean and the 120–400 Hz band ratio against
 `attenuation10_lead_fc64` (x 0.244 px / ×1.57, y 0.151 px / ×1.32).

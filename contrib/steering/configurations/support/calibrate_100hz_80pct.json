@@ -1,0 +1,109 @@
+{
+	"_waveform": "CALIBRATION: continuous beam, 400 us exposure",
+	"_comment": {
+		"purpose": "High-confidence end-to-end delay measurement for the current 112x112, 400 us exposure, 1457 Hz, 100 Hz / 80% pulsed-beam steering setup. It measures command -> DAC -> FSM -> exposure/readout -> current moment-output fit_com separately on x and y.",
+		"method": "Each axis uses 64 repetitions of a 511-chip PRBS and rejects flagged dark/partial-light frames. The suite repeats the measurement at 0.10 and 0.15 V. This is the repository's previously validated short PRBS geometry, with the strict correlation, phase, live-coverage, burst-MAD and amplitude-invariance gates retained.",
+		"why_it_handles_jitter": "The coded drive is uncorrelated with ambient beam motion, so ensemble averaging suppresses ordinary jitter. Every burst is also estimated independently: nonstationary jitter appears as MAD and fails the run. The 257-frame quiet interval makes a 768-frame non-round burst period that walks against the 100 Hz light phase; rejected frames are removed and 100 Hz harmonics are excluded from the phase fit.",
+		"run": "sudo chrt -f 80 taskset -c 2 python3 contrib/calibration-scripts/tools/run_calibration_suite.py contrib/steering/configurations/support/calibrate_100hz_80pct.json",
+		"result": "fsm_delay_robust_100hz_80pct.pdf plus four individual PDF/.dat/_traces.dat records. Copy no delay unless all four quality verdicts pass and each axis's two estimates span <=0.15 frame."
+	},
+	"anyloop": "build/anyloop",
+	"anyloop_args": [
+		"-p"
+	],
+	"skip_gain": false,
+	"skip_delay": false,
+	"output_file": "fsm_delay_robust_100hz_80pct.pdf",
+	"roi_refresh": {
+		"park_config": "contrib/calibration-scripts/configurations/conf_parport_dac_park.json",
+		"script": "contrib/calibration-scripts/tools/find_roi.py",
+		"settle_seconds": 0,
+		"probe_gain": 50,
+		"max_attempts": 5,
+		"before_each_run": true,
+		"before_each_variant": true,
+		"before_runs": [
+			0,
+			2,
+			4
+		],
+		"reference_config": "contrib/steering/configurations/run_100hz_80pct.json",
+		"configs": [
+			"contrib/steering/configurations/support/com_survey_100hz_80pct.json",
+			"contrib/steering/configurations/support/calibrate_100hz_80pct_gain_x.json",
+			"contrib/steering/configurations/support/calibrate_100hz_80pct_gain_y.json",
+			"contrib/steering/configurations/support/calibrate_100hz_80pct_x.json",
+			"contrib/steering/configurations/support/calibrate_100hz_80pct_y.json"
+		]
+	},
+	"com_survey": {
+		"config": "contrib/steering/configurations/support/com_survey_100hz_80pct.json",
+		"capture": "data/calibration/run_staging/com_survey.aylp",
+		"analyzer": "build/com_survey",
+		"result": "data/calibration/run_staging/com_survey_result.json",
+		"fs_hz": 1457,
+		"pwm_hz": 0,
+		"pwm_duty": 1.0,
+		"max_exposure_us": 400,
+		"lock_exposure": true,
+		"max_rejected_fraction": 0.4,
+		"apply_to": [
+			"contrib/steering/configurations/support/calibrate_100hz_80pct_gain_x.json",
+			"contrib/steering/configurations/support/calibrate_100hz_80pct_gain_y.json",
+			"contrib/steering/configurations/support/calibrate_100hz_80pct_x.json",
+			"contrib/steering/configurations/support/calibrate_100hz_80pct_y.json"
+		],
+		"camera_apply_to": [
+			"contrib/steering/configurations/support/com_survey_100hz_80pct.json",
+			"contrib/steering/configurations/support/calibrate_100hz_80pct_gain_x.json",
+			"contrib/steering/configurations/support/calibrate_100hz_80pct_gain_y.json",
+			"contrib/steering/configurations/support/calibrate_100hz_80pct_x.json",
+			"contrib/steering/configurations/support/calibrate_100hz_80pct_y.json"
+		]
+	},
+	"runs": [
+		{
+			"name": "x gain",
+			"config": "contrib/steering/configurations/support/calibrate_100hz_80pct_gain_x.json",
+			"pdf": "fsm_gain_100hz_80pct_x.pdf"
+		},
+		{
+			"name": "x robust delay",
+			"config": "contrib/steering/configurations/support/calibrate_100hz_80pct_x.json",
+			"pdf": "fsm_delay_robust_100hz_80pct_x.pdf",
+			"prbs_amplitudes": [
+				0.1,
+				0.15
+			],
+			"max_delay_spread_frames": 0.15
+		},
+		{
+			"name": "y gain",
+			"config": "contrib/steering/configurations/support/calibrate_100hz_80pct_gain_y.json",
+			"pdf": "fsm_gain_100hz_80pct_y.pdf"
+		},
+		{
+			"name": "y robust delay",
+			"config": "contrib/steering/configurations/support/calibrate_100hz_80pct_y.json",
+			"pdf": "fsm_delay_robust_100hz_80pct_y.pdf",
+			"prbs_amplitudes": [
+				0.1,
+				0.15
+			],
+			"max_delay_spread_frames": 0.15
+		}
+	],
+	"update_run": {
+		"config": "contrib/steering/configurations/run_100hz_80pct.json",
+		"source_config": "contrib/steering/configurations/support/calibrate_100hz_80pct_x.json",
+		"shared_configs": [
+			"contrib/steering/configurations/run_1000hz_20pct.json",
+			"contrib/steering/configurations/run_1hz_20pct.json",
+			"contrib/steering/configurations/steering_par_fsp.json"
+		],
+		"x_gain_run": "x gain",
+		"y_gain_run": "y gain",
+		"x_delay_run": "x robust delay",
+		"y_delay_run": "y robust delay"
+	}
+}

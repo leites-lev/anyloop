@@ -43,7 +43,7 @@ On any fatal condition (bad input size, too few settled samples, step lost in
 noise) the device parks the output at zero, still publishes it, and sets
 `AYLP_DONE` itself, since the main loop treats proc errors as recoverable.
 
-See `contrib/conf_latency_test.json` for a complete pipeline
+See `contrib/legacy/outdated_scripts/conf_latency_test.json` for a complete pipeline
 (`asi_source → center_of_mass → latency_test → piplate_bridge`).
 
 Parameters

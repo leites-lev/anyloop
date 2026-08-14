@@ -1,0 +1,171 @@
+{
+	"_comment": {
+		"1": "Open-vs-closed attenuation measurement of the tip/tilt loop.",
+		"2": "This is steering_tuned.json (same camera, CoM, kalman, pid,",
+		"3": "clamp, and piplate settings) with one extra device --",
+		"4": "anyloop:attenuation_test -- inserted between the CoM and the",
+		"5": "kalman/pid stages. It holds the loop OPEN for open_time",
+		"6": "seconds (it zeroes the error feeding the kalman/pid, so the",
+		"7": "integrator and line oscillators stay parked and the DAC sits",
+		"8": "at its bias) while recording the raw CoM error, then lets the",
+		"9": "loop CLOSE, waits settle_time seconds for acquisition and",
+		"10": "kalman re-convergence (the loop notes say steady state needs",
+		"11": "t > 25 s), records for closed_time seconds, then computes",
+		"12": "Welch PSDs of both phases and writes attenuation.dat plus",
+		"13": "attenuation.pdf: per-axis open/closed PSD overlays, the",
+		"14": "closed/open ratio in dB vs frequency with the strongest",
+		"15": "attenuated (green) and amplified (red, waterbed) frequencies",
+		"16": "annotated, and the error variance contributed by each 5 Hz",
+		"17": "band (open vs closed, top closed bands tagged with their %",
+		"18": "of the total). Each phase's sample rate is measured from its",
+		"19": "own timestamps, and the open PSD is re-gridded onto the",
+		"20": "closed-phase frequency axis, so the closed loop running",
+		"21": "slower (DAC writes) does not skew the frequencies. The loop",
+		"22": "stops by itself when the test is done. EDIT open_time /",
+		"23": "closed_time below to taste; the 2026-07-10 verification used",
+		"24": "120 s + 120 s, and the loop notes warn that runs under 60 s",
+		"25": "are not trustworthy because the vibration environment is",
+		"26": "nonstationary."
+	},
+	"pipeline": [
+		{
+			"uri": "file:/home/fsl/anyloop_levfork/anyloop/build/asi_source.so",
+			"params": {
+				"camera_name": "ASI290MM",
+				"width":       32,
+				"height":      32,
+				"start_x":     1840,
+				"start_y":     680,
+				"_roi_note": "ROI centred on beam at coarse bias 2/2 (fine 1.5/2.15): probe-verified 2026-07-21, full-sensor CoM (x 919, y 507). Re-derive via contrib/calibration-scripts/configurations/probe_frame.json only on an alignment change.",
+				"exposure":    250,
+				"gain":        100,
+				"bandwidth":   100,
+				"high_speed":  1,
+				"die_on_stall": 0
+			}
+		},
+		{
+			"_comment": "Send raw frame to watch_steering.jl on port 64730",
+			"uri": "anyloop:udp_sink",
+			"params": {
+				"ip":         "127.0.0.1",
+				"port":       "64730",
+				"decimation": 64
+			}
+		},
+		{
+			"_comment": "Track a 15x15 window centred on the previous CoM, init on the beam at frame centre (see steering_tuned.json notes).",
+			"uri": "anyloop:center_of_mass",
+			"params": {
+				"region_height":   15,
+				"region_width":    15,
+				"threshold":       30,
+				"track":           true,
+				"init_y":          16,
+				"init_x":          28
+			}
+		},
+		{
+			"_comment": "Send [y, x] CoM vector to watch_steering.jl on port 64731",
+			"uri": "anyloop:udp_sink",
+			"params": {
+				"ip":         "127.0.0.1",
+				"port":       "64731",
+				"decimation": 64
+			}
+		},
+		{
+			"_comment": "Send [y, x] CoM vector to watch_error_ts.jl on port 64732 (full rate)",
+			"uri": "anyloop:udp_sink",
+			"params": {
+				"ip":   "127.0.0.1",
+				"port": "64732"
+			}
+		},
+		{
+			"_note1": "THE TEST. Sits after the CoM sinks so the watchers still see the true error, and before the kalman so the open-phase recording is the raw error, not a prediction. start_delay covers the 2 s pid/piplate start_delay holds plus CoM window acquisition. settle_time 25 s matches the loop notes' steady-state threshold (pid acquisition + kalman 10 s handover ramp).",
+			"_note2": "nfft 4096 at the ~2400 Hz loop rate gives ~0.6 Hz bins -- enough to resolve the 22.08 / 30.8 / 59.63 Hz lines. Sample rate is measured from timestamps, not assumed. Outputs land in the working directory: attenuation.pdf and attenuation.dat (freq, then psd_open/psd_closed/atten_dB per axis).",
+			"_note3": "pixel_scale converts the normalized CoM output to pixels for the report: center_of_mass emits -1..+1 across the whole frame (norm = -1 + 2*px/(dim-1)), so at 56 px wide one x output unit = (56-1)/2 = 27.5 px. If width/height change, update this. CAVEAT: it is a single scalar, so with the non-square 56x32 ROI it is only exact for x; y is really (32-1)/2 = 15.5 px/unit, so reported y px are ~1.8x high. config is a free-text summary of the tuned loop that is printed verbatim on page 2 of the PDF, next to the run's start date/time, the per-10 Hz-band RMS table (in px), and the mean (pointing offset) and RMS-about-mean (jitter) for each axis, open vs closed. Keep config in sync with the pid/kalman/line params below.",
+			"uri": "anyloop:attenuation_test",
+			"params": {
+				"start_delay": 100.0,
+				"open_time":   500.0,
+				"settle_time": 100.0,
+				"closed_time": 500.0,
+				"nfft":        4096,
+				"labels":      "y,x",
+				"pixel_scale": 15.5,
+				"config":      "100, 500, 100, 500, 4096: camera ASI290MM 56x32, exp 50, beam-centred ROI (2026-07-16 setup)\npid: i=1050 iy=1500 + LEAD (s+2pi*8)/(s+2pi*32) both axes -> fc 64/65 Hz, PM 67, model Ms 2.0\n(design: grid search over attenuation9 open PSD; lead trades <8 Hz gain for +37 deg at 16-64 Hz)\nlines x=[9.6,12.1,21.3,25.8,57.5,83.7] gain=[40,60,60,40,20,15] phase=[41.2,37.6,32.7,31.7,19.1,-3.1] (recentered on the 2026-07-15 line survey)\nlinesy=[5.6,10.9,21.3,29.8,57.5] gainy=[50,50,40,30,15] phasey=[52.5,39.1,32.8,31.0,19.3]\nphases = plant+sensitivity WITH lead: phi=-360*f*tau + angle(1/(1+L))\nkalman: order=1024 (was 80; ONLY change vs attn10 -- resolve the 2.26 Hz comb) horizon=5 mu=0.03 gain=1.0 gainy=1.0 ramp=10\npiplate: fine ch0(+2)/ch1(-2), coarse bias 1.95/2.02 (2026-07-16 evening setup), baud 460800",
+				"output_file": "attenuation11_kalman1024.pdf"
+			}
+		},
+		{
+			"_note": "adaptive predictor (see steering_tuned.json). During the open phase it trains on zeros and outputs ~0; settle_time above covers its re-convergence after the loop closes. DO NOT set gain<1: run 4 (attenuation4_kalman07_h6, gain 0.7 + horizon 6) collapsed the x loop -- sensitivity crossover 28->15 Hz, closed/open ratio 0.94 vs 0.60 -- and the bode at the same bias (fsm2310_bode_x_bias105) shows |P|x unchanged, so the blend itself is what broke it (NLMS trains on the blended closed-loop signal and finds a bad equilibrium). gain 1.0 / horizon 5 is the verified best (run 2: x 0.384 px).",
+			"uri": "anyloop:kalman_filter",
+			"params": {
+				"_note2": "order 80->1024 (2026-07-15, ONLY change vs attenuation10): the attenuation10 budget shows the 10-30 Hz x residual is a ~2.256 Hz-spaced comb (19.17/21.43/23.68/25.94) and order 80 (35 ms window, ~29 Hz resolution) cannot represent it -- 1024 = fs/2.256, one full beat period of the comb spacing, so the predictor can separate and lock every member. horizon 5 unchanged (delay budget: tau_loop/Ts = 3.93 fr + ~0.5 fr exposure smear + ~0.65 fr DAC ZOH -> ceil = 5). mu 0.03 unchanged; tracking time order/(mu*fs) rises 1.15 s -> 14.8 s (slower than the ~1.7 s wander timescale -- accepted for this A/B; if lines pump or dance, mu is the next knob, NOT gain). ~19 MFLOP/s at 2310 Hz, still negligible. ROLLBACK: order 80.",
+				"type": "vector",
+				"order": 1024,
+				"horizon": 5,
+				"mu": 0.03,
+				"gain": 1.0,
+				"gainy": 1.0,
+				"ramp": 10.0,
+				"clamp": 1.0,
+				"start_delay": 2.0
+			}
+		},
+		{
+			"_note4": "LEAD-COMPENSATED design (2026-07-14 evening, from a grid search of i x lead over the measured attenuation9 open PSD, constraints PM>=45 deg and Ms=max|S|<=2.0, plant Kx=0.427 Ky=0.300 tau=1.81 ms): C(s) = i/s * (s+2pi*8)/(s+2pi*32). The lead's +37 deg near 16-64 Hz buys crossover fc 46->64 Hz (x) and 24->65 Hz (y) at PM 67; its price is 4x less gain below 8 Hz (fz/fp=0.25), which the budget can afford (0-10 Hz closed was 0.050/0.040 px). Predicted from the model: x 10-30 Hz 0.207->0.186, y 10-30 0.246->0.128 px; the model is conservative (ignores oscillators+NLMS, overpredicted attenuation9 by ~25%). i=1050/iy=1500 place |L|=1 at 64/65 Hz WITH the lead's HF gain ~1. ROLLBACK if 60-120 Hz blows up or a line pumps: i=680, iy=500, no lead_* params, and the attenuation9 phase lists (77.8,75.6,63.6,58.7,13.8,-24.3 / 76.5,42.6,26.8,-13.7 at lines 9.8,11.6,21.1,24.9,57.5,83.7 / 5.64,21.1,29.6,57.5).",
+			"_note5": "OSCILLATOR PHASES (attenuation8 lesson, VALIDATED by attenuation9: x 0.400->0.282 px, y 0.253->0.221): the default phi=-360*f*line_delay compensates the PLANT only, but the closed-loop command->error path is P*S and phase(S) was +45..+84 deg at these lines -- every notch realized ~0.7 Hz above its oscillator. Correct formula: phi = -360*f*tau + angle(1/(1+L(f))), with L including the LEAD section now (that is why these phases are ~30 deg, not ~70: the lead flattens phase(S) in-band). RECOMPUTE whenever i, iy, lead_*, or bias (K) changes. Line centers on the multi-run measured positions (they wander ~0.5 Hz/run: x 20.9<->22.6, so 21.7 center; y 11.28 is rock-steady across runs and finally gets its own oscillator -- it was y's largest un-notched line at 0.095 px). Gains: notch half-width df=g*K/(4pi), >= the observed wander; cap 20/15 near/above crossover (x 57.5 at 0.90*fc, y 57.5 at 0.88*fc, x 83.3 at 1.3*fc).",
+			"_note6": "kalman gainy 1.0 (first y try since 2026-07-10): the old 'prediction pumps y 30.8 Hz' failure happened when fc_y was 62 Hz; y now crosses at 24 Hz and its dominant residual is the predictable 10-30 Hz cluster (0.107 px broadband in 20-30 even with lines notched) plus 57.5 Hz -- exactly what the NLMS eats on x. If this run shows a y line pumped >2x vs attenuation8, set gainy back to 0 (never 0<gainy<1).",
+			"uri": "anyloop:pid",
+			"params": {
+				"type": "vector",
+				"p": 0,
+				"py":0,
+				"i": 1050,
+				"iy": 1500,
+				"d": 0,
+				"lead_fz": 8,
+				"lead_fp": 32,
+				"lead_fzy": 8,
+				"lead_fpy": 32,
+				"clamp": 1.0,
+				"units": "minmax",
+				"start_delay": 2.0,
+				"lines": [9.6, 12.1, 21.3, 25.8, 57.5, 83.7],
+				"line_gain": [40, 60, 60, 40, 20, 15],
+				"line_phase": [41.2, 37.6, 32.7, 31.7, 19.1, -3.1],
+				"linesy": [5.6, 10.9, 21.3, 29.8, 57.5],
+				"line_gainy": [50, 50, 40, 30, 15],
+				"line_phasey": [52.5, 39.1, 32.8, 31.0, 19.3],
+				"line_delay": 0.0018
+			}
+		},
+		{
+			"uri": "anyloop:clamp",
+			"params": {
+				"type": "vector",
+				"min": -1.0,
+				"max": 1.0
+			}
+		},
+		{
+			"uri": "anyloop:piplate_bridge",
+			"params": {
+				"port":    "/dev/ttyACM0",
+				"board":   0,
+				"channel": [0,  1,  2, 3],
+				"index":   [0,  1,  0,    0],
+				"scale":   [2, -2,   0,   0],
+				"offset":  [2,  2, 1.95, 2.02],
+				"baud":    460800,
+				"start_delay": [2.0, 2.0, 0, 0],
+				"wait_response": false,
+				"skip_unchanged": true
+			}
+		}
+	]
+}
+

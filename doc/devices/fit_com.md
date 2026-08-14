@@ -241,6 +241,10 @@ Parameters
   with `moment_output: true` to use the intensity-moment/PWM tracker without
   allowing a Gaussian fit to affect validity or output. Acquisition, moment
   gates, held-frame flags and beam-loss/reacquisition remain active.
+- `moment_col_stride` (default 1): sample every Nth image column in the
+  intensity-moment pass. Every sensor row remains represented for shutter
+  detection, while broad-beam latency falls approximately with N. Validate
+  position noise on raw frames before raising it; `1` uses every pixel.
 - `tol` (default 1e-4): relative cost improvement at which to stop. Note this is
   relative to the *whole window's* cost, which on a large frame is dominated by
   background pixels the fit cannot improve, so it fires earlier than its face

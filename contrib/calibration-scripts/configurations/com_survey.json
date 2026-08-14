@@ -1,0 +1,51 @@
+{
+	"_comment": {
+		"1": "OPEN-LOOP capture for contrib/com_survey: one minute of raw ROI frames, same camera configuration as steering_par_fsp_wfs_com.json, with NO tracker, NO fsp and NO DAC in the pipeline. Nothing is actuated, so whatever the beam does here is the beam, not a loop.",
+		"2": "Run it with the FSM parked at its normal bias, exactly as contrib/calibration-scripts/configurations/probe_frame.json expects. Let the coarse channels settle (~30 s) before starting, or the drift during settling will show up as beam motion.",
+		"3": "Writes com_survey.aylp: 40-byte header per frame, then height*width uint8. The ROI is now 80x80 to contain the measured sigma~8.6 px beam with +/-4 sigma clearance. This changes camera readout rate; run_calibration_suite measures the settled ASI rate from each capture log instead of assuming the old 64x64 rate.",
+		"4": "Automated fit uses 16620 frames, 10.0 s at the measured 96x96 rate of 1662 Hz. The runner remeasures the settled rate on every capture. It retries ROI localization automatically, fits ROI/camera/fit_com parameters, changes the camera only after a failed fit, and validates any change with another 10 s capture.",
+		"5": "Then: ./build/com_survey com_survey.aylp --fs 2310   (add --row-time once you have measured it; it does not affect the recommendation).",
+		"6": "MEASURED 2026-08-06 from this 60.0 s / 138600-frame capture at 64x64, exp 400, gain 0, fs 2310 Hz on the ASI290MM: background 5.63 counts sigma 16.57, beam amplitude 232.0, beam sigma 6.64 px / FWHM 15.63 px, mean position (27.10, 16.13) px, saturation 3.10%. Suggested threshold 89 (background + 5 sigma), sigma_init 6.64, fit_com window 55x55 (+/-4 sigma). NOTE THE BEAM IS 15 px OFF-CENTRE IN X (16.13 against a frame centre of 31.5) and 4 px in y -- re-centre the ROI to start_x 1077 / start_y 414 before the next capture. The 3.10% saturation is a deliberate choice, not an oversight: it costs sub-pixel accuracy in the core, where the centroid weight is, and inflates the non-gaussian residual below.",
+		"8": "RAISING EXPOSURE TO RECOVER THE DARK FRAMES WAS TRIED 2026-08-06 AND IS A NET LOSS -- do not repeat it. Measured at 64x64 gain 0, scoring \"too dark\" by fit_com's own rejection rate: 400 us -> fs 2310, 13.45% rejected, 1999 usable frames/s; 800 -> 1246, 8.37%, 1142; 1600 -> 623, 5.84%, 587; 3200 -> 302, 3.68%, 291. So 400->3200 us buys 9.8 points of rejection and costs 6.9x the usable frame rate, plus saturation 1.2%->10.4%. WHY IT CANNOT WORK: the modulation period is 213 ms and even 3200 us is 1.5% of it, so exposure never averages ACROSS the modulation -- it only scales brightness, floating marginal frames over threshold while the off phase stays off. Integrating through the dark phase needs an exposure near 213 ms, i.e. a 5 Hz loop. Fix the source, not the exposure. (Frame rate is readout-limited at 2310 Hz for any exposure from 60 to 400 us, so there is also nothing to gain by going shorter.)",
+		"7": "THE SOURCE IS STILL MODULATED, but no longer as a hard chop. Measured 2026-08-06 on this capture: 4.70 Hz (autocorrelation lag 492 at fs 2310, with harmonics at lags 1019/1538/2039 = 2.27/1.50/1.13 Hz), against 4.411 Hz on the old beam. It is now SMOOTH rather than 12%-duty on/off -- lag-1 autocorrelation 0.999 and per-frame mean flux running 0.11/19.0/100.1 (min/median/max) -- so only 16.75% of frames are too dark to track, against ~90% before. CONSEQUENCE: that 16.75% is the floor on every tracker rejection rate here (fit_com rejects 11.1% over the full record) and NO algorithm choice recovers it. A CW source is the single largest available improvement."
+	},
+	"pipeline": [
+		{
+			"uri": "file:/home/fsl/anyloop_levfork/anyloop/build/asi_source.so",
+			"params": {
+				"camera_name": "ASI290MM",
+				"_roi": "64x64 at start_x 1073 / start_y 418, RE-CENTRED 2026-08-06. The previous 1092/418 put the beam at x 12.7 of 64 with its left wing running off the frame edge -- flux in column 0, estimators disagreeing by 5-15 px, and a relative residual of 0.124 that was partly truncation rather than beam shape. After the move the average CoM sits at (33.3, 32.1) against a target of 31.5, the brightest edge pixel is 9.2% of peak, and 1.08% of the flux is in the outer 2-px border. VERIFY THIS BEFORE EVERY SURVEY: a clipped beam silently corrupts sigma, the window suggestion and the gaussian residual all at once.",
+				"width": 112,
+				"height": 112,
+				"start_x": 1164,
+				"start_y": 398,
+				"exposure": 400,
+				"gain": 120,
+				"bandwidth": 100,
+				"high_speed": 1,
+				"die_on_stall": 0
+			}
+		},
+		{
+			"_comment": "Live view while it captures; decimated so it cannot back-pressure the loop.",
+			"uri": "anyloop:udp_sink",
+			"params": {
+				"ip": "127.0.0.1",
+				"port": "64730",
+				"decimation": 256
+			}
+		},
+		{
+			"uri": "anyloop:file_sink",
+			"params": {
+				"filename": "data/calibration/run_staging/com_survey.aylp"
+			}
+		},
+		{
+			"uri": "anyloop:stop_after_count",
+			"params": {
+				"count": 14570
+			}
+		}
+	]
+}

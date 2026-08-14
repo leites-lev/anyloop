@@ -62,6 +62,7 @@
 #include "anyloop.h"
 #include "logging.h"
 #include "gain_test.h"
+#include "timing.h"
 #include "xalloc.h"
 
 
@@ -450,6 +451,116 @@ static int gt_plot(struct aylp_gain_test_data *data, const char *dat_path)
 }
 
 /** Fit, log the headline numbers, and write the .dat and the PDF. */
+/** Install the measured gain into a run config's fsp stage.
+ *
+ * Writes the SMALL-SIGNAL slope, not the full-span one: the closed loop lives
+ * near the bias, and a mirror that compresses at large command would otherwise
+ * hand the controller an averaged gain it never operates at. Magnitude only --
+ * K is positive in these configs and the command->voltage sign lives in the DAC
+ * stage's `scale`, where a sign error is a wiring question rather than a
+ * silently inverted loop.
+ *
+ * The gates are the calibration suite's: a fit at all, a small-signal fit over
+ * enough levels, R2 >= 0.90, uncertainty within 15%, and small-signal within
+ * 25% of full-span. Failing any of them leaves the config untouched and says
+ * why. A wrong K is a wrong loop gain into a fixed delay, so refusing to write
+ * is always the cheaper mistake.
+ */
+static void gt_autowrite(struct aylp_gain_test_data *data)
+{
+	const char *path = data->write_config;
+	const char *axis = data->write_axis ? "x" : "y";
+	const char *why = 0;
+	if (!data->have_fit) why = "there is no fit";
+	else if (data->n_small < 5) why = "the small-signal fit has under 5 levels";
+	else if (!(data->r2 >= 0.90)) why = "R2 is below 0.90";
+	else if (!(fabs(data->slope_small) > 0.0)) why = "the slope is zero";
+	else if (fabs(data->slope_small_err) > 0.15 * fabs(data->slope_small))
+		why = "the small-signal uncertainty is over 15%";
+	else if (fabs(fabs(data->slope_small) - fabs(data->slope))
+			> 0.25 * fabs(data->slope_small))
+		why = "small-signal and full-span gains differ by over 25%, "
+			"which is too nonlinear to install";
+	if (why) {
+		log_error("gain_test: NOT writing %s to %s: %s. The run's .dat "
+			"still has everything; install by hand if you disagree.",
+			axis, path, why);
+		return;
+	}
+	double K = fabs(data->slope_small);
+
+	struct json_object *cfg = json_object_from_file(path);
+	if (!cfg) {
+		log_error("gain_test: could not read %s to write %s.K into",
+			path, axis);
+		return;
+	}
+	struct json_object *pipeline, *fsp = 0;
+	if (json_object_object_get_ex(cfg, "pipeline", &pipeline)
+			&& json_object_is_type(pipeline, json_type_array)) {
+		size_t n = json_object_array_length(pipeline);
+		for (size_t i = 0; i < n; i++) {
+			struct json_object *dev, *uri;
+			dev = json_object_array_get_idx(pipeline, i);
+			if (!json_object_object_get_ex(dev, "uri", &uri))
+				continue;
+			if (strcmp(json_object_get_string(uri), "anyloop:fsp"))
+				continue;
+			if (fsp) {
+				// two controllers means we cannot tell which one
+				// this measurement belongs to
+				log_error("gain_test: %s has more than one "
+					"anyloop:fsp; not writing", path);
+				json_object_put(cfg);
+				return;
+			}
+			json_object_object_get_ex(dev, "params", &fsp);
+		}
+	}
+	struct json_object *ax = 0;
+	if (!fsp || !json_object_object_get_ex(fsp, axis, &ax)) {
+		log_error("gain_test: %s has no anyloop:fsp stage with a \"%s\" "
+			"axis; not writing", path, axis);
+		json_object_put(cfg);
+		return;
+	}
+	double was = 0.0;
+	struct json_object *old;
+	if (json_object_object_get_ex(ax, "K", &old))
+		was = json_object_get_double(old);
+	json_object_object_add(ax, "K", json_object_new_double(K));
+
+	char note[512];
+	snprintf(note, sizeof note,
+		"K %.6G written by gain_test from the small-signal slope "
+		"(%.6G +/- %.4G over %zu levels, full-span %.6G, R2 %.4f). "
+		"Was %.6G. Re-run the gain test after any ROI, exposure or "
+		"optics change: K is in units normalized over the frame.",
+		K, data->slope_small, data->slope_small_err, data->n_small,
+		data->slope, data->r2, was);
+	json_object_object_add(ax, "_auto_gain_write",
+		json_object_new_string(note));
+
+	// write through a temporary so an interrupted write cannot leave a
+	// half-written controller config behind
+	char *tmp = xmalloc(strlen(path) + 5);
+	sprintf(tmp, "%s.tmp", path);
+	int err = json_object_to_file_ext(tmp, cfg,
+		JSON_C_TO_STRING_PRETTY | JSON_C_TO_STRING_PRETTY_TAB);
+	if (!err && rename(tmp, path))
+		err = -1;
+	if (err) {
+		log_error("gain_test: could not write %s (%m)", path);
+		remove(tmp);
+	} else {
+		log_info("gain_test: wrote %s.K = %.6G (was %.6G) into %s",
+			axis, K, was, path);
+	}
+	xfree(tmp);
+	json_object_put(cfg);
+}
+
+
 static void gt_report(struct aylp_gain_test_data *data)
 {
 	gt_fit(data);
@@ -504,6 +615,7 @@ static void gt_report(struct aylp_gain_test_data *data)
 			data->have_fit ? data->r2 : 0.0, data->min_r2);
 		return;
 	}
+	if (data->write_config) gt_autowrite(data);
 	if (!data->output_file) return;
 	const char *out = data->output_file;
 	const char *dot = strrchr(out, '.');
@@ -539,6 +651,7 @@ int gain_test_init(struct aylp_device *self)
 	data->volts_per_unit = 1.0;
 	data->pixel_scale = 1.0;
 	data->resp_max = 0.9;
+	data->write_axis = -1;		// -1 = follow index_err
 	data->output_file = xstrdup("gain_test.pdf");
 
 	if (self->params) { json_object_object_foreach(self->params, key, val) {
@@ -576,17 +689,38 @@ int gain_test_init(struct aylp_device *self)
 		} else if (!strcmp(key, "volts_per_unit")) {
 			data->volts_per_unit = json_object_get_double(val);
 		} else if (!strcmp(key, "pixel_scale")) {
-			data->pixel_scale = json_object_get_double(val);
+			// "auto" = take it from the frame the source is actually
+			// delivering, which is the only way to be right when the
+			// source sizes its own ROI
+			if (json_object_is_type(val, json_type_string)
+					&& !strcmp(json_object_get_string(val),
+						"auto"))
+				data->pixel_scale_auto = true;
+			else data->pixel_scale = json_object_get_double(val);
 		} else if (!strcmp(key, "resp_max")) {
 			data->resp_max = json_object_get_double(val);
 		} else if (!strcmp(key, "fit_range")) {
 			data->fit_range = json_object_get_double(val);
+		} else if (!strcmp(key, "write_config")) {
+			const char *v = json_object_get_string(val);
+			xfree(data->write_config);
+			if (v && *v) data->write_config = xstrdup(v);
+		} else if (!strcmp(key, "write_axis")) {
+			const char *v = json_object_get_string(val);
+			if (v && (!strcmp(v, "x") || !strcmp(v, "y")))
+				data->write_axis = !strcmp(v, "x");
+			else {
+				log_error("gain_test: write_axis must be "
+					"\"x\" or \"y\"");
+				return -1;
+			}
 		} else if (!strcmp(key, "min_r2")) {
 			data->min_r2 = json_object_get_double(val);
 		} else if (!strcmp(key, "output_file")) {
 			// an empty name means "log the numbers, write nothing"
 			const char *v = json_object_get_string(val);
-			xfree(data->output_file);
+			xfree(data->write_config);
+	xfree(data->output_file);
 			if (v && *v) data->output_file = xstrdup(v);
 		} else if (!strcmp(key, "config")) {
 			data->config = xstrdup(json_object_get_string(val));
@@ -656,6 +790,24 @@ int gain_test_init(struct aylp_device *self)
 		data->interleave ? " (interleaved)" :
 			(data->updown ? " (up then down)" : ""),
 		data->n_points * data->dwell, data->warmup, data->ramp);
+	if (data->write_axis < 0) data->write_axis = data->index_err ? 1 : 0;
+	if (data->pixel_scale_auto) {
+		// index_err 0 is y, 1 is x, matching center_of_mass's output
+		struct aylp_frame_geometry g;
+		if (aylp_frame_geometry_get(&g)) {
+			size_t dim = data->index_err ? g.width : g.height;
+			data->pixel_scale = 0.5 * (double)(dim - 1);
+			log_info("gain_test: auto pixel_scale %G px/unit, from "
+				"the source's %zux%zu frame on the %s axis",
+				data->pixel_scale, g.height, g.width,
+				data->index_err ? "x" : "y");
+		} else {
+			log_warn("gain_test: pixel_scale is \"auto\" but no "
+				"source published a frame size; reporting in "
+				"response units (px columns will read as "
+				"units)");
+		}
+	}
 	if (data->volts_per_unit != 1.0)
 		log_info("gain_test: command unit is %G V at the DAC, so the "
 			"sweep runs %G V to %G V in %G V steps",

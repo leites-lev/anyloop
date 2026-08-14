@@ -14,6 +14,12 @@ enum aylp_fsp_transient_controller {
 	AYLP_FSP_TRANSIENT_HYBRID,
 };
 
+enum aylp_fsp_transient_mode {
+	AYLP_FSP_TRANSIENT_MANUAL = 0,
+	AYLP_FSP_TRANSIENT_OFF,
+	AYLP_FSP_TRANSIENT_AUTO,
+};
+
 // Adaptive Filtered Smith Predictor / adaptive LQG for tip-tilt beam
 // stabilization. This is a COMPLETE controller: it takes the [y, x] error
 // (center-of-mass output) and emits the [y, x] command, so it REPLACES both
@@ -166,6 +172,14 @@ struct aylp_fsp_axis {
 	// inherit the global ones. Resolved at init (0 / <0 = inherit).
 	size_t delay;
 	double delay_frac;
+	// This axis takes its delay from the startup auto estimate (see
+	// delay_auto in aylp_fsp_data).
+	bool delay_auto;
+	// The delay every length below was SIZED for. Equal to `delay`
+	// normally; with an auto delay it is delay_auto_max, because the
+	// estimate does not exist until the loop has been running and the rings
+	// cannot be reallocated underneath it.
+	size_t delay_alloc;
 	// Per-axis output bounds, u held to [clamp_lo, clamp_hi]. Needed
 	// separately from the global pair because the axes can have OPPOSITE
 	// command->voltage signs (a steering pair typically does: +1 V/unit on
@@ -424,6 +438,97 @@ struct aylp_fsp_data {
 	// first-order Thiran all-pass (unit magnitude, correct low-frequency group
 	// delay); the full-band observer blends adjacent horizon predictions.
 	double delay_frac;
+
+	// AUTO DELAY. "delay": "auto" (globally or on one axis) measures the
+	// transport delay from the running loop instead of taking it from a Bode
+	// sweep, and sets both delay and delay_frac from the measurement.
+	//
+	// The delay has three parts. Two of them are measured:
+	//
+	//   COMPUTE. The source device publishes how long the rest of the
+	//   pipeline takes per iteration -- centroiding, this controller, the
+	//   DAC write, the sinks -- through libaylp/timing.h. It is the only
+	//   device that can measure this: it is the one that blocks waiting for
+	//   the frame, so it is the only one for which work and waiting are
+	//   distinguishable. (From here the two are algebraically inseparable:
+	//   the gap since our own last return is exactly the loop period minus
+	//   our own duration, whatever anyone else did.) A pipeline whose source
+	//   publishes nothing cannot use an auto delay, and init says so.
+	//
+	//   LOOP PERIOD. Measured here, as the median interval between our own
+	//   proc() calls -- the delay wanted is in FRAMES, so the compute time
+	//   has to be divided by the period actually achieved, not the one the
+	//   config claims. A configured fs more than 10% away from it is
+	//   reported: it means every other frame-referenced constant is off too.
+	//
+	// The third part is not measurable from inside the loop at all: the
+	// sensor's own latency (integration midpoint to frame in hand -- the
+	// exposure, the readout and the transfer) plus the DAC's zero-order
+	// hold, plus whatever mechanical lag the actuator adds. That is
+	// delay_auto_bias, in frames. The default 1.5 is one frame of sensor
+	// (an exposure comparable to the frame period, pipelined readout) and
+	// half a frame of ZOH. CALIBRATE IT ONCE PER BENCH: run a Bode sweep,
+	// take the measured delay, subtract the compute term the run logs, and
+	// what remains is this number. It is the difference between an estimate
+	// and an identification, and the loop is only as good as it.
+	//
+	// The estimate is installed as soon as its measurement window closes,
+	// inside the startup hold and well before the loop closes: the command
+	// is parked at zero throughout, and the broadband filter spends the
+	// REST of the hold training at the horizon it will actually run at.
+	// start_delay is raised at init if it is too short to measure in.
+	bool delay_auto;
+	// Ceiling the auto estimate is sized and clamped to. Every delay-
+	// dependent ring is allocated for this, so it costs memory (and, through
+	// the dark bank, a little work) to set it far above the truth. Default
+	// 16 samples.
+	size_t delay_auto_max;
+	// Seconds of the hold to discard before measuring: the first frames of a
+	// run include the source's slow first frame, page faults and the
+	// observer's own warm-up. Default 0.5.
+	double delay_auto_settle;
+	// Seconds of measurement after the settle, before the estimate is
+	// locked in. Default 1.0.
+	double delay_auto_window;
+	// Frames of sensor + ZOH + actuator latency added to the measured
+	// compute term. Default 1.5; see above -- this is the calibrated part.
+	double delay_auto_bias;
+	// "delay_auto_bias": "auto" -- derive it from delay_ident_ms instead of
+	// carrying a frame count. The bias is a physical latency in SECONDS, so a
+	// number of frames is only valid at the frame rate it was written for;
+	// this recovers it as (identified delay - measured compute) and converts
+	// at the measured rate, which keeps it right when the auto ROI changes
+	// the frame rate. Needs delay_ident_ms.
+	bool delay_auto_bias_auto;
+	// "delay_ident_ms": "auto" -- no identification available, so model the
+	// sensor path from what the source publishes (exposure/2 + one frame of
+	// readout + half a frame of ZOH) and note the run is on a modelled
+	// floor. The calibration suite overwrites it with a measured number the
+	// first time the PRBS delay run happens, and the config self-corrects.
+	bool delay_ident_auto;
+	// The last IDENTIFIED end-to-end transport delay, in milliseconds -- from
+	// a Bode sweep or a PRBS run, i.e. the real measurement, in the one unit
+	// that does not move with the frame rate. 0 = unset.
+	double delay_ident_ms;
+	// "fs": "auto" -- take the loop rate from the same measurement the auto
+	// delay uses instead of the configured value, and rebuild everything that
+	// depends on it (mode coefficients and their Riccati gains, the burst
+	// guard, the command filter, the drift/transient EWMA weights). With a
+	// self-sizing camera ROI the frame rate is not knowable when the config is
+	// written. The configured fs is still used until the measurement lands.
+	bool fs_auto;
+	// true once the estimate has been applied (or given up on)
+	bool delay_auto_done;
+	// Measurement state; both arrays are freed at lock-in. auto_dt holds one
+	// loop-period sample per frame, auto_compute one per publication from
+	// the source (each is already a mean over its own window, so only new
+	// values are kept -- storing the same window once per frame would just
+	// weight the medians by window length).
+	double *auto_dt;
+	double *auto_compute;
+	size_t auto_n_dt, auto_cap_dt;
+	size_t auto_n_c, auto_cap_c;
+	double auto_last_c;	// last compute value recorded, to spot new ones
 	// sample rate (Hz) used to turn f/zeta into AR coefficients; should
 	// match the loop rate
 	double fs;
@@ -617,6 +722,9 @@ struct aylp_fsp_data {
 	double transient_ki;		// integral gain (1/s)
 	double transient_i_leak;	// integrator leakage rate (1/s); 0 = pure
 	double transient_i_limit;	// integral contribution limit (command units)
+	// `manual` honors the parameter values, `off` inhibits all event recovery,
+	// and `auto` enables the conservative default detector when sigma is unset.
+	enum aylp_fsp_transient_mode transient_mode;
 	enum aylp_fsp_transient_controller transient_controller;
 	bool transient_controller_set;
 	double transient_modal_q_scale;
@@ -690,6 +798,12 @@ struct aylp_fsp_data {
 	// wall-clock gap between consecutive proc calls exceeds gap_trip
 	// seconds; <= 0 disables.
 	double gap_trip;
+	// "gap_trip": "auto" -- 1.5 measured frame periods. A trip level in
+	// SECONDS only means one thing at one frame rate: too tight and every
+	// normal frame is a "gap", too loose and a real dropped frame is
+	// invisible. With a self-sizing ROI the frame rate is not knowable when
+	// the config is written, so this follows the same measurement fs does.
+	bool gap_trip_auto;
 	double gap_dc_beta;	// EWMA weight for the per-axis phi_dc estimate
 	double t_last;		// time of the previous proc call (s)
 	size_t gap_events;	// stall gaps detected since start

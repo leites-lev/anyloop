@@ -89,5 +89,5 @@ Parameters
   - PDF filename; the `.dat` file takes the same name with the extension
     replaced. [default: "attenuation.pdf"]
 
-See `contrib/attenuation_test.json` for a full example built around the tuned
+See `contrib/legacy/outdated_scripts/attenuation_test.json` for a full example built around the tuned
 tip/tilt steering loop.

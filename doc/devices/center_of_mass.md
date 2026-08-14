@@ -33,29 +33,59 @@ written in order of increasing x coordinate, then increasing y coordinate.
 Parameters
 ----------
 
-- `region_height` (integer) (required)
+- `region_height` (integer or `"auto"`) (required)
   - Height of each region to find the center of mass of. The image will be split
     up into regions of this height, from the top going down. Excess data will be
     ignored. Set this to 0 to set the region height to the logical height of the
     whole image.
-- `region_width` (integer) (required)
+  - In tracked mode, `"auto"` selects the first frame's height, capped at 243
+    pixels to retain the registration timing budget.
+- `region_width` (integer or `"auto"`) (required)
   - Width of each region to find the center of mass of. The image will be split
     up into regions of this width, from left to right. Excess data will be
     ignored. Set this to 0 to set the region width to the logical height of the
     whole image.
+  - In tracked mode, `"auto"` selects the first frame's width, capped at 243
+    pixels to retain the registration timing budget.
 - `thread_count` (integer) (optional)
   - Number of threads to use for the calculation. Set this to 1 (default) for no
     multithreading. Ignored when `track` is set.
+- `threshold` (integer 0-255, or `"auto"`) (optional)
+  - Subtracted from each pixel before the centroid is formed. `"auto"` takes
+    the 95th percentile of the tracking-window border on each frame, avoiding a
+    fixed camera-noise setting. Numeric values retain the original fixed-gate
+    behavior.
 - `track` (boolean) (optional)
   - Confine the sum to a single `region_height` by `region_width` window centred
     on the previous frame's center of mass. Defaults to false.
-- `min_peak` (integer 0-255) (optional)
+- `registration` (boolean) (optional)
+  - In tracking mode, report rigid image translation against a valid keyframe
+    instead of its flux centroid. The original keyframe is retained while enough
+    of its two-axis structure remains visible, avoiding dead-reckoning error from
+    unnecessary keyframe chains. If overlap is exhausted, a new keyframe is
+    installed only from an independently measured, unclipped flux centre.
+    Border-clipped centroids are rejected because lost flux makes them move even
+    under a perfectly rigid translation. A rolling median of valid centroid
+    disagreement supplies a bounded slow absolute correction. The fit includes per-frame intensity
+    gain and background offset, so brightness changes and evolving asymmetric
+    illumination do not become fictitious motion. It assumes only that the
+    tracked pattern has spatial structure in both axes; it does not assume a
+    Gaussian beam, a particular size, or a single spot. Noise is estimated from
+    the keyframe, samples are added until both translation axes reach the same
+    uncertainty target, and each frame derives its robust residual scale from
+    its own median residual. Candidate and scratch storage are derived from the
+    configured window dimensions; there is no preferred ROI size or fixed
+    sample ceiling. There are deliberately no beam-specific sampling, gradient,
+    or outlier parameters. Defaults to false.
+- `min_peak` (integer 0-255, or `"auto"`) (optional)
   - The brightest pixel inside the window must reach this for the frame to count
     as holding the beam; on frames that fall short, the last good center of mass
     is held instead of being updated. Defaults to 0, which disables the test.
     Only meaningful with `track`. Distinct from `threshold`, which merely shapes
     the weighting: this decides whether the frame is used at all. Must be set
-    above `threshold` to reject anything.
+    above `threshold` to reject anything. `"auto"` starts three counts above
+    the border background, then uses 10% of the accepted-frame mean peak above
+    that background.
 - `ref_cut` (float 0-1) (optional)
   - Reject frames holding only part of the beam. Each frame's row profile is
     divided by a learned reference profile; if the dimmest significant row falls
@@ -71,14 +101,18 @@ Parameters
 - `ref_floor` (float, 0 to 1 exclusive) (optional)
   - Rows whose reference is below this fraction of the brightest reference row
     are excluded from the test. Defaults to 0.25.
-- `init_y`, `init_x` (integer) (optional)
+- `init_y`, `init_x` (integer, or both `"auto"`) (optional)
   - Initial window centre, in image pixels. Must be given together. If omitted,
-    the window is acquired from the brightest pixel of the first frame.
-- `reacquire_after` (integer) (optional)
+    or set to `"auto"`, the window is acquired from the brightest pixel of the
+    first usable frame.
+- `reacquire_after` (integer, or `"auto"`) (optional)
   - Consecutive frames of zero signal inside the window before re-acquiring from
-    the brightest pixel of the whole image. Defaults to 10. At that point the
+    the brightest pixel of the whole image. Defaults to 30. At that point the
     device also asserts the `AYLP_BEAM_LOST` pipeline-status flag. A valid
-    centroid clears the flag so downstream control can resume.
+    centroid clears the flag so downstream control can resume. `"auto"` starts
+    at 30 frames and doubles after each unexpectedly long dark interval, so a
+    pulsed source teaches the hold time without embedding its duty cycle in the
+    configuration.
 - `acquire_seconds` (float) (optional)
   - Run with a wide acquisition window for this long before narrowing to
     `region_height`/`region_width`. Defaults to 0 (no acquisition phase). Also

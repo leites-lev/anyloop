@@ -100,6 +100,7 @@ struct aylp_fit_com_data {
 	bool moment_output;		// report robust intensity centroid
 	bool fit_gaussian;		// run Gaussian LM solver; false requires moment_output
 	double moment_cut;		// counts above fitted background used by centroid
+	size_t moment_col_stride;	// sample every Nth column in moment pass
 	double moment_max_y_skew;	// identify rolling-shutter fragments; 0 disables
 	double moment_min_y_width;	// fragment if measured/fitted row width is below this
 	bool moment_reject_inferred;	// publish inferred centre but exclude it from control
@@ -116,9 +117,6 @@ struct aylp_fit_com_data {
 	double *moment_row_template;
 	size_t moment_template_cap, moment_template_n, moment_template_org_y;
 	double moment_template_y;
-	double *moment_image_template;
-	size_t moment_image_cap, moment_template_w, moment_template_org_x;
-	double moment_template_x;
 	size_t reacquire_after;
 	size_t lost;
 

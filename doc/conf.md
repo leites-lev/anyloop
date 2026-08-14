@@ -183,7 +183,7 @@ the `AYLP_SCHEMA_VERSION=0`, meaning unstable). See [filetype.md](filetype.md)
 for the structure of this binary file.
 
 Let's stop there; we've just created a config file similar to
-[conf_example2.json](../contrib/conf_example2.json). As an overview, this config
+[conf_example2.json](../contrib/anyloop-examples/configurations/conf_example2.json). As an overview, this config
 file is conceptually somewhat equivalent to the following Julia code:
 
 ```jl

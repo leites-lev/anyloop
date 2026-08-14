@@ -35,11 +35,25 @@ struct aylp_gain_test_data {
 	bool use_rejected;	// include tracker-held samples (diagnostic only)
 	double volts_per_unit;	// DAC scale of the swept channel, for reporting
 	double pixel_scale;	// px per response unit, for reporting
+	// "pixel_scale": "auto" -- resolve it at init from the frame size the
+	// source publishes (libaylp/timing.h) as (dim - 1) / 2 on the measured
+	// axis, matching how the centroider normalizes. Necessary once the
+	// source sizes its own ROI: a hardcoded scale is then a number nobody
+	// can keep correct, and it silently rescales every px column in the
+	// report.
+	bool pixel_scale_auto;
 	double resp_max;	// |response| past this means the beam is leaving
 	double fit_range;	// extra fit over |cmd - bias| <= this (0 = off)
 	double min_r2;		// refuse report below this fit quality (0 = off)
 	char *output_file;	// PDF path; the .dat is written alongside it
 	char *config;		// free-text note copied into the .dat header
+	// Auto-write: install the measured gain straight into a run config's fsp
+	// stage, so a gain run leaves the controller ready instead of leaving a
+	// number to be copied by hand. Only ever writes the SMALL-SIGNAL slope,
+	// and only when the fit passes the same gates the calibration suite
+	// applies (see gt_autowrite). Null = don't write.
+	char *write_config;	// path to the run config to update
+	int write_axis;		// 0 = y, 1 = x; defaults to index_err
 
 	// output vector; element index_cmd carries the staircase, rest are 0
 	gsl_vector *out;

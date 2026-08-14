@@ -1,0 +1,63 @@
+{
+	"_comment": {
+		"purpose": "High-confidence end-to-end delay measurement for the current 112x112, 400 us exposure, 1457 Hz, 100 Hz / 80% pulsed-beam steering setup. It measures command -> DAC -> FSM -> exposure/readout -> current moment-output fit_com separately on x and y.",
+		"method": "Each axis uses 128 repetitions of a 1023-chip PRBS and rejects flagged dark/partial-light frames. The suite repeats the complete measurement at 0.06, 0.10 and 0.15 V. A usable answer must pass correlation SNR, phase residual, live coverage, per-burst MAD, phase-versus-correlation agreement, and <=0.15-frame amplitude invariance gates.",
+		"why_it_handles_jitter": "The coded drive is uncorrelated with ambient beam motion, so averaging 128 identical bursts suppresses ordinary jitter by sqrt(N). Each burst is also estimated independently: nonstationary jitter appears as MAD and fails the run. The 283-frame quiet interval walks the burst against the 100 Hz light phase, rejected frames are removed rather than held, and 100 Hz harmonics are excluded from the phase fit.",
+		"run": "sudo chrt -f 80 taskset -c 2 python3 contrib/calibration-scripts/tools/run_calibration_suite.py contrib/calibration-scripts/configurations/conf_delay_robust_100hz_80pct.json",
+		"result": "fsm_delay_robust_100hz_80pct.pdf plus six individual PDF/.dat/_traces.dat records. Copy no delay unless all six quality verdicts pass and each axis's three estimates span <=0.15 frame."
+	},
+	"anyloop": "build/anyloop",
+	"anyloop_args": ["-p"],
+	"output_file": "fsm_delay_robust_100hz_80pct.pdf",
+  "roi_refresh": {
+    "park_config": "contrib/calibration-scripts/configurations/conf_parport_dac_park.json",
+    "script": "contrib/calibration-scripts/tools/find_roi.py",
+		"settle_seconds": 0,
+		"probe_gain": 200,
+		"max_attempts": 5,
+		"before_runs": [0, 1, 2],
+		"reference_config": "contrib/legacy/legacy_steering_profiles/steering_par_fsp_100hz_80pct.json",
+		"configs": [
+			"contrib/calibration-scripts/configurations/com_survey.json",
+			"contrib/legacy/legacy_steering_profiles/steering_par_fsp_100hz_80pct.json",
+			"contrib/calibration-scripts/configurations/conf_delay_robust_100hz_80pct_x.json",
+			"contrib/calibration-scripts/configurations/conf_delay_robust_100hz_80pct_y.json"
+		]
+	},
+	"com_survey": {
+		"config": "contrib/calibration-scripts/configurations/com_survey.json",
+		"capture": "data/calibration/run_staging/com_survey.aylp",
+		"analyzer": "build/com_survey",
+		"result": "data/calibration/run_staging/com_survey_result.json",
+		"fs_hz": 2310,
+		"max_exposure_us": 400,
+		"max_rejected_fraction": 0.40,
+		"apply_to": [
+			"contrib/legacy/legacy_steering_profiles/steering_par_fsp_100hz_80pct.json",
+			"contrib/calibration-scripts/configurations/conf_delay_robust_100hz_80pct_x.json",
+			"contrib/calibration-scripts/configurations/conf_delay_robust_100hz_80pct_y.json"
+		],
+		"camera_apply_to": [
+			"contrib/calibration-scripts/configurations/com_survey.json",
+			"contrib/legacy/legacy_steering_profiles/steering_par_fsp_100hz_80pct.json",
+			"contrib/calibration-scripts/configurations/conf_delay_robust_100hz_80pct_x.json",
+			"contrib/calibration-scripts/configurations/conf_delay_robust_100hz_80pct_y.json"
+		]
+	},
+	"runs": [
+		{
+			"name": "x robust delay",
+			"config": "contrib/calibration-scripts/configurations/conf_delay_robust_100hz_80pct_x.json",
+			"pdf": "fsm_delay_robust_100hz_80pct_x.pdf",
+			"prbs_amplitudes": [0.06, 0.10, 0.15],
+			"max_delay_spread_frames": 0.15
+		},
+		{
+			"name": "y robust delay",
+			"config": "contrib/calibration-scripts/configurations/conf_delay_robust_100hz_80pct_y.json",
+			"pdf": "fsm_delay_robust_100hz_80pct_y.pdf",
+			"prbs_amplitudes": [0.06, 0.10, 0.15],
+			"max_delay_spread_frames": 0.15
+		}
+	]
+}

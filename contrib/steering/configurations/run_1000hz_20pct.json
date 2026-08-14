@@ -1,0 +1,289 @@
+{
+	"_1 isolate cores (after every reboot)": "contrib/camera_pcie_hardware/perf_mode.sh --on   [--status to check, --off to revert]",
+	"_2 calibrate for a new beam": "sudo chrt -f 80 taskset -c 2 python3 contrib/calibration-scripts/tools/run_calibration_suite.py contrib/steering/configurations/support/calibrate_1000hz_20pct.json --skip-delay   [writes K into ALL FOUR steering profiles, not just this one -- the plant is physical and they share it. Drop --skip-delay to re-measure the delay too, which updates delay_ident_ms everywhere the same way.]",
+	"_3 run without saving": "sudo python3 contrib/steering/tools/run_steering.py 1000hz_20pct",
+	"_4 run and archive": "contrib/steering/tools/run_steering_recorded.sh --1000 --label <label>",
+	"_why": "doc/steering_runbook.md -- what each step does, what to check in the gain .dat before closing the loop, and what is measured at startup rather than configured. Superseded bench numbers: doc/steering_bench_history.md.",
+	"_waveform": "1000 Hz, 20% duty cycle; camera exposure 1000 us integrates one complete optical cycle; provisional camera rate 1000 Hz",
+	"_comment": {
+		"0": "1000 Hz / 20% duty-cycle beam. The 1000 us exposure integrates one complete modulation period.",
+		"1": "SELF-CONFIGURING as of 2026-08-14. The camera measures its own ROI and gain from a beam probe at startup; center_of_mass measures its threshold, gates and window; fsp measures fs, the transport delay and the delay bias during the startup hold. The only plant numbers left in this file are K (per axis, written by the gain test) and delay_ident_ms. Everything superseded by that lives in doc/steering_bench_history.md.",
+		"2": "WHAT TO RUN: the four numbered keys at the top of this file, in order. In short -- isolate cores, gain test, run. doc/steering_runbook.md has the detail.",
+		"3": "TRANSPORT: parport_dac (DAC81404 over the PCIe parallel card), two channels, no coarse stage. ch0 = y/tip (DACA), ch1 = x/tilt (DACB). Base range +-5 V with event-only autoranging to +-10, offset 0 -- the operating point K is measured at.",
+		"4": "SAFETY: the sign of K is the sign of the command->error path, and a wrong sign is POSITIVE feedback, i.e. runaway. K is stored positive here and the sign lives in parport_dac's `scale`; the gain test's .dat reports the SIGNED slope. Compare it against the last good run after any optics change, and bring the loop up with a long ramp and a small clamp the first time on a new transport.",
+		"5": "Refs: Kulcsar 2006, Petit 2008, Meimon 2010, Correia 2010."
+	},
+	"pipeline": [
+		{
+			"uri": "file:/home/fsl/anyloop_levfork/anyloop/build/asi_source.so",
+			"params": {
+				"camera_name": "ASI290MM",
+				"width": "auto",
+				"height": "auto",
+				"start_x": "auto",
+				"start_y": "auto",
+				"_exposure_1000hz_20pct": "1000 us equals one complete 1000 Hz source period. Each exposure therefore integrates the full 20% on-window instead of sampling individual bright/dark phases. Confirm the camera-reported achieved rate; it will be at most about 1000 Hz and invalidates the 1457 Hz controller timing.",
+				"exposure": 1000,
+				"gain": "auto",
+				"bandwidth": 100,
+				"high_speed": 1,
+				"die_on_stall": 0,
+				"_bandwidth": "100 = full USB bandwidth, and it must stay there: bandwidth costs frame rate close to linearly (measured 2026-07-17: 80 gave 3031 Hz against 100's 3788 at the then-current ROI). Frame rate sets the loop period, so lowering this silently changes the plant. ROI, start position and gain are all measured at startup -- do not pin them unless a probe is failing."
+			}
+		},
+		{
+			"_comment": "raw frame to watch_steering.jl",
+			"uri": "anyloop:udp_sink",
+			"params": {
+				"ip": "127.0.0.1",
+				"port": "64730",
+				"decimation": 64,
+				"downsample": 2
+			}
+		},
+		{
+			"_comment": "[peak, mean, saturated] to watch_error_ts.jl's intensity panel",
+			"_note": "its own port, NOT the 64730 above: two processes bound to one UDP port either refuse to bind or split the datagrams between them, which would starve the heatmap. Intensity is not in the CoM stream -- center_of_mass emits only [y,x] -- so it has to be taken off the image here.",
+			"_undecimated": "NO decimation on purpose. \"reduce\": \"stats\" sends three doubles (24 B) instead of the 61.5 kB frame, so the full loop rate costs ~91 kB/s on loopback and one pass over pixels already hot in cache. Sending the frame itself every iteration would be 233 MB/s at 3788 Hz, which is why this panel was previously stuck at loop_rate/64. Add \"decimation\" back only if you switch to a raw-frame sink.",
+			"uri": "anyloop:udp_sink",
+			"params": {
+				"ip": "127.0.0.1",
+				"port": "64733",
+				"reduce": "stats",
+				"decimation": 64
+			}
+		},
+		{
+			"_choice": "fit_com candidate evaluated 2026-08-13 after finding that this block said fit_com was chosen but still used the center_of_mass URI. It is NOT live pending latency optimization and delay verification. Replayed on the nearest same-night 384x384 raw capture (00-51-27, 1000 frames at 471 Hz): 100-235 Hz RMS fell from 0.963/0.988 px to 0.816/0.854 px and 30-100 Hz from 1.385/1.303 px to 1.106/1.091 px (y/x), with 3.8% rejected.",
+			"_shutter": "NOTE ON THE CHOPPED SOURCE: the center_of_mass this replaces used ref_cut to drop frames the rolling shutter cuts through the source's on-window. fit_com has no ref_cut. It handles those frames through robust (Tukey) reweighting and the min_amplitude gate instead, and the 20.8% rejection above ALREADY INCLUDES them -- that number was measured on these same chopped frames. Watch it if the chop duty changes.",
+			"uri": "anyloop:center_of_mass",
+			"params": {
+				"region_height": "auto",
+				"region_width": "auto",
+				"threshold": "auto",
+				"min_peak": "auto",
+				"track": true,
+				"_registration_status": "ON after full-capture replay validation. Re-measure the complete camera-to-DAC delay before scoring closed-loop rejection; see doc/devices/center_of_mass_registration.md.",
+				"registration": true,
+				"init_y": "auto",
+				"init_x": "auto",
+				"reacquire_after": 1000
+			}
+		},
+		{
+			"_note": "MEASURED ERROR record, not command. Values are normalized over the frame, so pixels = value * (dim - 1) / 2 and dim comes from the ROI the camera measured at startup -- read it off the 'Camera N ready' line rather than assuming.",
+			"uri": "anyloop:file_sink",
+			"params": {
+				"filename": "data/run_staging/steering_par_err_1000hz_20pct.aylp"
+			}
+		},
+		{
+			"_comment": "[y,x] CoM vector to watch_steering.jl",
+			"uri": "anyloop:udp_sink",
+			"params": {
+				"ip": "127.0.0.1",
+				"port": "64731",
+				"decimation": 64
+			}
+		},
+		{
+			"_comment": "[y,x] CoM vector (full rate) to watch_error_ts.jl",
+			"uri": "anyloop:udp_sink",
+			"params": {
+				"ip": "127.0.0.1",
+				"port": "64732",
+				"decimation": 64
+			}
+		},
+		{
+			"_note1": "THE CONTROLLER. Delay is measured from the BODE PHASE, not the departure latency. broad_order=512 and broad_mu=.03 match attenuation11.",
+			"_note2": "K is the SIGNED command->error gain (error units per command unit). Its SIGN (y +, x -) is a property of the optical/mechanical path and does carry over; only the magnitude is invalid. K is also bias-dependent and shifts with every re-centre.",
+			"_note3": "With broad_order>0 the identified full-band observer supplies the command and the AR2 modal estimate is not added, avoiding double cancellation. The modal q/r values remain available for diagnostics and for rollback with broad_order=0.",
+			"_note4": "zeta ~0.002 = sharp line; ~0.3 = broadband hump. adapt_period>0 turns on Petit/Meimon re-identification every 8 s. Set adapt_period 0 for a fixed FSP while first validating on the new transport.",
+			"uri": "anyloop:fsp",
+			"params": {
+				"type": "vector",
+				"units": "V",
+				"_delay_auto": "AUTO as of 2026-08-13. fs, the transport delay and the delay bias are all MEASURED at startup, in one pass during the hold: fsp times its own loop period, the source publishes how long the pipeline takes downstream of it, and the estimate is installed before the loop closes. What is NOT measurable in the loop -- sensor integration and readout, DAC zero-order hold, actuator lag -- comes from delay_ident_ms, the last IDENTIFIED end-to-end delay in MILLISECONDS (2.36 fr at 471 Hz = 5.011 ms), which is the one unit that does not move with the frame rate: the bias is recovered as (delay_ident_ms - measured compute) and converted at the rate actually achieved. That is what lets the auto ROI change the frame rate without invalidating anything here. delay_frac and the numeric fs are inert. RE-RUN THE PRBS DELAY MEASUREMENT (drop --skip-delay from the calibration command at the top) after any optics change, and put its result in delay_ident_ms -- everything else follows from it.",
+				"delay": "auto",
+				"delay_auto_bias": "auto",
+				"_delay_ident_ms": "AUTO: no identification is asserted here. fsp models the sensor path from the exposure the camera publishes: exposure/2 + 2.5 frames. THE 2.5 IS MEASURED, not assumed -- removing the exposure half from this bench's four Bode identifications leaves 2.53-2.67 frames every time (3788 Hz/exp 50us: 2.67, 2.53; 2310 Hz/exp 400us: 2.56, 2.66), i.e. about two frames of camera pipelining plus the half-frame DAC hold. The model reproduces both of those to within 4%. At this profile's 471 Hz / 1000 us it gives 2.74 frames against the 2.36 that was being carried operationally -- and that one is the outlier, not identified but inherited (see doc/steering_bench_history.md). Erring long costs rejection; erring short regenerates. It is still a model: it cannot see actuator lag. Step 2 without --skip-delay measures the delay by PRBS and writes a real number into every profile.",
+				"delay_ident_ms": "auto",
+				"delay_frac": 0.36,
+				"fs": "auto",
+				"gap_trip": "auto",
+				"_latest_successful_2026_08_13": "Controller restored from data/steering_runs/last_night_2026-08-12_to_2026-08-13/02-05-00_beam-1000hz-20pct_controller-nlms512/config_used.json, the preserved 1-ms/471-Hz run that actually tested the 512-tap NLMS on the integrated 1-kHz/20% beam. Waveform-specific camera, COM, sinks, measured gains/delay, and later gap handling remain in this canonical file.",
+				"broad_order": 512,
+				"broad_mu": 0.03,
+				"_broad_mu_init": "NLMS step SCHEDULE, added 2026-07-31 so the live view converges in ~1-2 min instead of ~5-7. Constant mu 0.03 has a nominal time constant of order/(mu*fs) = 4.5 s but a MEASURED one of 125-255 s, because LMS converges each eigenmode in proportion to its own eigenvalue and this disturbance spans ~4.4 decades. PAR-4 (constant 0.03) still had ||w|| growing 20.7% a full 1100 s after close. Replaying PAR-4's own recorded disturbance through the same 512-tap NLMS, scheduling 0.5 -> 0.03 over 60 s gives prediction error 0.062 px at t=20 s against 0.220 px constant (3.6x), and 0.086 vs 0.139 at t=100 s. mu is back to 0.03 by ~t+300 s.\nKNOWN COST, measured on PAR-5 which ran this schedule: the filter converges to a LARGER solution (||w|| 1.95 vs PAR-4's 0.92) and a larger filter injects more HF command noise. PAR-5's x band budget paid for it at 250-400 Hz, 0.0169 -> 0.0475 px (2.8x worse), which cancelled x's 59-71% gain below 30 Hz; y gained 33% net and was clearly worth it. So this is the right setting for a live view and for y, and is NOT free for x. Match whichever run you are comparing against.\nWHICH RUNS USED WHAT: PAR-1..PAR-4 ran a CONSTANT broad_mu 0.03; PAR-5 (2026-07-31) was the first with this schedule (0.5 -> 0.03, tau 60) and is the current reference -- best y on record. So the schedule stays ON by default: it is what PAR-5 and everything after it use. Set broad_mu_init to 0 ONLY to reproduce PAR-1..PAR-4, never merely 'to be safe' -- matching PAR-5 means leaving it on.\nSee the mu sweep in the session notes: on this disturbance the residual keeps falling monotonically to mu~1.0-1.1 because the process is NONSTATIONARY -- lag error dominates misadjustment -- so the textbook 'keep mu small for a quiet filter' does not apply here. Raise further only in steps, watching guard activations and the 400-800 Hz share of command power.",
+				"broad_mu_init": 0.5,
+				"broad_mu_tau": 60.0,
+				"_broad_lp": "RETUNED 2026-07-30 from 11 taps to 5, exactly as the note in this slot said would be needed. The regeneration frequency is fs/(2*(delay+delay_frac)) and the shorter parport delay moved it from ~325 Hz to ~685 Hz (x) / ~722 Hz (y) at the 07-31 delays. An 11-tap boxcar nulls at fs/11 = 344 Hz and is back near unity by 700 Hz, so it would have stopped covering the band it exists to cover. 5 taps null at fs/5 = 758 Hz: -19.2 dB at 685 Hz, -25.6 dB at 722 Hz, and only -0.02 dB of droop at 30 Hz. Re-check whenever the delay is re-fit -- the regen band moves with it. Group delay is (5-1)/2 = 2 frames, folded into the broad horizon automatically, so in-band cancellation timing is unchanged.",
+				"broad_lp": 5,
+				"_broad_freeze_closed": "FALSE on purpose: the observer keeps learning from Smith-reconstructed disturbance during ordinary closed-loop operation rather than applying fixed open-loop weights. It freezes only while transient_active (including the return cross-fade), then resumes automatically. broad_lp, measured K/delay, and the burst guard bound closed-loop identification risk. attenuation_par_fsp.json uses the same policy.",
+				"_wiener_out": "Dumps the LEARNED 512-tap y/x predictors at exit, in the format wiener_file reads. Written from fini, so a Ctrl-C on this open-ended config still saves them -- which is the point here, since this file has no natural end. Reload with wiener_file only into a run with the same broad_order, horizon, broad_lp and drift_tau.",
+				"wiener_out": "data/run_staging/steering_par_weights_1000hz_20pct.dat",
+				"_wiener_trace": "Observer convergence trace every 5 s: ||w|| and the per-sample tap change ||dw||, plus drift and the cumulative guard/transient counts. ||dw|| flattening = converged. Flushed per sample so it survives the Ctrl-C this config always ends with.",
+				"wiener_trace": "data/run_staging/steering_par_wtrace_1000hz_20pct.dat",
+				"wiener_trace_period": 5.0,
+				"broad_freeze_closed": false,
+				"_clamp": "SYMMETRIC, and the per-axis asymmetry is GONE. The asymmetry only existed because the DAC ran at a +2.5 V bias, which put the mirror's symmetric -10..+10 V window off-centre in command units and mirrored it between the axes. The parport_dac block below now runs at offset 0 -- which is where K and the delay were measured, and matching that is mandatory -- so command units are volts about 0 and the window is symmetric for both axes. That is the 'offset 0 with a symmetric clamp' alternative the old _asymmetry_note described.",
+				"_clamp_why_here": "These are fsp's OWN bounds, deliberately not a downstream anyloop:clamp stage. fsp applies the limit to u and feeds THAT SAME value into its internal fractional-delay filter and command ring, so its plant model and the DAC receive identical commands. An asymmetric clamp placed after fsp would cut the command without fsp knowing -- the model would believe it sent +12.5 while the mirror got +10, which is the command-echo mismatch behind the 2026-07-16 310 Hz spiral. A downstream clamp matched EXACTLY to these bounds is fine as a backstop, never tighter.",
+				"_clamp_bringup": "Normal controller authority is +-0.5 V, selected from the 2026-08-12 current-COM replay (2.034 px combined closed RMS from 4.790 px open, with 0.46% y / 0% x clamp occupancy). A separate transient_active envelope permits +-10 V until innovation returns below the learned model threshold; the downstream backstop matches that widest envelope.",
+				"clamp_min": -0.5,
+				"clamp_max": 0.5,
+				"_start_delay": "Commissioning hold: 30000 s keeps the controller parked for the whole run.",
+				"_commissioning_hold": "Actuation is parked because changing exposure 400 -> 1000 us changes frame rate, exposure-centroid timing and delay in frames. After measuring fs, K and full-band delay in this exact mode, replace 30000 with the intended 30 s startup hold.",
+				"start_delay": 25.0,
+				"precenter_delay": 20.0,
+				"precenter_ramp": 10.0,
+				"precenter_clamp": 0.6,
+				"drift_tau": 1.5,
+				"drift_order": 2,
+				"ramp": 5.0,
+				"adapt_period": 8.0,
+				"adapt_df_max": 0.5,
+				"adapt_tau": 5.0,
+				"_guard": "burst guard ON (guard_ratio 4, matching attenuation_par_fsp.json) as of 2026-07-31. It was off because the old 316/344 Hz detector false-tripped on low-frequency leakage; the delay re-fit moved the band to ~686 Hz (x) / ~723 Hz (y), well clear of that, and PAR-4/PAR-5 ran clean at these bounds (0 and 1 activations in 1700 s), which was the condition this note set for turning it back on. It matters more here than in the attenuation harness: this config closes the loop 10 s in, learns closed-loop, and is meant to be left running unattended, so it is the only thing between a wandering K and a latched limit cycle. On a burst the axis authority drops to 0 for guard_hold s, learning freezes, then authority ramps back over guard_ramp s. Recurring activations mean K no longer matches the plant -- re-probe the park position first, since a clipped tracking window looks exactly like a gain error.",
+				"guard_ratio": 4.0,
+				"guard_floor": 0.008,
+				"guard_hold": 0.25,
+				"guard_ramp": 1.0,
+				"guard_tick": 10.0,
+				"trip_error": 0.8,
+				"trip_command": 0.8,
+				"trip_frames": 8,
+				"beam_recover_ramp": 0.5,
+				"y": {
+					"delay": "auto",
+					"delay_frac": 0.36,
+					"K": 0.152174,
+					"r": 1.0,
+					"freqs": [
+						4.71,
+						11.3,
+						21.1,
+						29.6,
+						57.5,
+						20.0
+					],
+					"zeta": [
+						0.002,
+						0.002,
+						0.002,
+						0.002,
+						0.003,
+						0.3
+					],
+					"q": [
+						1e-05,
+						1.5e-05,
+						1.5e-05,
+						1e-05,
+						5e-06,
+						1e-05
+					],
+					"_K": "MEASURED 2026-08-13 by the gain test (step 2 at the top of this file), from the small-signal slope at the operating point. gain_test writes this key itself and leaves an _auto_gain_write note beside it recording the fit and the value it replaced. K is in units normalized over the frame, so it moves with the ROI -- and the ROI is measured at startup. RE-RUN THE GAIN TEST after any optics, focus or beam change. Earlier bode-era values are in doc/steering_bench_history.md."
+				},
+				"x": {
+					"_clamp": "The per-axis clamp override is GONE. It existed only to mirror an off-centre command window around the old +2.5 V bias; at offset 0 the window is symmetric and x inherits the global +-1 unchanged, sign of scale notwithstanding.",
+					"K": 0.261818,
+					"r": 1.0,
+					"freqs": [
+						8.05,
+						12.0,
+						21.7,
+						24.9,
+						57.5,
+						83.3,
+						20.0
+					],
+					"zeta": [
+						0.002,
+						0.002,
+						0.002,
+						0.002,
+						0.003,
+						0.003,
+						0.3
+					],
+					"q": [
+						1e-05,
+						1e-05,
+						2e-05,
+						1.5e-05,
+						5e-06,
+						3e-06,
+						1e-05
+					],
+					"_K": "MEASURED 2026-08-13 by the gain test (step 2 at the top of this file), from the small-signal slope at the operating point. gain_test writes this key itself and leaves an _auto_gain_write note beside it recording the fit and the value it replaced. K is in units normalized over the frame, so it moves with the ROI -- and the ROI is measured at startup. RE-RUN THE GAIN TEST after any optics, focus or beam change. Earlier bode-era values are in doc/steering_bench_history.md."
+				}
+			}
+		},
+		{
+			"_note": "Hardware backstop matches FSP's widest event-only +-10 V envelope. FSP itself retains +-1 V during normal operation and widens only while transient_active; matching the widest possible output here avoids cutting an event command behind FSP's command echo.",
+			"uri": "anyloop:clamp",
+			"params": {
+				"type": "vector",
+				"min": -10,
+				"max": 10
+			}
+		},
+		{
+			"_note": "PARPORT DAC. TWO channels only -- there is no coarse stage: ch0 = y/tip (DACA, +1.0 V/unit) = index 0, ch1 = x/tilt (DACB, -1.0 V/unit) = index 1. The fsp output is plain [y,x] in command units.",
+			"_range": "+-5 bipolar base (DACRANGE code 0x5), offset 0 V, matching conf_bode_par_x/y.json. Resolution is 153 uV/LSB.",
+			"_avss_note": "AVSS MUST BE -12 V here (NOT grounded), because range_max reaches +-10 and the mirror needs negative drive. SLASEH2A 7.5's footroom is 1.25 V at |load| <= 10 mA and 1.5 V at |load| <= 15 mA, so -10 V out needs AVSS <= -11.25 / -11.5 V: -12 V gives 0.75 / 0.50 V of margin, and +12 V the same on AVDD for +10 V. THAT MARGIN IS THIN -- a nominal 12 V rail at -5% is 11.4 V, which fails the 15 mA case outright. Meter both rails UNDER LOAD rather than trusting the label. +-12 also permanently rules out +-12 and +-20 modes (they need +/-13.5 and +/-21.5).",
+			"_avss_tradeoff": "The base and ceiling are bipolar, so AVSS must remain negative; the older unipolar-base characterization tradeoff no longer applies.",
+			"_authority_check": "scale 1 V/V about 0 V: normal authority is +-1 V; detected-event authority is +-10 V until the innovation returns to the known-model envelope.",
+			"_asymmetry_note": "No asymmetric voltage mapping remains: offset is 0 V and both the normal +-1 V and event-only +-10 V windows are symmetric.",
+			"_range_max": "AUTO-RANGING ceiling +-10. Starts at +-5, selects +-6 immediately beyond 5 V and +-10 beyond 6 V, then narrows with hysteresis. +-10 is the widest range the +/-12 V rails permit.",
+			"_range_max_impact": "Normal operation remains limited to +-1 V. Only a detected transient may exceed it and trigger +-6/+-10 autoranging; event authority ends on model agreement or beam loss, not elapsed time.",
+			"_range_max_polarity": "The base, intermediate and ceiling ranges are all bipolar: +-5 -> +-6 -> +-10.",
+			"_range_max_glitch": "A range change still shows ONE intermediate value -- DACRANGE is a resistor gain network (SLASEH2A 8.3.2) and re-interprets the code already in the active register the instant it lands, so for one frame (~6.4 us) the output is neither the old voltage nor the new one. It cannot be made zero (two ranges express the same voltage for one code only where they intersect, i.e. 0 V), but the device picks the write order that minimises it: writing the new code BEFORE DACRANGE makes the output move TOWARD zero and then land exactly on target, instead of the old order's overshoot AWAY from it. 0-5 -> 0-10 at 4.9 V shows 2.45 V rather than 9.8 V. An undershoot toward ground is a far safer transient for a mirror than a 2x overshoot in the direction it was already moving. Holding LDAC does NOT avoid this: SLASEH2A 8.3.3 gates only the DAC DATA registers (buffer -> active), while DACRANGE changes the gain applied to whatever the active register holds. That is also why sync_update forces the old, larger order -- it is off here.",
+			"_range_max_live": "The +-10 ceiling is reachable only during transient_active. There is no time-based release: model agreement ends recovery, while beam loss holds zero until reacquisition.",
+			"_scale_sign": "y positive, x negative -- the same signs the piplate config used (+2/-2), only halved in magnitude. The sign is a property of the optical/mechanical path, not the converter. A wrong sign is POSITIVE feedback: verify with a push test before closing, and fix it here rather than by flipping the sign of K.",
+			"_sync_update": "left OFF. With two driven channels the async skew is one frame, ~6.4 us -- about 2% of the 264 us loop period, and below the platform's own ~6.8 us SCHED_FIFO / ~32 us C-state jitter. sync_update would remove that skew at the cost of a third frame per iteration. Turn it on only if axis cross-coupling shows up that tracks scheduling hiccups rather than the command; see doc/devices/parport_dac.md, Update mode.",
+			"uri": "anyloop:parport_dac",
+			"params": {
+				"pci": "0000:06:00.2",
+				"backend": "mmio",
+				"link": "spi",
+				"channel": [
+					0,
+					1
+				],
+				"index": [
+					0,
+					1
+				],
+				"scale": [
+					1,
+					-1
+				],
+				"offset": [
+					0,
+					0
+				],
+				"range": "+-5",
+				"range_max": "+-10",
+				"_actual_autorange": "Configured ceiling: +-5 -> +-6 beyond 5 V -> +-10 beyond 6 V, with hysteretic narrowing. Only FSP's detected-event envelope can request more than the normal +-1 V limit.",
+				"_verify": "off in the closed loop: verify turns each write into 3 frames (write, read-command, NOP) plus a non-posted status read per bit. Use conf_parport_dac_smoke.json to exercise it before a run, not the loop itself.",
+				"verify": false,
+				"_skip_unchanged": "kept, but expect it to skip far LESS than on the BRIDGEplate: at 153 uV/LSB the command changes the code far more often than 1 mV codes did. That is fine -- a frame is ~6.4 us against a ~264 us period -- but it does mean the DAC sees more traffic than the piplate config did.",
+				"skip_unchanged": false,
+				"sync_update": false,
+				"start_delay": [
+					2.0,
+					2.0
+				],
+				"reset_at_init": true
+			}
+		},
+		{
+			"uri": "anyloop:stop_after_count",
+			"params": {
+				"count": 138415
+			}
+		}
+	]
+}

@@ -1,0 +1,30 @@
+{
+	"pipeline": [
+		{
+			"uri": "file:/home/fsl/anyloop_levfork/anyloop/build/asi_source.so",
+			"params": {
+				"width": "auto",
+				"start_x": "auto",
+				"gain": "auto",
+				"high_speed": 1, "die_on_stall": 0
+			}
+		},
+		{
+			"uri": "anyloop:center_of_mass",
+			"params": {
+				"region_height": "auto",
+				"region_width": "auto",
+				"threshold": "auto",
+				"min_peak": "auto",
+				"track": true,
+				"_registration_status": "ON after full-capture replay validation. Re-measure the complete camera-to-DAC delay before scoring closed-loop rejection; see doc/devices/center_of_mass_registration.md.",
+				"registration": true,
+				"init_y": "auto",
+				"init_x": "auto",
+				"reacquire_after": 1000
+			}
+		},
+		{"uri": "anyloop:file_sink", "params": {"filename": "data/calibration/run_staging/movement_com.aylp"}},
+		{"uri": "anyloop:stop_after_count", "params": {"count": 500}}
+	]
+}

@@ -65,6 +65,7 @@ struct aylp_parport_dac_data {
 	int clk_ctrl_bit;
 	int chan_ctrl_shift;
 	long delay_ns;		// extra dwell after each edge (0 = none)
+	bool flush_config;	// complete one-shot config frames before continuing
 	// readback (spi link only): confirm each write by reading the
 	// register back over SDO/ACK
 	bool verify;

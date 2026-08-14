@@ -6,9 +6,28 @@ build
 notrack
 
 
-# per-run output directories (contrib/newrun.py) -- data, not source
+# per-run output directories (contrib/data-analysis-tools/newrun.py) -- data, not source
 runs
 
 # raw binary run logs -- data, not source (single runs reach 100s of MB,
 # past GitHub's 100 MB/file hard limit). keep these on disk, out of git.
 *.aylp
+
+# experimental data tree -- measurements, calibration sessions, imports and
+# run output (currently ~14 GB, including multi-GB archives). keep it on disk,
+# out of git; only the README index files that explain the layout are tracked.
+data/**
+!data/**/
+!data/**/README.md
+
+# bulk archives and repo bundles, wherever they land
+*.zip
+*.tar
+*.tar.*
+*.tgz
+*.bundle
+
+# editor and interpreter artifacts
+__pycache__/
+*.py[cod]
+.~lock.*#

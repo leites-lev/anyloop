@@ -1,0 +1,13 @@
+{
+	"pipeline": [
+		{"uri": "anyloop:test_source", "params": {
+			"type": "vector", "kind": "constant", "size1": 2, "offset": 0.5
+		}},
+		{"uri": "anyloop:parport_dac", "params": {
+			"backend": "mmio", "pci": "0000:06:00.2", "link": "spi",
+			"channel": [0, 1], "index": [0, 1], "range": "+-5",
+			"scale": [0, 1], "offset": [0, 0], "verify": false
+		}},
+		{"uri": "anyloop:stop_after_count", "params": {"count": 2}}
+	]
+}

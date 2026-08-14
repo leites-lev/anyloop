@@ -577,7 +577,7 @@ int wfs_com_proc(struct aylp_device *self, struct aylp_state *state)
 			// into its own template ratchets the template outward a
 			// little more every frame until the peak pins to the
 			// search boundary. Measured on a byte-identical static
-			// frame with contrib/steering_par_fsp_wfs_com.json, this
+			// frame with contrib/legacy/legacy_steering_profiles/steering_par_fsp_wfs_com.json, this
 			// fabricated ~0.013 px/frame of drift, then failed every
 			// subsequent frame's validity gate, then asserted
 			// AYLP_BEAM_LOST and re-acquired roughly every 34 frames

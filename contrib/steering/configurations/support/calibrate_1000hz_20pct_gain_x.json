@@ -1,0 +1,159 @@
+{
+	"_comment": {
+		"1": "DC GAIN of the x/tilt axis: staircase command -> FSM -> camera -> CoM,",
+		"2": "least-squares line through the settled levels. Same K that",
+		"3": "conf_bode_par_x.json fits as its <=30 Hz plateau, measured directly at",
+		"4": "DC in about 90 s instead of several minutes -- and with the whole",
+		"5": "command range visible at once, so the FSM's compression shows as",
+		"6": "curvature instead of hiding inside a single amplitude.",
+		"7": "WHAT TO COPY OUT: the logged 'slope ... response units per command",
+		"8": "unit' is fsp's x.K directly (fsp works in command units: u = -phi/K).",
+		"9": "The px/V and mV/V figures are for the bench, not for the config.",
+		"10": "It should come out POSITIVE. If it is negative, the scale sign below",
+		"11": "disagrees with the optical path -- fix it HERE and re-run, never by",
+		"12": "flipping the sign of K.",
+		"13": "RANGE: +-0.20 V, NOT the +-1 V the command clamp allows. At the",
+		"14": "CURRENT Kx 0.579 units/V and 31.5 px/unit the beam moves 18.2 px per",
+		"15": "volt, so +-0.20 V is +-3.64 px of travel and the 20 mV step is",
+		"16": "0.364 px. The fresh sigma is about 8.36 px, leaving approximately",
+		"17": "6.4 px of three-sigma travel in the centred 64 px frame; the expected",
+		"18": "x excursion remains inside that margin, while a truncated tail",
+		"19": "at the sweep extremes reads as compression -- exactly the curvature",
+		"20": "this run exists to measure. Re-check this margin after every COM survey.",
+		"20b": "RE-DERIVE span and step whenever the ROI, the optics, the beam width",
+		"20c": "or K change; the arithmetic is in doc/devices/gain_test.md.",
+		"_span_caveat": "THE STEP IS BELOW THE PER-SAMPLE CENTROID NOISE, AND THAT IS FINE, BUT KNOW IT: 0.219 px per step against fit_com's ~0.271 px frame-to-frame noise. What resolves it is averaging -- ~1150 settled samples per level puts the SEM at ~0.008 px, i.e. 4% of a step -- so a level's error bar is small but the RUN IS NOISE-LIMITED IN A WAY THE JULY ONE WAS NOT. Read the reported per-level SEM before trusting the slope. Sizing history, because the old caveat here got it wrong: this file was sized from Kx 4.05 at 32x32, and the correction is NOT just the (dim-1)/2 normalization -- 0.579 units/V at 64x64 is 18.2 px/V against 62.8 px/V in July, so the plant is ~3.4x weaker in px/V as well (conf_bode_par_x.json, _amplitude_2026_08_07). Travel is +-2.19 px, not the +-15 px the header used to claim nor the +-7 px the first correction guessed. NOTE ALSO THAT resp_max 0.9 CANNOT GUARD THIS: 0.9 units is 28 px, while the beam's tails start leaving the frame at ~3.5 px, so the guard never fires before truncation does. Check the px travel printed in the report, not resp_max.",
+		"21": "The +-200 mV span deliberately straddles the operating point (~20 mV)",
+		"22": "and the region where the FSM compressed on the OLD rig (>50 mV), so",
+		"23": "fit_range 0.05 gives the small-signal K (+-0.9 px, 9 levels) and the",
+		"23b": "full-range slope shows any droop. The 2026-08-07 sweeps found the",
+		"23c": "FSM LINEAR over 0.05-0.30 V (+1.8% per halving, consistent with",
+		"23d": "zero), so expect the two to agree; a gap means something changed.",
+		"24": "See conf_gain_par_y.json for the y/tip twin, and conf_prbs_par_x.json",
+		"25": "for the delay half of the same plant."
+	},
+	"pipeline": [
+		{
+			"uri": "file:/home/fsl/anyloop_levfork/anyloop/build/asi_source.so",
+			"params": {
+				"camera_name": "ASI290MM",
+				"width": "auto",
+				"height": "auto",
+				"start_x": "auto",
+				"start_y": "auto",
+				"_roi_note": "ROI, exposure AND gain copied from steering_par_fsp.json as of 2026-08-07 19:42, so this measures the plant the loop actually runs against. start 1076/404 lands the beam at in-frame (32.2, 31.3) against the 31.5 centre, re-probed from a capture AT THE OPERATING ROI. THE 1084/418 THIS FILE CARRIED WAS NEVER A TREE VALUE -- it took x from the bode configs (1084/414) and y from com_survey (1073/418), and both predate the 08-07 refocus. gain stays 0 because at the current source brightness every higher setting saturates the core (measured amp p50/saturation: gain 0 -> 137/1.66%, gain 50 -> 254/3.61%, saturated in over half of all frames). The beam walks several px per hour AND the park offset eats the same margin as the staircase: re-probe with contrib/calibration-scripts/configurations/probe_frame.json AND confirm against a capture at the operating ROI once |park| exceeds ~2 px. On 2026-08-07 a full-sensor probe and a cropped capture disagreed by 10 px in BOTH axes, so never re-derive from find_roi.py alone.",
+				"exposure": 1000,
+				"gain": "auto",
+				"bandwidth": 100,
+				"high_speed": 1,
+				"die_on_stall": 0
+			}
+		},
+		{
+			"_comment": "frame -> UDP viewer, so the beam can be watched walking the staircase",
+			"uri": "anyloop:udp_sink",
+			"params": {
+				"ip": "127.0.0.1",
+				"port": "64730",
+				"decimation": 64
+			}
+		},
+		{
+			"_note": "fit_com, COPIED VERBATIM from steering_par_fsp.json as of 2026-08-07 19:42, so the gain is measured through the same sensor the loop uses -- steering moved from center_of_mass to fit_com on 2026-08-06 and a K measured through the old estimator is a K for a loop that no longer exists. Whole-frame window, so the +-2.19 px staircase never makes the window walk.",
+			"_gates": "sigma_init 9.33 / sigma_min 2.8 / sigma_max 37.3 / min_amplitude 10 / window 0, re-derived 2026-08-07 19:42 after the beam was refocused twice during that session (sigma 6.55 -> 8.2 -> 5.21 -> 9.33 px). THE 08-06 SET THIS FILE USED TO CARRY (sigma_init 6.55, window 55, min_amplitude 21.39) IS RETIRED: 21.39 is 0.1x a 213.9 amplitude the beam has not reached since, and together with camera gain 0 it is exactly the combination that made the tracker reject 300 frames in a row and re-acquire several times a second WITH THE MIRROR PARKED on 2026-08-07 18:03 -- which in a staircase would have frozen whole levels. window 0 = whole frame because at sigma 9.33 a +/-4 sigma window is 75 px, larger than the 64 px frame: a 55 px window clips the beam's own tails, and a clipped tail biases the centroid inward, i.e. straight into the slope. RE-DERIVE with contrib/calibration-scripts/tools/com_survey_run.sh after any refocus or source change, and take the values from steering, not from here.",
+			"_holds": "WHAT THE FROZEN-LEVEL GUARD DOES AND DOES NOT CATCH. gain_test excludes a level whose settled samples are ALL bit-identical, which is what fit_com publishes when every fit in the window fails -- so a fully lost level is still caught, exactly as with center_of_mass. IT DOES NOT CATCH A PARTIALLY HELD LEVEL: the test is `!wmoved`, so one differing sample clears it. With the 2026-08-07 chop (~46 Hz, 24.8% of frames dark, streaks exactly 13 frames) roughly a quarter of each level's ~1150 settled samples are held values. At DC that is nearly harmless -- a 13-frame hold is 6 ms inside a 500 ms settled window, so the held value comes from the SAME level and the mean is unbiased -- but it stops being harmless if the chop lengthens: the 08-06 source had stretches to 201 frames, long enough to carry the previous level's value across a step and pull the mean toward it, flattening K. Check the fit_com rejection rate and the dark-stretch length before trusting a slope. reacquire_after is 300 rather than the old 10 for the same reason as everywhere else in the tree: at 10 those stretches drop acquisition and re-search the window mid-staircase.",
+			"_replaced_2026_08_06_fit_com": "Replaced this 08-06 fit_com block, kept for reversibility: {\"window_height\":55,\"window_width\":55,\"sigma_init\":6.55,\"sigma_min\":1.965,\"sigma_max\":26.2,\"min_amplitude\":21.39,\"max_iter\":4,\"max_us\":25,\"robust_k\":2.5,\"robust_iter\":1,\"fit_slope\":true,\"row_time\":0,\"reacquire_after\":300}",
+			"_replaced_center_of_mass": "Replaced this center_of_mass block, kept for reversibility: {\"_note\":\"tracked 20x20, threshold 5, min_peak 40 -- the steering configuration exactly, so the gain is measured through the same sensor the loop uses. reacquire_after 10 matters more here than in a sweep: a staircase moves the beam 1.5 px per level, and a lost window would otherwise hold its last coordinate for the rest of the run (gain_test does detect that and excludes the level, but re-acquiring is better than losing the tail).\",\"region_height\":20,\"region_width\":20,\"threshold\":5,\"min_peak\":40,\"track\":true,\"reacquire_after\":10}",
+			"uri": "anyloop:center_of_mass",
+			"params": {
+				"region_height": "auto",
+				"region_width": "auto",
+				"threshold": "auto",
+				"min_peak": "auto",
+				"track": true,
+				"_registration_status": "ON after full-capture replay validation. Re-measure the complete camera-to-DAC delay before scoring closed-loop rejection; see doc/devices/center_of_mass_registration.md.",
+				"registration": true,
+				"init_y": "auto",
+				"init_x": "auto",
+				"reacquire_after": 1000
+			}
+		},
+		{
+			"_comment": "CoM -> UDP viewer so the tracked centroid can be overlaid",
+			"uri": "anyloop:udp_sink",
+			"params": {
+				"ip": "127.0.0.1",
+				"port": "64731",
+				"decimation": 64
+			}
+		},
+		{
+			"_note1": "THE TEST. Drives element 1 (x) and watches element 1 of the CoM ([y, x]); y stays at 0 command, i.e. parked at 0 V.",
+			"_note2": "21 levels at 2 s each, traversed up and back down, give 84 s of staircase plus 10 s warmup and 2 s of ramp at each end. settle_frac 0.65 discards the first 35% and scores the final 1.3 s: about 3000 samples per visit at 2310 Hz, with extra time for optical or mechanical settling.",
+			"_updown": "ON: the return staircase measures hysteresis and makes gain separable from linear beam drift. In a one-way rising staircase command and time are collinear, so the device cannot distinguish them. This matters on a rig whose K was measured drifting -39% per hour and whose beam walks several px per hour. Use the reported small-signal slope for fsp.K and check that the separate drift-aware full-range slope agrees; a material disagreement means the bench moved during the run.",
+			"_pixel_scale": "MUST TRACK THE ROI: (dim-1)/2 = 31.5 px per unit at 64x64 (79.5 at the 160x160 on the ASI662MM, 15.5 at the old 32x32). Only affects the px figures in the report, never the slope.",
+			"_volts_per_unit": "the DAC scale of the driven channel, +1.0 for x below (ch1 in the [-1, 1] scale array). Reporting only -- it converts the slope into px/V and mV/px and carries the optical sign.",
+			"_resp_max": "0.9 is left at the device default, but it is NOT the guard that matters here -- 0.9 units is 28 px, while the beam's tails start leaving the frame at ~3.5 px. It only catches a gross runaway. The real check is the px travel printed in the report against the 3.5 px ceiling in the header.",
+			"uri": "anyloop:gain_test",
+			"params": {
+				"index_cmd": 1,
+				"index_err": 1,
+				"out_size": 2,
+				"low": 0.0,
+				"high": 1.0,
+				"step": 0.25,
+				"bias": 0.5,
+				"dwell": 0.25,
+				"settle_frac": 0.5,
+				"warmup": 1.0,
+				"ramp": 0.25,
+				"updown": true,
+				"interleave": true,
+				"cycles": 6,
+				"min_r2": 0.8,
+				"use_rejected": false,
+				"fit_range": 0.5,
+				"resp_max": 0.9,
+				"volts_per_unit": 1.0,
+				"_write": "AUTO-WRITE: on a fit that passes the gates (R2 >= 0.90, small-signal fit over >= 5 levels, uncertainty within 15%, small-signal within 25% of full-span) gain_test installs |small-signal slope| straight into that config's x.K and leaves an _auto_gain_write note there saying what it replaced. A fit that fails any gate writes NOTHING and says why -- the .dat still holds everything, so nothing is lost but the automation. Run under the calibration suite and it does the same thing.",
+				"write_config": "contrib/steering/configurations/run_1000hz_20pct.json",
+				"write_axis": "x",
+				"pixel_scale": "auto",
+				"config": "x/tilt DC gain through the PARPORT DAC (DAC81404, spi link, mmio, +-5 V range, mirror parked at 0 V), no coarse stage, ch0=y parked / ch1=x driven at scale +1.0 V/unit. THIS IS THE CONFIG THE OVERNIGHT 2026-08-13 RUNS TOOK THEIR Kx FROM. Operating point: ASI290MM with auto ROI and auto gain (both measured at startup), exposure 1000 us, bandwidth 100, high-speed, fs_measured 471.17 Hz, thresholded center_of_mass with registration. MEASURED 2026-08-13 00:53:19 (fsm_gain_1000hz_20pct_x.dat): slope -0.261818 +/- 0.009305 units/cmd, R2 0.9962, 30/30 levels, small-signal slope identical over |cmd-bias| <= 0.5, hysteresis 5.8 px. That is the Kx in the run profiles. The old note on this key described a 64x64 / exp 400 / fs 2310 Hz bench that no longer exists; K in normalized units moves with the ROI, so RE-RUN THIS AFTER ANY ROI OR EXPOSURE CHANGE -- the steering profiles use an auto ROI, and a K measured at a different frame size is wrong by the ratio of the two.",
+				"output_file": "fsm_gain_1000hz_20pct_x.pdf"
+			}
+		},
+		{
+			"_note": "PARPORT DAC, wired exactly as steering_par_fsp.json: ch0 = y/tip at scale -1.0, ch1 = x/tilt at scale +1.0, offset 0. THE SIGNS WERE FLIPPED TO [-1, 1] ON 2026-08-07 AND CONFIRMED ON THE BENCH; the [1, -1] this file carried is the pre-flip convention, which is positive feedback on both axes. The scale signs MUST match the steering config -- the whole point of this run is to produce a K for that file, and a different sign convention here produces a K with the wrong sign for it.",
+			"_range": "+-5 fixed. Auto-ranging is deliberately NOT enabled: a mid-sweep range change glitches the output for a frame and steps the quantization. The sweep stays within +-0.20 V. At 153 uV/LSB and 18.2 px/V, quantization is ~130x below the 0.364 px step.",
+			"_avss_note": "AVSS must be -12 V on this rig for the bipolar range, as in every other parport_dac config here.",
+			"uri": "anyloop:parport_dac",
+			"params": {
+				"pci": "0000:06:00.2",
+				"backend": "mmio",
+				"link": "spi",
+				"channel": [
+					0,
+					1
+				],
+				"index": [
+					0,
+					1
+				],
+				"scale": [
+					-1,
+					1
+				],
+				"offset": [
+					0,
+					0
+				],
+				"range": "+-5",
+				"verify": false,
+				"skip_unchanged": false,
+				"sync_update": false,
+				"reset_at_init": true
+			}
+		}
+	]
+}

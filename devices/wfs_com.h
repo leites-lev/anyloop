@@ -70,7 +70,7 @@ struct aylp_wfs_com_data {
 	// The MAGNITUDE of row_time does not matter, only its sign: both the
 	// the old regression's independent variable and evaluation point scaled
 	// by the same factor, which cancelled exactly. This was verified in
-	// contrib/test_wfs_com_rolling_shutter.c -- every positive value
+	// contrib/diagnostics/test_wfs_com_rolling_shutter.c -- every positive value
 	// tested gave identical tracking error). So this is currently a
 	// row-index-space correction, not a genuine physical-time one, and
 	// row_time is retained only as a legacy enable switch. See the docs.

@@ -1,0 +1,379 @@
+{
+  "_comment": {
+    "1": "PARPORT-DAC version of attenuation_fsp.json. A/B harness for the adaptive",
+    "2": "FSP: same camera/CoM/fsp/clamp, with anyloop:attenuation_test inserted",
+    "3": "between the CoM sinks and the fsp so open-vs-closed is apples-to-apples,",
+    "4": "and anyloop:piplate_bridge swapped for anyloop:parport_dac.",
+    "5": "PURPOSE: this is how you find out whether the faster transport actually",
+    "6": "buys rejection. The BRIDGEplate's ~0.5-1.4 ms write was a large share of",
+    "7": "the loop delay, and delay is what caps the FSP's bandwidth -- so a shorter",
+    "8": "tau should push the achievable rejection past where the piplate runs sat.",
+    "9": "COMPARE against attenuation_fsp21 / attenuation_fsp15 (run 15: y 0.073 /",
+    "10": "x 0.168 px) on the shared 500/500/4096 grid.",
+    "11": "TWO channels only -- no coarse stage. ch0 = y/tip, ch1 = x/tilt, range",
+    "12": "+-5 V base with event-only autoranging to +-10 V, mirror parked at 0 V.",
+    "13": "Delay and K are MEASURED, from different sweeps on purpose: delay",
+    "14": "x 2.763 / y 2.624 fr from the newest full 5-300 Hz sweeps (07-31 12:23,",
+    "15": "fsm_bodex_par2 / fsm_bodey_par2); K from the SMALL-SIGNAL plateau,",
+    "16": "Kx 4.05 / Ky 3.646, which is the amplitude the loop actually commands.",
+    "17": "vs PAR-1..3 that is Kx 3.787 -> 4.05 (the one controller change) and",
+    "18": "delay +0.046 fr. Do NOT copy Ky off fsm_bodey_par2's fit line (3.510):",
+    "19": "that is the +-100 mV figure and y compresses ~4% there. Re-fit after any",
+    "20": "re-centre, ROI or exposure change -- K is bias- and ROI-dependent.",
+    "21": "FSL-1: current 112x112 fit_com steering chain, native order-2 drift rejection, and +-0.5 V normal authority.",
+    "22": "use +-10 V until innovation returns to the known-model envelope.",
+    "23": "attenuation_test runs with pass_open=FALSE: fsp gets zeros during the open",
+    "24": "phase and starts closed with zero weights. fsp start_delay 600 =",
+    "25": "attenuation_test start_delay 100 + open_time 500, so the hold spans the",
+    "26": "whole recorded open phase and the 10 s ramp lands inside settle_time."
+  },
+  "pipeline": [
+    {
+      "uri": "file:/home/fsl/anyloop_levfork/anyloop/build/asi_source.so",
+      "params": {
+        "camera_name": "ASI290MM",
+        "width": 112,
+        "height": 112,
+        "_roi_2026_08_07_reprobe2": "REPROBED AGAIN 2026-08-07 19:42 -- the bench is still being worked on and the beam has moved and changed since the 19:20 probe: full-sensor position (446,1115) -> (436,1107), and sigma 5.21 -> 9.33 px (10.12 y / 8.54 x), i.e. back out of focus. start 1076/404 lands it at in-frame (32.2, 31.3) against the 31.5 centre. Gates re-derived to match: sigma_init 9.33, sigma_min/max at 0.3x/4x. SOURCE STATE AT THIS PROBE: 24.8% of frames are dark and saturation reaches 24% of pixels at gain 0 (gain cannot go lower; exposure is not available as a lever because 400 us sets fs 2310 and the delay in FRAMES). The dark frames are a REGULAR ~46 Hz CHOP: 119 streaks in 2.6 s, every one of them 13 frames (6 ms) long. That is well under reacquire_after 300, so they route to fit_com's hold path rather than tripping BEAM_LOST -- but a quarter of all frames carry a held error sample, which the loop will feel.",
+        "_roi_2026_08_07": "REPROBED 2026-08-07 19:20 at the OPERATING ROI (6000-frame 64x64 capture, gain ladder 0/10/25/50). THE BEAM CHANGED DURING THE SESSION -- someone refocused and realigned it: sigma 8.2 -> 5.21 px (37% tighter), peak brightness roughly doubled, and the centroid moved ~10 px in x. That is also the resolution of the 'K drifted 39%/hour' puzzle: the optical path was NOT fixed while K was being measured, and refocusing changes the lever arm at the sensor, so the decline was real rather than an artefact. start 1092/416 puts the beam at in-frame (31.0, 33.3) against the 31.5 centre, on the ASI grid (x multiple of 4, y multiple of 2). Derived from a capture at start 1084/414 that found the beam at (33.04, 41.29). MEASURE THE ROI FROM A CAPTURE AT THE OPERATING ROI, never from a full-sensor probe: on 2026-08-07 the two disagreed by 10 px in both axes, so find_roi.py's full-sensor arithmetic needs confirming against a cropped frame before it is trusted.",
+        "start_x": 1164,
+        "start_y": 398,
+        "_roi_note": "ROI 64x64 at start_x 644 / start_y 318, centring full-sensor (676, 350) -- the beam position every ASI662MM config agreed on, carried over unverified. THE 662 AND THE 290 ARE DIFFERENT SENSORS ON A DIFFERENT MOUNT: re-probe with contrib/calibration-scripts/configurations/probe_frame.json and re-derive with contrib/calibration-scripts/tools/find_roi.py before the first real run. The beam also walks several px per hour, so re-derive again once |park| exceeds ~2 px.",
+        "_exposure": "400 as of 2026-08-06, matching every other live config. Exposure smear is part of the loop delay -- about exposure/2, so 200 us, which at any plausible 64x64 frame rate is a LARGER fraction of a frame than the 0.12 frame at 32 us or 0.19 at 50 us this loop was tuned around. The delay in the fsp block was fit through a chain running at 50 us on a 32x32 ROI and has been wrong ever since; at 400 us it is wrong by more. Re-bode before trusting delay, K or fs here.",
+        "exposure": 400,
+        "_gain_2026_08_07": "gain must now be 0: at the current source brightness every higher setting saturates the core. Measured amp p5/p50/p95 and saturation p99: gain 0 -> 18/137/255, 1.66%; gain 10 -> 4/198/255, 2.12%; gain 25 -> 4/242/255, 2.32%; gain 50 -> 14/254/255, 3.61%. At gain 50 the beam is saturated in over half of all frames, against p50 109 at the same gain at 18:07. Exposure is NOT available as the lever -- 400 us sets fs 2310 and therefore the delay in FRAMES.",
+        "gain": 120,
+        "bandwidth": 100,
+        "high_speed": 1,
+        "die_on_stall": 0,
+        "stall_timeout_ms": 50
+      }
+    },
+    {
+      "_comment": "raw frame to watch_steering.jl",
+      "uri": "anyloop:udp_sink",
+      "params": {
+        "ip": "127.0.0.1",
+        "port": "64730",
+        "decimation": 64
+      }
+    },
+    {
+      "_comment": "[peak, mean, saturated] to watch_error_ts.jl's intensity panel",
+      "_note": "its own port, NOT the 64730 above: two processes bound to one UDP port either refuse to bind or split the datagrams between them, which would starve the heatmap. Intensity is not in the CoM stream -- center_of_mass emits only [y,x] -- so it has to be taken off the image here.",
+      "_undecimated": "NO decimation on purpose. \"reduce\": \"stats\" sends three doubles (24 B) instead of the 61.5 kB frame, so the full loop rate costs ~91 kB/s on loopback. Add \"decimation\" back only if you switch to a raw-frame sink.",
+      "_cost": "this is the QUOTABLE-MEASUREMENT config, so weigh the extra per-iteration work: one pass over the frame (~61 kB, already hot in cache, ~1-2 us) plus a 64-byte sendto, EVERY iteration rather than every 64th. That is small against a 264 us period but it is not nothing, and measured runs before 2026-08-02 did not have it at all. Delete this stanza if a run has to be strictly comparable to those.",
+      "uri": "anyloop:udp_sink",
+      "params": {
+        "ip": "127.0.0.1",
+        "port": "64733",
+        "reduce": "stats"
+      }
+    },
+    {
+      "_choice": "fit_com CHOSEN 2026-08-06 on measured data, re-confirmed on the stable centred beam. Same 60 s capture: fit_com hf 0.271 px / 11.4% rejected, wfs_com hf 0.814 / 79.9%, thresholded center_of_mass hf 0.639 / 22.9%. hf is the frame-to-frame difference, i.e. what the loop must reject -- fit_com is 3x quieter than wfs_com. wfs_com's rejection is NOT a geometry error: re-run at 3x3 and 5x5 grids with 6/8/14 px cells it stayed 82-88%, and only reached 35.9% with every quality gate disabled. Cost p50 17.4 us / p99 27.0 us against a 433 us frame period. The 11.4% rejection is the 4.7 Hz source modulation, not the tracker -- see com_survey.json.",
+      "_provenance": "MEASURED 2026-08-06 by contrib/calibration-scripts/tools/com_survey_run.sh over a 60 s / 138600-frame capture at 64x64, exp 400, gain 0, fs 2310 Hz, with the ROI auto-centred first (find_roi put it at 1088/406, beam landing at (28.39, 29.95) against a 31.5 centre -- the residual is the 4-px/2-px ASI ROI grid, not an error): beam sigma 6.55 px / FWHM 15.43, amplitude 213.9 over background 1.74, saturation 2.68%. window 55 = +/-4 sigma; sigma_min/max and min_amplitude are 0.3x/4x/0.1x of measured, which is how com_survey derives its own suggestions. RE-RUN contrib/calibration-scripts/tools/com_survey_run.sh AND RE-DERIVE after any refocus or source change -- these are beam properties. An EARLIER set (sigma 6.31, window 53) was taken while the beam was being moved by hand and is superseded.",
+      "_shutter": "NOTE ON THE CHOPPED SOURCE: the center_of_mass this replaces used ref_cut to drop frames the rolling shutter cuts through the source's on-window. fit_com has no ref_cut. It handles those frames through robust (Tukey) reweighting and the min_amplitude gate instead, and the 20.8% rejection above ALREADY INCLUDES them -- that number was measured on these same chopped frames. Watch it if the chop duty changes.",
+      "_replaced": "Replaced this center_of_mass block, kept for reversibility: {\"region_height\":20,\"region_width\":20,\"_threshold\":\"5 as of 2026-07-30: the camera is now shrouded and the background floor is low, so the high threshold that used to be needed to reject stray light costs signal for nothing. Matches conf_bode_par_x/y.json and steering_par_fsp.json.\",\"threshold\":5,\"_min_peak\":\"hold the centroid instead of updating it when no beam is in frame; 40 against a measured beamless window peak of 5-6 and a saturating beam -- see steering_tuned.json for the full derivation\",\"min_peak\":40,\"track\":true,\"_beam_loss\":\"Ten consecutive frames with no above-threshold signal assert AYLP_BEAM_LOST. FSP holds zero only while it remains set and resumes after reacquisition.\",\"reacquire_after\":10}",
+      "uri": "anyloop:fit_com",
+      "params": {
+        "_budget": "max_us 25 is ABOVE the measured p99 of 27.2 us only just -- expect the guard to bite on the slowest few percent of frames, truncating those fits to fewer LM iterations. The survey's numbers were taken at the 10 us DEFAULT, so 25 lets the fit converge FURTHER than what was benchmarked, not less. Set 0 to remove the cap entirely, at the cost of a variable measurement latency that a fixed-delay model downstream will read as a wobbling loop delay.",
+        "_gates_2026_08_07": "fit_com re-derived for the reprobed beam: sigma_init 5.21 (measured 5.31 y / 5.11 x over the bright unsaturated quartile), sigma_min/max at 0.3x/4x, min_amplitude 10 (measured amp p5 = 18, and a 10 gate rejects 2.1% of frames -- the genuinely dark ones). The old 21.39 was 0.1x a 213.9 amplitude the beam has not reached all day, and it is what made the tracker re-acquire several times a second WITH THE MIRROR PARKED on 2026-08-07 18:03. window stays 0 (whole frame) BECAUSE THE DELAY WAS MEASURED THAT WAY -- changing the window changes fit_com's compute cost, which sits inside the measured delay.",
+        "window_height": 112,
+        "window_width": 112,
+        "sigma_init": 11.799,
+        "sigma_min": 3.54,
+        "sigma_max": 47.197,
+        "min_amplitude": 5.0,
+        "max_step": 8.0,
+        "_reacquire": "reacquire_after 300 frames = 130 ms at 2310 Hz, NOT the 10 that com_survey's benchmark harness uses. This is the difference between the two failure paths downstream. A rejected frame (fsp.c:2141) holds the actuator command and advances the delay and modal state without training the observer -- correct for a frame the beam was briefly too dim to fit. BEAM_LOST (fsp.c:1960) zeroes the output, calls fsp_reset_after_beam_loss (xhat, the ucmd delay ring, plant and drift states, all transient state) and ramps back over beam_recover_ramp 0.5 s. MEASURED 2026-08-06: the 4.70 Hz source modulation produces 6 dark stretches per second, median 3 frames but p90 49 and max 201 (87 ms). At reacquire_after 10 every stretch over 4.3 ms takes the catastrophic path -- about 9 full observer resets per second, each starting a 0.5 s recovery that the next reset interrupts, so the loop never converges and the log fills with 'fit failed'. 300 sits above the longest observed stretch, so modulation routes to the hold path and BEAM_LOST means the beam is actually gone. Cost: a genuine loss takes 130 ms to declare instead of 4.3 ms. RE-DERIVE THIS from the dark-stretch distribution if the source changes; on a CW source it can go back down.",
+        "_iter_2026_08_07": "max_iter 4 -> 12 and max_us 25 -> 300. At 4 iterations a warm-started LM does not converge on a fast-moving beam: it under-reports 200 Hz motion by 32% and inflates the fitted delay. 300 us bounds the pathological tail (observed max 273 us) without biting on normal frames, against a 433 us frame period, which keeps the loop delay from jittering the way an uncapped fit does (0.002-0.27 ms per frame = ~0.6 frames of delay jitter that a fixed-delay model cannot represent). The sweep that produced the delay ran UNCAPPED at 0.174 ms/frame mean, so this cap makes the true delay slightly SHORTER than configured, which is the safe direction.",
+        "max_iter": 12,
+        "max_us": 300,
+        "robust_k": 2.5,
+        "robust_iter": 1,
+        "fit_slope": false,
+        "moment_output": true,
+				"fit_gaussian": false,
+        "moment_cut": 5.0,
+        "pwm_period_frames": 14.57,
+        "pwm_dark_flux": 100,
+        "pwm_bright_flux": 1000,
+        "pwm_full_start": 4,
+        "pwm_full_end_margin": 2,
+        "row_time": 0,
+        "reacquire_after": 300
+      }
+    },
+    {
+      "_comment": "[y,x] CoM vector to watch_steering.jl",
+      "uri": "anyloop:udp_sink",
+      "params": {
+        "ip": "127.0.0.1",
+        "port": "64731",
+        "decimation": 64
+      }
+    },
+    {
+      "_comment": "[y,x] CoM vector (full rate) to watch_error_ts.jl",
+      "_watcher_units": "watch_error_ts.jl needs no -p flag at this ROI: its default is pixel=64 (watch_error_ts.jl:52), which is exactly the 64x64 this file now runs at, for the correct PIX_PER_UNIT=(64-1)/2=31.5. Pass -p explicitly the moment the ROI changes again -- it was -p 32 through PAR-7 and -p 160 on the ASI662MM. Its --com std is also CUMULATIVE from process start, so a watcher left running through the open phase reports a figure dominated by open-loop motion, not the closed phase. attenuation_test's pixel_scale 79.5 is the correct one.",
+      "uri": "anyloop:udp_sink",
+      "params": {
+        "ip": "127.0.0.1",
+        "port": "64732"
+      }
+    },
+    {
+      "_note": "Full-rate [y,x] ERROR record, BEFORE fsp -- the measured error, not the command. Two reasons it is here from PAR-3 on: (1) attenuation_test buffers the open phase in RAM and only writes its .dat/PDF at ATTEN_PHASE_DONE (attenuation_test.c:617 frees the buffers on fini without flushing), so any abort throws the whole 500 s open measurement away -- this file makes a partial run recoverable. (2) It is an independent check on the reported RMS: the time-domain std of the closed segment must reproduce the '# stat' line in the .dat once scaled by 31.5 px/unit. ~260 MB for the 1220 s run.",
+      "uri": "anyloop:file_sink",
+      "params": {
+        "filename": "atten_par_err_fsl_1.aylp"
+      }
+    },
+    {
+      "_note1": "THE TEST. Sits after the CoM sinks (watchers see the true error) and before the FSP. pass_open=FALSE here: the open phase feeds the FSP zeros, so it starts the closed phase with zero weights and learns live (see the _pass_open note). Either way the DAC parks at 0 V for the whole open phase and the recorded open PSD is identical -- only fsp's internal view of the error changes. settle_time covers FSP/NLMS/adapt re-convergence after closure. pixel_scale 31.5 = (64-1)/2 for the 64x64 ROI (79.5 at the 160x160 on the ASI662MM, 15.5 at the 32x32 through PAR-7). 500/500 @ nfft 4096 matches attenuation_fsp15/21 for a SHARED frequency grid -> directly comparable closed RMS.",
+      "uri": "anyloop:attenuation_test",
+      "params": {
+        "start_delay": 100.0,
+        "open_time": 500.0,
+        "_settle_time": "600, RAISED from 120 on 2026-07-30. Run 3's error record showed the closed-loop residual still falling 500 s after closure: exponential fits give asymptote 0.0404 px with tau 255 s (y) and 0.0855 px with tau 125 s (x), against 500 s window averages of 0.0565 and 0.0891. The open phase was flat to slightly WORSENING over the same period, so this is the observer converging, not the environment calming. tau is 30-60x the nominal NLMS constant order/(mu*fs) = 4.5 s -- the classic LMS result that the weakest eigenmodes converge in proportion to the eigenvalue spread of the input, and this disturbance spectrum spans ~4.4 decades. At 120 s the scored window was mostly transient and understated y by 40%. 600 s is ~2.4 tau on y. Total run is now 100+500+600+500 = 1700 s.",
+        "settle_time": 600.0,
+        "closed_time": 500.0,
+        "_pass_open": "FALSE for this first par run: the open phase feeds fsp zeros, so the FIR never sees open-loop data and starts the closed phase with zero weights, learning live -- the pre-2026-07-27 style. The open MEASUREMENT is unaffected: attenuation_test.c records the sample before zeroing the vector, so the open PSD is identical either way.",
+        "pass_open": false,
+        "nfft": 4096,
+        "labels": "y,x",
+        "_pixel_scale": "MUST TRACK THE ROI. center_of_mass emits image-normalized coordinates, so one unit is (dim-1)/2 pixels: 31.5 at the 64x64 this file runs at now, 79.5 at the 160x160 it ran at on the ASI662MM, 15.5 at the 32x32 of PAR-1..PAR-7. Every RMS in the .dat and the PDF scales directly with this number, so a stale value mis-reports the result and nothing else complains.",
+        "pixel_scale": 55.5,
+        "config": "FSL-1: current 112x112 fit_com chain; native order-2 position/rate drift rejection; normal FSP authority +-0.5 V; 100/500/600/500 s A/B timeline.",
+        "_config_correction_2026_08_01": "The historical config narrative above says the transient path and autoranging are off. Current settings below supersede those sentences: recovery is enabled after a 450 s post-close warm-up, normal authority is +-1 V, event authority is +-10 V until model agreement, beam loss holds zero until reacquisition, and the FIR learns continuously from closed-loop data.",
+        "output_file": "attenuation_par_fsp_fsl_1.pdf"
+      }
+    },
+    {
+      "_delay_warning": "RE-FIT 2026-07-31 from fsm_bodex_par2.dat / fsm_bodey_par2.dat (12:23 and 12:16): x 2.763 fr (global), y 2.624 fr (override), both full-band 5-300 Hz phase slopes with the one hidden bode frame added. They replaced 2.717 / 2.577 from 07-30, which is what PAR-1..3 ran; the +0.046 fr shift is inside the fits' own phase residuals, so the two sweeps agree and the change is cosmetic. The newer/longer value is kept anyway because an over-modeled delay merely costs rejection while UNDER-modeling is the documented failure mode (2026-07-16: under-modeled by 1.6-2.3 fr, spiraled at ~310 Hz). Before that, piplate-era 6+0.0 / 5+0.828 -- the parport DAC removed ~3.1 frames.\nUNLIKE K, delay must NEVER be taken from a *_small*.dat header: those sweeps span 10-30 Hz, where the plant accumulates ~7 deg of phase, so their loop_frames outputs (1.09-2.02 fr, scattered run to run) are fitting noise. Only a full 5-300 Hz sweep fits tau. Re-fit if the ROI, exposure or bandwidth moves the frame rate -- delay in FRAMES tracks fs even when the delay in ms does not.",
+      "_note1": "THE CONTROLLER. Delay is measured from the BODE PHASE, not the departure latency: departure latency under-modeled the delay by 1.6-2.3 frames and left a near-unity command-echo residual around 300 Hz. broad_order=512 and broad_mu=.03 match attenuation11.",
+      "_K_warning": "K IS THE SMALL-SIGNAL PLATEAU, never the raw fit line of a +-100 mV sweep. PAR-4 runs Kx 4.05 / Ky 3.646 against PAR-1..3's 3.787 / 3.636 -- the Kx move is the one controller change here. The loop commands ~6 mV rms / ~20 mV peak; a +-100 mV sweep drives an order of magnitude harder and the FSM compresses ~4% there.\nEvidence, per axis, per amplitude (<=30 Hz plateau):\n  x 07-30: 100 mV 3.815 / 50 mV 3.971 (ratio 1.041)  -- compressing\n  x 07-31: 100 mV 4.050 / 50 mV 4.092 / 20 mV 4.056 / 8 mV 4.020 (ratio 1.003) -- flat\n  y 07-30: 100 mV 3.664 / 50 mV 3.655 (ratio 0.998)  -- flat\n  y 07-31: 100 mV 3.523 / 50 mV 3.662 / 20 mV 3.646 / 8 mV 3.668 (ratio 1.039) -- compressing\nSo compression is real but SWAPS AXES between days: the raw 07-31 fit lines read Kx 4.050 (right) and Ky 3.510 (3.7% low, would have under-modeled y). Always run the small sweep, or at minimum read the half-amplitude second pass of the full one.\nWHY IT MATTERS FOR PAR-4: since u = -phi_hat/K, PAR-1..3's Kx 3.787 against a true ~4.05 was a ~7% OVER-command on x and nothing on y -- exactly the asymmetry PAR-3 reported (x disturbance 28% above the open-phase error, x closed-window bound above the open-window one, y clean). y is the control: if PAR-4 improves x and leaves y alone, that is the K fix and not the environment.\nCAVEAT: the small-signal gain itself wanders a few percent over an hour. Seven +-20 mV x sweeps read 4.08, 3.97, 4.35, 4.35, 4.36, 4.07, 4.06, each file internally consistent across both of its passes, so it is the plant/beam moving, not noise; y drifted 3.706 -> 3.695 -> 3.645 -> 3.646 the same morning. 4.05 is x's most recent value from BOTH the full and small sweeps. If PAR-4 shows guard trips or ~690 Hz command activity, move x UP toward the 4.19 seven-run mean, never below 4.05. In physical units 4.05 = 62.8 px/V = 15.9 mV/px. Re-measure after any re-centre, ROI change or exposure change.",
+      "_note2": "K is the SIGNED command->error gain (error units per command unit). Its SIGN (y +, x -) belongs to the optical/mechanical path and carries over; only the magnitude is invalid. K is also bias-dependent.",
+      "_note3": "With broad_order>0 the identified full-band observer supplies the command and the AR2 modal estimate is not added, avoiding double cancellation.",
+      "_note4": "zeta ~0.002 = sharp line; ~0.3 = broadband hump. adapt_period>0 turns on Petit/Meimon re-identification every 8 s.",
+      "uri": "anyloop:fsp",
+      "params": {
+        "type": "vector",
+        "units": "V",
+        "_delay": "RE-FIT 2026-07-31 12:23 through this transport: global/x 2+0.763 = 2.763 fr (fsm_bodex_par2.dat, tau 0.4654 ms at fs 3788.25, hidden bode frame included), y override 2+0.624 below. PAR-1..3 ran 2.717 / 2.577 from the 07-30 sweeps; the +0.046 / +0.047 fr shift is ~1.3 deg at 300 Hz against 1.71 / 2.69 deg phase residuals, so the two independent sweeps agree and this is a re-confirmation. Was the piplate-era 6+0.0 -- the parport DAC removed ~3.1 frames, which is the whole reason to expect better rejection here.",
+        "_delay_2026_08_07": "MEASURED 2026-08-07 18:34-18:56 on the ASI290MM at 64x64 / exp 400 / gain 50, ROI 1084/414, fs_measured 2309.9 Hz, parport DAC, from fsm_bodex_par5/par6.dat and fsm_bodey_par5.dat. Sweeps 5-200 Hz, 60 pts, 49 cycles in 7 segments; K is the <=30 Hz weighted plateau and the delay is the full-band weighted phase slope, both refit offline after excluding sweep points whose integration window overlapped a logged beam outage (the bench was being worked on -- 9 to 1198 outage events per run). x delay = 3.018 fr (tau 0.8735 ms, phase resid 5.82 deg). DELAY IS COUPLED TO fit_com's SETTINGS, not just the transport. fit_com runs between the frame arriving and the command being written, so ITS COMPUTE TIME IS INSIDE THIS NUMBER. These delays were measured with max_iter 12 / max_us 0, profiling 0.1736 ms/frame (x) and 0.1233 ms/frame (y). THIS FILE STILL RUNS max_iter 4 / max_us 25, which profiled 0.045 ms/frame -- about 0.30 frames cheaper. Either match the sweep's fit_com settings here (preferred: at 4 iterations the fit under-reports fast beam motion by 32% at 200 Hz, so it costs rejection as well as delay accuracy), or subtract the profiled mean cost difference from the delay above. Do not mix. A bounded max_us ~200 us with max_iter 12 is the compromise for a loop: fit_com's per-frame cost ranges 0.002-0.27 ms uncapped, i.e. the loop delay jitters by up to ~0.6 frames, which a fixed-delay model cannot represent. RE-CHECK broad_lp AGAINST THIS DELAY -- it was not changed here. Regeneration sits at fs/(2*(delay+delay_frac)) = 2310/(2*3.018) = 383 Hz, where the 5-tap boxcar (null at fs/5 = 462 Hz) gives only -13.7 dB, against the -19.2 dB it gave at the fs 3788 / 2.763 fr it was tuned for. Re-derive it. CAMERA AND TRACKER IN THIS FILE ARE STALE AND WILL LOSE THE BEAM. It still has start_x/start_y 1088/416, gain 0 and min_amplitude 21.39 -- exactly the combination that failed on 2026-08-07 18:03, where the chopped source's dim phase fell under the gate and fit_com re-acquired several times a second WITH THE MIRROR PARKED. The sweep that produced the numbers above ran ROI 1084/414, gain 50, min_amplitude 10, sigma_init 8.2, window 0. Bring those over before closing the loop; see conf_bode_par_x.json's dated notes.",
+        "delay": 2,
+        "delay_frac": 0.298,
+        "_fs": "3788 inherited from the piplate era. The camera should still be the bottleneck, but the DAC no longer adds to the loop period -- confirm the achieved rate and update fs (and the bode_par sample_rate) if it has moved, since delay in FRAMES depends on it.",
+        "_fs_2026_08_07": "fs 3788 -> 2310. 3788 was the 32x32/exp50 rate; this file runs 64x64/exp400, measured 2309.9 Hz by both sweeps. Delay in FRAMES is meaningless against the wrong fs, so this moves with the delay above.",
+        "fs": 1457,
+        "_broad_order": "RUN 2 CHANGE, and the only one that can move the number: 512/0.03 -> 128/0.005, the attenuation12 operating point. doc/devices/fsp.md states outright that 'attenuation11 showed that 512 taps at 0.03 preserved more high-frequency coefficient noise than the additional prediction accuracy justified' -- and run 1 used the superseded attenuation11 setting. That HF coefficient noise is the leading suspect for run 1's two weak spots: only 1.5x rejection over 60-150 Hz (now the largest closed contributor on both axes) and a 3.4-3.5x waterbed at 195-250 Hz. Cost is convergence time: order/(mu*fs) goes 4.5 s -> 6.8 s, still ~18 time constants inside the 120 s settle. Rollback: 512 / 0.03.",
+        "broad_order": 0,
+        "broad_mu": 0.03,
+        "_broad_mu_init": "NEW for PAR-5, the convergence fix. PAR-4's trace showed the FIR still growing 20.7% (x) and 7.5% (y) THROUGH the scored window, i.e. 600 s of settle was still not enough and the run scored a controller that had not stopped moving. Cause is the classic LMS one: convergence per eigenmode is proportional to that mode's eigenvalue, and this disturbance spans ~4.4 decades, so the nominal constant order/(mu*fs) = 4.5 s becomes a measured 125-255 s. A single mu cannot fix it -- large converges fast but leaves a mu/(2-mu) misadjustment floor, small is quiet but slow -- so the step is now SCHEDULED: 0.5 at loop close decaying to 0.03 with a 60 s constant. Verified by replaying PAR-4's own open-phase record through the same 512-tap NLMS: prediction error at t=20 s is 0.062 px scheduled against 0.220 px constant (3.6x), at t=100 s 0.086 vs 0.139, and by t>=300 s the two are IDENTICAL to within noise. That last point is what makes it safe here: mu affects the path and the steady-state misadjustment, not the optimum, and mu is back to 0.03 by t=900 s -- 300 s before the scored window opens at 1200 s. The timeline is deliberately unchanged from PAR-4 (100/500/600/500) so the scored windows stay directly comparable; if the trace confirms early convergence, settle_time can be cut in PAR-6.\nWHICH RUNS USED WHAT: PAR-1..PAR-4 ran a CONSTANT broad_mu 0.03; PAR-5 (2026-07-31) was the first with this schedule (0.5 -> 0.03, tau 60) and is the current reference -- best y on record. So the schedule stays ON by default: it is what PAR-5 and everything after it use. Set broad_mu_init to 0 ONLY to reproduce PAR-1..PAR-4, never merely 'to be safe' -- matching PAR-5 means leaving it on.\nMEASURED COST on PAR-5: the schedule leaves the filter LARGER (||w|| 1.95 vs PAR-4's 0.92) and a larger filter injects more HF command noise. PAR-5's x paid for it at 250-400 Hz (0.0169 -> 0.0475 px, 2.8x worse), which cancelled x's 59-71% gain below 30 Hz; y gained 33% net. So it is not a pure path-only change -- it moves the endpoint, which is exactly why the setting has to match across any two runs being compared.",
+        "broad_mu_init": 0.5,
+        "broad_mu_tau": 60.0,
+        "_broad_lp": "5 taps. REVERTED 2026-07-31 from the 9 that PAR-6 tested. KEEP IT AT 5 unless you are deliberately re-opening this. What 9 was for: PAR-5's converged x predictor ran mean |W| 1.03 across 200-350 Hz against y's 0.44 (||w|| 0.915 vs 0.417), i.e. near-unity observer gain on content that is pure sensor floor (x's OPEN loop above 100 Hz is only 0.021 px), so it was identifying its own command echo and injecting broadband noise -- x's Bode integral int ln|S| df was +847 against y's -46, positive in every band above 100 Hz. 9 taps give -7.6 dB at 280 Hz against 5's -2.0 dB.\nPAR-6 RESULT, on windows cleaned of two mount bumps (see the config note): it WORKS where it was aimed and LOSES more elsewhere. Rejection x 100-150 Hz +82%, 250-400 Hz +48%; but 1-30 Hz x -41% / y -19%, and 1-30 Hz is where nearly all the power is. Net total rejection y -2%, x +10% -- not worth the complexity. The mechanism of the loss is NOT mysterious: broad_gd goes (9-1)/2 = 4 frames against 5's 2, and that lands directly in the prediction horizon (bd = delay + broad_gd), 4.76 -> 6.76 frames.\nDO NOT TRY TO ESCAPE THAT WITH A CLEVERER FILTER -- it was checked and the trade is fundamental. A minimum-phase version of the boxcar-9 magnitude has the IDENTICAL 4.00 frame passband group delay (the boxcar's zeros sit on the unit circle, so it is already the minimum-delay filter for its own magnitude), and Butterworth-shaped magnitudes trade at the same rate (2nd-order fc 200 Hz: gd 3.57 fr for -6.9 dB at 280, vs boxcar 9's 4.00 fr for -7.6 dB). Ridge/leakage on the NLMS update was also checked and does the WRONG thing: it shrinks the large low-frequency directions and leaves |W| at 200-400 Hz essentially untouched (0.423 -> 0.411 as the ridge goes 0 -> 3% of tr(R)/P), because in the CLOSED-loop input the HF is well-excited, not low-eigenvalue.\nWHERE THE ACTUAL FIX LIVES, and why it costs no horizon: solve the Wiener predictor on PAR-5's OWN closed-loop spectrum and the optimum wants |W| = 0.42 across 200-400 Hz -- the live filter drifted to 1.03. The unity HF gain is therefore NOT what the statistics justify; it is a closed-loop equilibrium sustained by ongoing adaptation, the same failure mode already documented for kalman gain < 1. That means ~-7.8 dB is available at 200-400 Hz -- MORE than boxcar 9's -5.6 dB -- for free, by stopping the filter from drifting there: broad_freeze_closed true (it is false in this file), ideally with the weights identified on open-loop data via pass_open true or a wiener_file, and/or a lower per-axis broad_mu on x. Those are the next things to try, NOT a longer prefilter. Corroborating evidence that adaptation never settles: ||w|| reached y 3.512 / x 2.766 in PAR-6 against PAR-4's y 0.417 / x 0.915, with ||dw|| still nonzero at the end of the run.",
+        "_broad_lp_2026_08_07": "broad_lp 5 -> 7, re-derived for the new delay. The parasitic-loop regeneration frequency is fs/(2*(delay+delay_frac)), which the fs 3788 / 2.763 fr of the parport-era tuning put at ~685 Hz, where a 5-tap boxcar (null at fs/5) gave -19.2 dB. At fs 2310 and 3.018 fr the regeneration has moved DOWN to 382.7 Hz, where 5 taps give only -13.7 dB -- the filter no longer covers the band it exists to cover. Boxcar stopband at 382.7 Hz against group-delay cost, computed over the odd tap counts fsp accepts (fsp.c:1417 silently increments an even broad_lp, so 6 is not selectable even though its null would land almost exactly on 383 Hz):\n   N= 5: -13.7 dB, group delay 2.0 fr, 30 Hz droop -0.06 dB\n   N= 7: -17.2 dB, group delay 3.0 fr, 30 Hz droop -0.12 dB   <-- chosen\n   N= 9: -13.0 dB, group delay 4.0 fr, 30 Hz droop -0.19 dB\n   N=11: -20.3 dB, group delay 5.0 fr, 30 Hz droop -0.29 dB\n   N=13: -22.9 dB, group delay 6.0 fr, 30 Hz droop -0.41 dB\n7 restores approximately the stopband depth this filter was designed to have, for ONE extra frame of group delay. It is deliberately not 11 or 13: the deeper stopband costs prediction horizon, and PAR-6 already tested 9 against 5 and found it not worth keeping (net y -2% / x +10%), so horizon is the scarcer resource here. Group delay is folded into the broad horizon automatically (fsp.c:1423). RE-DERIVE AGAIN whenever the delay or fs changes -- the regeneration band moves with both.",
+        "broad_lp": 0,
+        "_wiener_out": "NEW for PAR-4: dumps the LEARNED 512-tap y/x predictors at exit, in exactly the format wiener_file reads. This run is the first whose scored window is actually converged (settle_time 600 s), so its weights are the first worth keeping. Written from fini, which runs on the SIGINT path too, so a Ctrl-C at 1200 s still saves them. The header records broad_order/mu/lp, fs, per-axis horizon and K, the closed-frame count, and ||w|| per axis -- compare ||w|| against a later run to see whether the observer is settling or still growing. To REPLAY these weights, point wiener_file at this file, but only in a run with the same broad_order, horizon, broad_lp and drift_tau: taps mean nothing against a different model, and the loader's index check cannot catch a horizon mismatch. Pair it with broad_freeze_closed true to score a frozen predictor.",
+        "wiener_out": "atten_par_weights_fsl_1.dat",
+        "_wiener_trace": "THE ANSWER TO PAR-4's QUESTION, sampled every 5 s (340 lines over the 1700 s run, ~50 kB). settle_time was raised 120 -> 600 s on the strength of an exponential fit to PAR-3's error record; this measures the convergence directly instead of inferring it. ||dw|| is the tap change since the previous sample -- it flattening BEFORE t=1200 (when the scored closed window opens) is what makes 600 s defensible, and it still falling means 600 s is still not enough. Also a free correctness check on pass_open false: during the open phase fsp is fed zeros, the NLMS step is mu*pe/energy with energy floored at 1e-12, so pe = 0 gives EXACTLY zero weight change -- ||dw|| must be 0.0 for every sample before t=600, and any nonzero value there means open-loop data is leaking into the observer. Flushed per sample, so it survives an abort. Columns are in the file header.",
+        "wiener_trace": "atten_par_wtrace_fsl_1.dat",
+        "wiener_trace_period": 5.0,
+        "broad_freeze_closed": false,
+        "_broad_freeze_closed": "FALSE for this first par run, matching steering_par_fsp.json: the FIR keeps adapting through the closed phase instead of applying a frozen set. With pass_open false as well, no weight in this run is derived from open-loop data -- the observer starts at zero and learns as it goes. NLMS time constant is order/(mu*fs) = 512/(0.03*3788) = 4.5 s, so the 120 s settle_time is ~27 time constants and the closed recording begins on a converged observer. The doc default is true because continuous closed-loop NLMS can learn leaked command as disturbance when K or the delay is mismodelled; the defences against that are broad_lp (now 5, correct for the new delay) and the burst guard (guard_ratio 4, whose detector now sits at ~700 Hz, clear of the leakage that false-tripped it at 316/344 Hz). Restore true for a frozen-observer comparison run.",
+        "_two_timescale": "drift_tau remains off. Event-time NLMS is intentionally frozen again, but only after a 450 s post-close arm delay has allowed the cold predictor and residual baseline to converge. The frozen stationary FIR controls release; both horizons resume learning on the first fully normal frame after the cross-fade.",
+        "_drift_tau_rollback": "2.0 if you want the slow-drift EWMA split back; it was not implicated in the 07-30 latch.",
+        "_transient_2026_08_01": "Enabled on the broadband prediction residual. Detection begins 450 s after close, after the residual-variance EWMA and continuously adaptive FIR learn throughout warm-up. During recovery both FIR horizons freeze through the return cross-fade and resume on the first fully normal frame. The modal command consumes the same per-axis K, delay and delay_frac used by Smith reconstruction and normal control; update them once after a new Bode fit.",
+        "_transient_off_2026_08_07": "TRANSIENT PATH DISABLED 2026-08-07 (was 6.0). transient_sigma is the master switch -- it defaults to 0 and every other transient validation in fsp.c:1370-1390 is gated on transient_sigma > 0, so the whole detection/recovery path goes inert while all the tuning below is preserved verbatim for re-enabling. Off for now because the plant it would act against is not currently characterised: K and the delay predate today's refocus, and the scale sign is inferred from sweep phase rather than a push test. A modal event controller that fires with authority transient_clamp 10.0 against a mis-signed or mis-scaled plant is the worst possible time to find that out. Restore 6.0 once a push test and fresh sweeps are in. NOTE: transient_shadow_mu MUST BE ZEROED TOO. Its validation (fsp.c:1356) is gated on transient_shadow_mu > 0, NOT on transient_sigma, so leaving shadow_mu at 0.01 with transient_sigma 0 is a half-disabled state that fails init outright: 'transient shadow recovery requires transient_sigma > 0'. Both go to 0 together; restore 6.0 / 0.01 together.",
+        "transient_sigma": 0.0,
+        "transient_floor": 0.03,
+        "transient_controller": "modal",
+        "_transient_controller_options": "Supported: proportional, integral, pi, modal, hybrid. Integral modes also use transient_ki, transient_i_leak and transient_i_limit; modal/hybrid require transient_modal_q_scale > 0.",
+        "transient_modal_q_scale": 100.0,
+        "transient_modal_ab": false,
+        "transient_kp": 0.15,
+        "transient_tau": 5.0,
+        "transient_hold": 0.10,
+        "transient_ramp": 0.25,
+        "transient_clamp": 10.0,
+        "transient_trip_command": 10.0,
+        "transient_max_duration": 0.0,
+        "_transient_end": "No wall-clock timeout. Recovery ends only after innovation stays below max(transient_sigma*quiet_rms, transient_floor) for transient_hold, followed by transient_ramp, or immediately on beam loss.",
+        "transient_arm_delay": 450.0,
+        "transient_shadow_mu": 0.0,
+        "transient_shadow_tau": 0.5,
+        "transient_shadow_min_duration": 2.0,
+        "transient_shadow_hold": 1.0,
+        "transient_shadow_ratio": 0.70,
+        "transient_shadow_norm_ratio": 1.0,
+        "_transient_shadow": "The production FIR remains frozen during an event. A private shadow copy learns with mu=.01 and is evaluated before each update. Only a persistent event (>2 s) whose held-out RMS stays at least 30% below the frozen model for 1 s, without saturation/guard activity or excessive coefficient motion, can promote the new stationary model. Ordinary push ring-downs discard the shadow.",
+        "transient_log": "atten_par_transient_fsl_1.csv",
+        "_clamp_why_here": "These are fsp's OWN bounds, deliberately not a downstream anyloop:clamp stage. fsp applies the limit to u and feeds THAT SAME value into its internal fractional-delay filter and command ring, so its plant model and the DAC receive identical commands. An asymmetric clamp placed after fsp would cut the command without fsp knowing -- the model would believe it sent +12.5 while the mirror got +10, which is the command-echo mismatch behind the 2026-07-16 310 Hz spiral. A downstream clamp matched EXACTLY to these bounds is fine as a backstop, never tighter.",
+        "_clamp": "SYMMETRIC +-1 V. At the measured gain, 0.27 V already sweeps the beam out of the ROI; +-1 is ample authority while remaining a meaningful fault boundary.",
+        "_clamp_restored_2026_08_01": "The continuous predictor remains constrained to +-1 V. The wider +-10 V envelope is event-only and model-agreement-bounded, so it is not fixed continuous-loop authority.",
+        "clamp_min": -0.5,
+        "clamp_max": 0.5,
+        "start_delay": 600.0,
+        "_start_delay": "= attenuation_test start_delay(100) + open_time(500), so fsp's own hold spans the ENTIRE recorded open phase instead of closing while attenuation_test is still feeding it data it should not act on.",
+        "ramp": 10.0,
+        "_ramp": "10 s starting at t=600 lands the bumpless handover well inside attenuation_test's 120 s settle_time, so full authority is reached long before the closed-loop recording window (t=720-1220) starts.",
+        "adapt_period": 8.0,
+        "adapt_df_max": 0.5,
+        "adapt_tau": 5.0,
+        "_guard": "burst guard ON (guard_ratio 4): per-axis band-pass detector on the raw error at the regeneration freq fs/(2*(delay+delay_frac)); on a burst the axis's authority is cut to 0 for guard_hold s, learning freezes, then authority ramps back over guard_ramp s. The detector now sits at ~685 Hz (x) / ~722 Hz (y) with the 07-31 delays. Recurring activations = re-measure K/delay at the current bias; on this transport the likeliest cause is Kx, which wanders a few percent per hour (see _K_warning).",
+        "guard_ratio": 4.0,
+        "guard_floor": 0.008,
+        "guard_hold": 0.25,
+        "guard_ramp": 1.0,
+        "guard_tick": 10.0,
+        "trip_error": 0.8,
+        "trip_command": 0.8,
+        "trip_frames": 8,
+        "beam_recover_ramp": 0.5,
+        "y": {
+          "_K": "3.646 +/- 0.011, the SMALL-SIGNAL plateau (fsm_bodey_par_small5.dat, +-20 mV, <=30 Hz, 2026-07-31 11:43), barely a change from the 3.636 PAR-1..3 ran. DO NOT copy the 3.5103 on fsm_bodey_par2.dat's fit line: that is the +-100 mV figure, and the SAME file's half-amplitude pass reads 3.662 -- y picked up ~4% of compression on 07-31 that it did not have on 07-30. Small-signal reads agree tightly across amplitude and file: 3.668 at 8 mV, 3.646 at 20 mV, 3.662 at 50 mV. Holding y fixed makes it the control for the Kx change: if PAR-4 improves x and leaves y alone, the improvement is the K fix and not the environment.",
+          "_delay": "MEASURED 2+0.577 = 2.577 fr (fsm_bodey_par.dat full-band phase slope, tau 0.4165 ms at fs 3786.38, hidden bode frame included). Was 5+0.828.",
+          "_delay_2026_08_07": "MEASURED 2026-08-07 18:34-18:56 on the ASI290MM at 64x64 / exp 400 / gain 50, ROI 1084/414, fs_measured 2309.9 Hz, parport DAC, from fsm_bodex_par5/par6.dat and fsm_bodey_par5.dat. Sweeps 5-200 Hz, 60 pts, 49 cycles in 7 segments; K is the <=30 Hz weighted plateau and the delay is the full-band weighted phase slope, both refit offline after excluding sweep points whose integration window overlapped a logged beam outage (the bench was being worked on -- 9 to 1198 outage events per run). y delay = 3.127 fr (tau 0.9206 ms, phase resid 3.06 deg). Same fit_com coupling as the global delay.",
+          "delay": 2,
+          "delay_frac": 0.664,
+          "_K_2026_08_07": "MEASURED 2026-08-07 18:34-18:56 on the ASI290MM at 64x64 / exp 400 / gain 50, ROI 1084/414, fs_measured 2309.9 Hz, parport DAC, from fsm_bodex_par5/par6.dat and fsm_bodey_par5.dat. Sweeps 5-200 Hz, 60 pts, 49 cycles in 7 segments; K is the <=30 Hz weighted plateau and the delay is the full-band weighted phase slope, both refit offline after excluding sweep points whose integration window overlapped a logged beam outage (the bench was being worked on -- 9 to 1198 outage events per run). Ky is NOT a direct reading at this timestamp -- only one y sweep survived (its second pass ran with no beam at all). It is Kx x 1.4087, the drift-immune ratio: the y sweep sat between two x sweeps, so x interpolates to y's exact time at the same 0.15 V drive, giving Kx 0.4394 against Ky 0.6190 measured. This assumes the drift is COMMON-MODE optical (focus/alignment/lever arm), which is what someone working at the bench produces. If one axis drifted mechanically on its own, the ratio does not carry -- re-measure y directly. *** THE GAIN WAS DRIFTING WHEN THIS WAS MEASURED: -39% PER HOUR. *** Eight pass-level K values across 45 minutes fit a pure time-drift model to 3.5% rms; K ran 0.5794 (18:10) -> 0.5027 (18:37) -> 0.4054 (18:54). The value above is the LAST and therefore LOWEST measurement, and it carries a timestamp for a reason: if the drift continued, the true K is now lower still, which is the SAFE direction (configured K above truth under-commands). If the bench work ended and alignment recovered, the true K is HIGHER than this and the configured value OVER-COMMANDS -- the documented failure mode. RE-MEASURE BEFORE ANY UNATTENDED RUN. Corollary, and it retires an old warning: across 0.05-0.30 V the amplitude dependence fits to +1.8% per halving, consistent with zero (bound ~4%). The FSM is LINEAR over that range. Every 'NONLINEAR/CLIPPING' verdict bode_plot emitted this session was drift aliased onto amplitude, because bode_plot always runs full amplitude first and half amplitude ~3 min later, confounding the two perfectly.",
+          "_K_raised_2026_08_07": "K RAISED TO THE TOP OF THE MEASURED RANGE ON PURPOSE. The session measured Kx between 0.405 (18:54) and 0.579 (18:10) and cannot say which end is real. Since u = -phi_hat/K, the realised loop gain is K_true/K_cfg: configuring 0.405 bounds the worst case at 1.43 (43% OVER-command into a 3-frame delay), while configuring 0.579 bounds it at 0.70 (under-corrects, stable, costs rejection). For an unattended run that is not a close call, and it is what this file's own _K_warning has always said: raise K rather than lower it. Ky = 1.4087 x Kx, the drift-immune cross-axis ratio (the y sweep sat between two x sweeps, so x interpolates to y's exact time at matched drive). *** BOTH VALUES PREDATE THE REFOCUS DESCRIBED ON THE CAMERA STAGE -- RE-MEASURE BEFORE TRUSTING EITHER. *** They are here so the file is self-consistent, not because they describe the current optics.",
+          "K": 0.45,
+          "r": 1.0,
+          "_freqs": "RE-DERIVED 2026-07-30 from attenuation_par_fsp1's own open PSD, ranked by energy in a +-1.5 Hz window with a prominence test against the local baseline. fsp.h:127 caps modes at 8/axis, so this is a budget: 5.6 and 12.0 are HUMPS not lines (prominence 2.0 and 1.9) and get zeta 0.05 to match, everything else is a genuine line. Dropped: 5.64->5.6 and 11.3->12.0 (both were off their real peaks), and the 20.0/zeta-0.3 broadband hump, whose slot went to 120.2 Hz -- a prominence-33x line carrying 0.0352 px that no config has ever modelled. Added 26.8 (0.1472 px, prominence 5.7). NOT added: 99.9 and 107.3, which prominence 1.8/1.2 says are not lines on this axis at all, just the tallest bins of the 60-150 hump. Rollback list: [5.64, 11.3, 21.1, 29.6, 57.5, 20.0].",
+          "freqs": [
+            5.64,
+            11.3,
+            21.1,
+            29.6,
+            57.5,
+            20.0
+          ],
+          "zeta": [
+            0.002,
+            0.002,
+            0.002,
+            0.002,
+            0.003,
+            0.3
+          ],
+          "q": [
+            0.00001,
+            0.000015,
+            0.000015,
+            0.00001,
+            0.000005,
+            0.00001
+          ]
+        },
+        "x": {
+          "_clamp": "The per-axis clamp override is GONE with the 2.5 V bias that required it. At offset 0 the command window is symmetric for both axes regardless of the sign of scale, so x inherits the global +-1.",
+          "_K": "4.05 as of 2026-07-31, and now the same number at EVERY amplitude: fsm_bodex_par2.dat (12:23, +-100 mV) fits 4.0500 +/- 0.0037 with its half-amplitude pass at 4.092, and fsm_bodex_par_small7.dat (+-20 mV) fits 4.056 +/- 0.023 with its +-8 mV pass at 4.020. PAR-1..3 all ran 3.787, so they configured K ~7% LOW and OVER-commanded x by ~7% -- the direction PAR-3's own phi reconstruction pointed at (x disturbance 28% above the open-phase error, closed-window bound 0.045 px above the open-window 0.034 px, neither of which y showed). Fixing it is the one controller change in PAR-4. Note the 3.787 was NOT a large-signal artefact: the plant genuinely moved between 07-30 and 07-31, since the 100 mV pass now reads the same 4.05 the small sweeps do.",
+          "_delay": "x inherits the global 2+0.72 = 2.717 fr (fsm_bodex_par.dat, tau 0.4532 ms at fs 3788.32). Was 6+0.0.",
+          "_K_2026_08_07": "MEASURED 2026-08-07 18:34-18:56 on the ASI290MM at 64x64 / exp 400 / gain 50, ROI 1084/414, fs_measured 2309.9 Hz, parport DAC, from fsm_bodex_par5/par6.dat and fsm_bodey_par5.dat. Sweeps 5-200 Hz, 60 pts, 49 cycles in 7 segments; K is the <=30 Hz weighted plateau and the delay is the full-band weighted phase slope, both refit offline after excluding sweep points whose integration window overlapped a logged beam outage (the bench was being worked on -- 9 to 1198 outage events per run). Kx = 0.4054 +/- 0.0055 at 18:54, the weighted mean of fsm_bodex_par6's two passes (0.4051 at 0.30 V, 0.4061 at 0.15 V, 3 min apart, agreeing to 0.2%). *** THE GAIN WAS DRIFTING WHEN THIS WAS MEASURED: -39% PER HOUR. *** Eight pass-level K values across 45 minutes fit a pure time-drift model to 3.5% rms; K ran 0.5794 (18:10) -> 0.5027 (18:37) -> 0.4054 (18:54). The value above is the LAST and therefore LOWEST measurement, and it carries a timestamp for a reason: if the drift continued, the true K is now lower still, which is the SAFE direction (configured K above truth under-commands). If the bench work ended and alignment recovered, the true K is HIGHER than this and the configured value OVER-COMMANDS -- the documented failure mode. RE-MEASURE BEFORE ANY UNATTENDED RUN. Corollary, and it retires an old warning: across 0.05-0.30 V the amplitude dependence fits to +1.8% per halving, consistent with zero (bound ~4%). The FSM is LINEAR over that range. Every 'NONLINEAR/CLIPPING' verdict bode_plot emitted this session was drift aliased onto amplitude, because bode_plot always runs full amplitude first and half amplitude ~3 min later, confounding the two perfectly. SIGN RESOLVED 2026-08-07: scale is [-1, 1] = [ch0 y, ch1 x] and CONFIRMED CORRECT on the bench. That matches what both bode sweeps measured a positive in-phase K with (x at +1.0, y at -1.0), which is the convention fsp's u = -phi_hat/K assumes. The earlier [1, -1] would have been positive feedback on both axes. If this ever needs changing again, fix it in the parport_dac scale, never by flipping K.",
+          "_K_raised_2026_08_07": "K RAISED TO THE TOP OF THE MEASURED RANGE ON PURPOSE. The session measured Kx between 0.405 (18:54) and 0.579 (18:10) and cannot say which end is real. Since u = -phi_hat/K, the realised loop gain is K_true/K_cfg: configuring 0.405 bounds the worst case at 1.43 (43% OVER-command into a 3-frame delay), while configuring 0.579 bounds it at 0.70 (under-corrects, stable, costs rejection). For an unattended run that is not a close call, and it is what this file's own _K_warning has always said: raise K rather than lower it. Ky = 1.4087 x Kx, the drift-immune cross-axis ratio (the y sweep sat between two x sweeps, so x interpolates to y's exact time at matched drive). *** BOTH VALUES PREDATE THE REFOCUS DESCRIBED ON THE CAMERA STAGE -- RE-MEASURE BEFORE TRUSTING EITHER. *** They are here so the file is self-consistent, not because they describe the current optics.",
+          "K": 0.25368,
+          "r": 1.0,
+          "_freqs": "RE-DERIVED 2026-07-30 from attenuation_par_fsp1's own open PSD (method as in the y _freqs note; 8-mode cap per fsp.h:127). Corrections to real peaks: 9.8->9.2, 12.0->12.9, 21.7->21.3, 57.5->57.3, 83.3->84.2. Dropped 24.9 (prominence 1.8, no line there) and the 20.0/zeta-0.3 hump. Added 18.5 (0.1048 px, prominence 4.4), 26.8 (0.0635 px, 4.9) and 120.2 (0.0382 px, prominence 40x -- the strongest unmodelled line on either axis). NOT added: 78.6, 99.9 and 143.4, genuine lines but only 0.014-0.022 px each, which lose to everything above on a fixed budget. Rollback list: [9.8, 12.0, 21.7, 24.9, 57.5, 83.3, 20.0].",
+          "freqs": [
+            9.8,
+            12.0,
+            21.7,
+            24.9,
+            57.5,
+            83.3,
+            20.0
+          ],
+          "zeta": [
+            0.002,
+            0.002,
+            0.002,
+            0.002,
+            0.003,
+            0.003,
+            0.3
+          ],
+          "q": [
+            0.00001,
+            0.00001,
+            0.00002,
+            0.000015,
+            0.000005,
+            0.000003,
+            0.00001
+          ]
+        },
+        "drift_tau": 1.5,
+        "drift_order": 2
+      }
+    },
+    {
+      "_note": "Hardware backstop matches FSP's widest event-only +-10 V envelope. Normal FSP authority remains +-1 V; widening persists only while innovation remains outside the known-model envelope.",
+      "uri": "anyloop:clamp",
+      "params": {
+        "type": "vector",
+        "min": -10.0,
+        "max": 10.0
+      }
+    },
+    {
+      "_note": "Full-rate [y,x] COMMAND record, placed AFTER the clamp so it is exactly the vector parport_dac converts to volts -- command units are volts here (scale 1.0 V/unit, offset 0), so this file is directly readable as DAC volts. Deliberately complementary to the .dat attenuation_test writes, which contains only error PSDs: nothing in that file describes the command, and a PSD has no time axis. Both gaps have already cost a diagnosis on this rig -- the 2026-07-30 497 Hz limit cycle was 97.6% of the command power in a single line and near-invisible in the error, and the transient-recovery latch the same day would have read as a merely disappointing closed PSD. ~260 MB for the 1220 s run at 56 B/sample.",
+      "uri": "anyloop:file_sink",
+      "params": {
+        "filename": "atten_par_cmd_fsl_1.aylp"
+      }
+    },
+    {
+      "_note": "PARPORT DAC. TWO channels only -- there is no coarse stage: ch0 = y/tip (DACA, +1.0 V/unit) = index 0, ch1 = x/tilt (DACB, -1.0 V/unit) = index 1. The fsp output is plain [y,x] in command units.",
+      "_range": "+-5 bipolar base (DACRANGE code 0x5), centred at 0 V and matching conf_bode_par_x/y.json. Event-only autoranging may widen to +-6 or +-10.",
+      "_avss_note": "The bipolar ranges require negative AVSS. Verify the +/-12 V rails under load before allowing the event path to request +-10 V.",
+      "_avss_tradeoff": "The base and ceiling are both bipolar, so AVSS must remain negative. This avoids the unipolar-base characterization tradeoff that applied to the older 0-5 configuration.",
+      "_authority_check": "Normal FSP authority is +-1 V. Only transient_active widens the command envelope to +-10 V; model agreement or beam loss ends that authority.",
+      "_range_max": "AUTO-RANGING ceiling +-10: normal operation stays on +-5; an event request above 5 V selects +-6 and above 6 V selects +-10.",
+      "_range_max_attenuation_warning": "A range change can occur only in a detected event and must be reported with transient metrics; exclude event windows from average-jitter scoring if preserving the fixed-range A/B statistic matters.",
+      "_scale_sign": "y positive, x negative -- same signs as the piplate config (+2/-2), halved in magnitude. The sign belongs to the optical/mechanical path, not the converter.",
+      "_sync_update": "left OFF. With two driven channels the async skew is one frame, ~6.4 us -- ~2% of the 264 us loop period and below the platform's own ~6.8 us SCHED_FIFO / ~32 us C-state jitter. Turn it on only if axis cross-coupling appears that tracks scheduling hiccups rather than the command; see doc/devices/parport_dac.md, Update mode.",
+      "uri": "anyloop:parport_dac",
+      "params": {
+        "pci": "0000:06:00.2",
+        "backend": "mmio",
+        "link": "spi",
+        "channel": [
+          0,
+          1
+        ],
+        "index": [
+          0,
+          1
+        ],
+        "_scale_sign_2026_08_07": "SIGN FLIPPED ON BOTH AXES 2026-08-07: was [1, -1] (y +1, x -1), now [-1, 1] (y -1, x +1). Order is [ch0, ch1] = [y, x]. Both bode sweeps measure a POSITIVE, in-phase K -- phase at 5 Hz is +0.037 rad (x, scale +1.0) and +0.028 rad (y, scale -1.0), i.e. ~0 not ~pi -- so these are the signs that make the plant gain positive, which is what fsp's u = -phi_hat/K assumes. The old signs would have been POSITIVE FEEDBACK on both axes. A camera remount flipping image parity in both axes explains the change. THIS IS INFERRED FROM SWEEP PHASE, NOT FROM A PUSH TEST -- confirm with a push test before closing the loop, and if it disagrees fix it HERE, never by flipping the sign of K.",
+        "scale": [
+          -1.0,
+          1.0
+        ],
+        "_offset": "0, NOT the 2.5 V bias this file was written around. K and the delay were both measured at offset 0 (mirror parked at 0 V) in conf_bode_par_x/y.json, and K is bias-dependent -- running the loop at a different operating point than the bode would invalidate the very numbers this harness reports. Command units are volts about 0, so the command bounds are symmetric and the per-axis asymmetry is gone.",
+        "offset": [
+          0,
+          0
+        ],
+        "_range": "+-5 to match the bode sweeps exactly. 153 uV/LSB instead of the 76 uV/LSB the 0-5 unipolar range gave, which is the price of running symmetric about 0 -- still 6.5x finer than the BRIDGEplate's 12-bit 1 mV.",
+        "range": "+-5",
+        "range_max": "+-10",
+        "_range_max": "Event-only ceiling: +-5 normally, widening to +-6/+-10 only if FSP's transient command exceeds the current range.",
+        "_verify": "off in the closed loop: verify turns each write into 3 frames plus a non-posted status read per bit. Exercise it with conf_parport_dac_smoke.json before the run, not during it.",
+        "verify": false,
+        "_skip_unchanged": "OFF. It skips very little anyway at 153 uV/LSB (a live command changes the code almost every iteration), and a write is 6.4 us against a 264 us period, so it buys nothing measurable. Off also means the DAC register is refreshed every frame instead of being written once and left, which is the more robust state on this wiring.",
+        "skip_unchanged": false,
+        "sync_update": false,
+        "start_delay": [
+          2.0,
+          2.0
+        ],
+        "reset_at_init": true
+      }
+    }
+  ]
+}

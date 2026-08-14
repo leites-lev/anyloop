@@ -1,0 +1,79 @@
+{
+	"_comment": {
+		"purpose": "Probe and centre the 64x64 ROI, run an open-loop COM/camera survey, apply its measured camera and tracker settings, then run the current parport gain and PRBS delay calibrations for both axes and concatenate their reports into one PDF.",
+		"why_a_suite": "gain_test and prbs_test each own the command vector and terminate Anyloop with AYLP_DONE, so putting four test devices in one pipeline would be invalid. contrib/calibration-scripts/tools/run_calibration_suite.py runs these four proven pipelines sequentially instead.",
+		"safety": "The fit_com-only survey measures the settled camera rate from every capture, so the 80x80 ROI cannot silently reuse the old 64x64/2310 Hz rate. Illumination uses exposure first up to the measured no-rate-loss ceiling, then gain. If camera settings change, the suite repeats the survey before any mirror drive; clipping, saturation, or >25% fit rejection aborts. Each calibration parks the unused axis, drives about 0 V in the fixed +-5 V DAC range, and resets the DAC at initialization.",
+		"run": "sudo chrt -f 80 taskset -c 2 python3 contrib/calibration-scripts/tools/run_calibration_suite.py contrib/calibration-scripts/configurations/conf_gain_delay_par_xy.json",
+		"result": "fsm_gain_delay_xy.pdf contains, in order, x gain, x delay, y gain, and y delay. The individual PDFs and .dat/.traces.dat evidence remain beside it."
+	},
+	"anyloop": "build/anyloop",
+	"anyloop_args": ["-p"],
+	"output_file": "fsm_gain_delay_xy.pdf",
+  "roi_refresh": {
+    "park_config": "contrib/calibration-scripts/configurations/conf_parport_dac_park.json",
+    "script": "contrib/calibration-scripts/tools/find_roi.py",
+		"settle_seconds": 0,
+		"probe_gain": 200,
+		"max_attempts": 5,
+		"before_runs": [0, 2, 4],
+		"reference_config": "contrib/steering/configurations/steering_par_fsp.json",
+		"configs": [
+			"contrib/calibration-scripts/configurations/com_survey.json",
+			"contrib/steering/configurations/steering_par_fsp.json",
+			"contrib/calibration-scripts/configurations/conf_gain_par_x.json",
+			"contrib/calibration-scripts/configurations/conf_prbs_par_x.json",
+			"contrib/calibration-scripts/configurations/conf_gain_par_y.json",
+			"contrib/calibration-scripts/configurations/conf_prbs_par_y.json"
+		]
+	},
+	"com_survey": {
+		"config": "contrib/calibration-scripts/configurations/com_survey.json",
+		"capture": "data/calibration/run_staging/com_survey.aylp",
+		"analyzer": "build/com_survey",
+		"result": "data/calibration/run_staging/com_survey_result.json",
+		"fs_hz": 2310,
+		"max_exposure_us": 400,
+		"max_rejected_fraction": 0.40,
+		"apply_to": [
+			"contrib/steering/configurations/steering_par_fsp.json",
+			"contrib/calibration-scripts/configurations/conf_gain_par_x.json",
+			"contrib/calibration-scripts/configurations/conf_prbs_par_x.json",
+			"contrib/calibration-scripts/configurations/conf_gain_par_y.json",
+			"contrib/calibration-scripts/configurations/conf_prbs_par_y.json"
+		],
+		"camera_apply_to": [
+			"contrib/calibration-scripts/configurations/com_survey.json",
+			"contrib/steering/configurations/steering_par_fsp.json",
+			"contrib/calibration-scripts/configurations/conf_gain_par_x.json",
+			"contrib/calibration-scripts/configurations/conf_prbs_par_x.json",
+			"contrib/calibration-scripts/configurations/conf_gain_par_y.json",
+			"contrib/calibration-scripts/configurations/conf_prbs_par_y.json"
+		]
+	},
+	"runs": [
+		{
+			"name": "x gain",
+			"config": "contrib/calibration-scripts/configurations/conf_gain_par_x.json",
+			"pdf": "fsm_gainx_par.pdf"
+		},
+		{
+			"name": "x delay",
+			"config": "contrib/calibration-scripts/configurations/conf_prbs_par_x.json",
+			"pdf": "fsm_prbsx_par.pdf",
+			"prbs_amplitudes": [0.15],
+			"max_delay_spread_frames": 0.2
+		},
+		{
+			"name": "y gain",
+			"config": "contrib/calibration-scripts/configurations/conf_gain_par_y.json",
+			"pdf": "fsm_gainy_par.pdf"
+		},
+		{
+			"name": "y delay",
+			"config": "contrib/calibration-scripts/configurations/conf_prbs_par_y.json",
+			"pdf": "fsm_prbsy_par.pdf",
+			"prbs_amplitudes": [0.15],
+			"max_delay_spread_frames": 0.2
+		}
+	]
+}

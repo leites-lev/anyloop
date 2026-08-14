@@ -13,12 +13,15 @@ struct aylp_com_src {
 struct aylp_center_of_mass_data {
 	// param: height of regions/subapertures
 	size_t region_height;
+	bool auto_region_height;
 	// param: width of regions/subapertures
 	size_t region_width;
+	bool auto_region_width;
 	// param; set to 1 for no multithreading
 	size_t thread_count;
 	// param: subtract this value from each pixel before computing CoM
 	unsigned char threshold;
+	bool auto_threshold;
 	// param (track mode): the brightest pixel in the window must reach this
 	// for the frame to count as containing the beam. 0 disables the test,
 	// which is the pre-2026-08-02 behaviour: any sum above zero was treated
@@ -26,6 +29,9 @@ struct aylp_center_of_mass_data {
 	// centroid of pure noise. Distinct from `threshold`, which only shapes
 	// the weighting -- this decides whether the frame is used at all.
 	unsigned char min_peak;
+	bool auto_min_peak;
+	double auto_mean_peak;
+	size_t auto_peak_samples;
 	// param (track mode): reject a frame when its dimmest significant row
 	// falls below this fraction of the frame's own typical row, both
 	// measured against a learned reference profile. 0 disables the test.
@@ -86,12 +92,35 @@ struct aylp_center_of_mass_data {
 	// param: confine the sum to a single region that follows the previous
 	// center of mass, ignoring everything outside it
 	bool track;
+	// Optional pattern-agnostic translation output. A rolling keyframe supplies
+	// local spatial structure; per-frame gain and offset are nuisance parameters,
+	// so brightness and background changes cannot masquerade as motion.
+	bool registration;
+	double *registration_ref;
+	size_t *registration_sample_y, *registration_sample_x;
+	double *registration_sample_ref;
+	double *registration_sample_gy, *registration_sample_gx;
+	size_t registration_n_samples;
+	size_t registration_sample_capacity;
+	double *registration_residuals;
+	double *registration_errors;
+	double registration_info_need;
+	double registration_condition;
+	bool registration_ready;
+	double registration_quality;
+	double registration_noise, registration_residual_scale;
+	size_t registration_rolls;
+	double registration_anchor_y[31], registration_anchor_x[31];
+	size_t registration_anchor_n, registration_anchor_pos;
+	double registration_y, registration_x;
+	double registration_ref_y, registration_ref_x;
 	// param: initial window centre in image pixels; <0 means acquire from
 	// the brightest pixel on the first frame
 	long init_y;
 	long init_x;
 	// param: consecutive frames of zero signal before we re-acquire
 	size_t reacquire_after;
+	bool auto_reacquire;
 	// param: seconds to run with the wide acquisition window before narrowing
 	// to region_height/region_width (0 disables the acquisition phase)
 	double acquire_seconds;
@@ -166,4 +195,3 @@ int center_of_mass_fini(struct aylp_device *self);
 int center_of_mass_fini_threaded(struct aylp_device *self);
 
 #endif
-

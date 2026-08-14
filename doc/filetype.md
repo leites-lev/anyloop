@@ -23,5 +23,5 @@ where of course `aylp_header` is defined in [anyloop.h](../libaylp/anyloop.h).
 Decoding an AYLP chunk thus requires parsing header of known length, using
 `header.type` to find out whether the pipeline data is in uchars or doubles, and
 using `header.log_dim` to determine the size of the pipeline data. You can see
-an example of decoding an AYLP file in [anyloop.jl](../contrib/anyloop.jl).
+an example of decoding an AYLP file in [anyloop.jl](../contrib/anyloop-examples/source/anyloop.jl).
 

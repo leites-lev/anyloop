@@ -8,6 +8,7 @@
 
 #include "anyloop.h"
 #include "logging.h"
+#include "timing.h"
 #include "xalloc.h"
 #include "fsp.h"
 
@@ -851,6 +852,7 @@ static int fsp_parse_axis(struct aylp_fsp_axis *ax, struct json_object *obj)
 	bool have_plant_b = false, have_plant_a = false;
 	// sentinels: inherit the global delay/delay_frac unless the axis sets them
 	ax->delay = 0;
+	ax->delay_auto = false;
 	ax->clamp_lo = NAN;		// NAN = inherit the global bound
 	ax->clamp_hi = NAN;
 	ax->delay_frac = -1.0;
@@ -860,7 +862,11 @@ static int fsp_parse_axis(struct aylp_fsp_axis *ax, struct json_object *obj)
 		} else if (!strcmp(key, "K") || !strcmp(key, "plant_gain")) {
 			ax->K = json_object_get_double(val);
 		} else if (!strcmp(key, "delay")) {
-			ax->delay = json_object_get_uint64(val);
+			if (json_object_is_type(val, json_type_string)
+					&& !strcmp(json_object_get_string(val),
+						"auto"))
+				ax->delay_auto = true;
+			else ax->delay = json_object_get_uint64(val);
 		} else if (!strcmp(key, "delay_frac")) {
 			ax->delay_frac = json_object_get_double(val);
 		} else if (!strcmp(key, "clamp_min")) {
@@ -986,6 +992,10 @@ int fsp_init(struct aylp_device *self)
 	// defaults
 	data->delay = 5;		// ~2 ms at ~2310 Hz, matches the loop
 	data->delay_frac = 0.0;
+	data->delay_auto_max = 16;
+	data->delay_auto_settle = 0.5;
+	data->delay_auto_window = 1.0;
+	data->delay_auto_bias = 1.5;	// 1 frame of sensor + half a frame of ZOH
 	data->fs = 2310.0;
 	data->clamp = 1.0;
 	// NAN = not explicitly configured; resolved from `clamp` after parsing
@@ -1020,6 +1030,7 @@ int fsp_init(struct aylp_device *self)
 	data->transient_ki = 5.0;
 	data->transient_i_leak = 0.0;
 	data->transient_i_limit = 1.0;
+	data->transient_mode = AYLP_FSP_TRANSIENT_MANUAL;
 	data->transient_controller = AYLP_FSP_TRANSIENT_PROPORTIONAL;
 	data->transient_modal_q_scale = 0.0;
 	data->transient_tau = 5.0;
@@ -1071,11 +1082,38 @@ int fsp_init(struct aylp_device *self)
 			data->units = aylp_units_from_string(
 				json_object_get_string(val));
 		} else if (!strcmp(key, "delay")) {
-			data->delay = json_object_get_uint64(val);
+			if (json_object_is_type(val, json_type_string)
+					&& !strcmp(json_object_get_string(val),
+						"auto"))
+				data->delay_auto = true;
+			else data->delay = json_object_get_uint64(val);
 		} else if (!strcmp(key, "delay_frac")) {
 			data->delay_frac = json_object_get_double(val);
+		} else if (!strcmp(key, "delay_auto_max")) {
+			data->delay_auto_max = json_object_get_uint64(val);
+		} else if (!strcmp(key, "delay_auto_settle")) {
+			data->delay_auto_settle = json_object_get_double(val);
+		} else if (!strcmp(key, "delay_auto_window")) {
+			data->delay_auto_window = json_object_get_double(val);
+		} else if (!strcmp(key, "delay_auto_bias")) {
+			if (json_object_is_type(val, json_type_string)
+					&& !strcmp(json_object_get_string(val),
+						"auto"))
+				data->delay_auto_bias_auto = true;
+			else data->delay_auto_bias =
+				json_object_get_double(val);
+		} else if (!strcmp(key, "delay_ident_ms")) {
+			if (json_object_is_type(val, json_type_string)
+					&& !strcmp(json_object_get_string(val),
+						"auto"))
+				data->delay_ident_auto = true;
+			else data->delay_ident_ms = json_object_get_double(val);
 		} else if (!strcmp(key, "fs")) {
-			data->fs = json_object_get_double(val);
+			if (json_object_is_type(val, json_type_string)
+					&& !strcmp(json_object_get_string(val),
+						"auto"))
+				data->fs_auto = true;
+			else data->fs = json_object_get_double(val);
 		} else if (!strcmp(key, "clamp")) {
 			data->clamp = fabs(json_object_get_double(val));
 		} else if (!strcmp(key, "clamp_min")) {
@@ -1141,6 +1179,19 @@ int fsp_init(struct aylp_device *self)
 			data->drift_tau = json_object_get_double(val);
 		} else if (!strcmp(key, "drift_order")) {
 			data->drift_order = json_object_get_uint64(val);
+		} else if (!strcmp(key, "transient_mode")) {
+			const char *s = json_object_get_string(val);
+			if (!strcmp(s, "manual"))
+				data->transient_mode = AYLP_FSP_TRANSIENT_MANUAL;
+			else if (!strcmp(s, "off"))
+				data->transient_mode = AYLP_FSP_TRANSIENT_OFF;
+			else if (!strcmp(s, "auto"))
+				data->transient_mode = AYLP_FSP_TRANSIENT_AUTO;
+			else {
+				log_error("fsp: transient_mode must be manual, off, or auto "
+					"(got \"%s\").", s);
+				return -1;
+			}
 		} else if (!strcmp(key, "transient_sigma")) {
 			data->transient_sigma = json_object_get_double(val);
 		} else if (!strcmp(key, "transient_floor")) {
@@ -1247,7 +1298,11 @@ int fsp_init(struct aylp_device *self)
 		} else if (!strcmp(key, "guard_min_cycles")) {
 			data->guard_min_cycles = json_object_get_double(val);
 		} else if (!strcmp(key, "gap_trip")) {
-			data->gap_trip = json_object_get_double(val);
+			if (json_object_is_type(val, json_type_string)
+					&& !strcmp(json_object_get_string(val),
+						"auto"))
+				data->gap_trip_auto = true;
+			else data->gap_trip = json_object_get_double(val);
 		} else if (!strcmp(key, "y") || !strcmp(key, "axis_y")) {
 			axy = val;
 		} else if (!strcmp(key, "x") || !strcmp(key, "axis_x")) {
@@ -1260,6 +1315,17 @@ int fsp_init(struct aylp_device *self)
 	if (data->type != AYLP_T_VECTOR) {
 		log_error("fsp: type must be \"vector\".");
 		return -1;
+	}
+	if (data->transient_mode == AYLP_FSP_TRANSIENT_OFF) {
+		// Keep the tuning in the configuration, but make off unambiguous even
+		// when an old profile still contains nonzero recovery settings.
+		data->transient_sigma = 0.0;
+		data->transient_shadow_mu = 0.0;
+	} else if (data->transient_mode == AYLP_FSP_TRANSIENT_AUTO
+			&& data->transient_sigma <= 0.0) {
+		// Conservative, documented default.  The remaining parameters retain
+		// their explicit values or the normal FSP defaults.
+		data->transient_sigma = 6.0;
 	}
 	// Preserve the pre-selector behavior: configuring an event-only modal
 	// gain used modal recovery unless a controller was named explicitly.
@@ -1319,10 +1385,29 @@ int fsp_init(struct aylp_device *self)
 		log_error("fsp: delay_frac must satisfy 0 <= delay_frac < 1.");
 		return -1;
 	}
+	if (data->delay_auto_max < 1 || data->delay_auto_max > 1024) {
+		log_error("fsp: delay_auto_max must be in [1, 1024].");
+		return -1;
+	}
+	if (!isfinite(data->delay_auto_settle) || data->delay_auto_settle < 0.0
+	|| !isfinite(data->delay_auto_window) || data->delay_auto_window <= 0.0
+	|| !isfinite(data->delay_auto_bias) || data->delay_auto_bias < 0.0) {
+		log_error("fsp: auto delay needs delay_auto_settle >= 0, "
+			"delay_auto_window > 0 and delay_auto_bias >= 0.");
+		return -1;
+	}
 	if (data->fs <= 0.0) {
 		log_error("fsp: fs must be > 0.");
 		return -1;
 	}
+	if (data->delay_auto_bias_auto && !data->delay_ident_auto
+			&& !(data->delay_ident_ms > 0.0)) {
+		log_error("fsp: delay_auto_bias \"auto\" needs delay_ident_ms, "
+			"the last identified transport delay in ms -- it is "
+			"what the bias is recovered from.");
+		return -1;
+	}
+
 	if (data->broad_order > 4096) {
 		log_error("fsp: broad_order must be <= 4096.");
 		return -1;
@@ -1495,7 +1580,16 @@ int fsp_init(struct aylp_device *self)
 	// resolve per-axis delays and clamp bounds: unset values inherit global
 	for (int a = 0; a < 2; a++) {
 		struct aylp_fsp_axis *ax = &data->axis[a];
-		if (!ax->delay) ax->delay = data->delay;
+		if (!ax->delay && !ax->delay_auto) {
+			// no delay of its own: inherit the global one, "auto"
+			// included
+			ax->delay = data->delay;
+			ax->delay_auto = data->delay_auto;
+		} else if (ax->delay_auto) {
+			ax->delay = data->delay;	// provisional
+		}
+		if (ax->delay_auto && ax->delay > data->delay_auto_max)
+			ax->delay = data->delay_auto_max;
 		if (isnan(ax->clamp_lo)) ax->clamp_lo = data->clamp_lo;
 		if (isnan(ax->clamp_hi)) ax->clamp_hi = data->clamp_hi;
 		if (!isfinite(ax->clamp_lo) || !isfinite(ax->clamp_hi)
@@ -1530,6 +1624,44 @@ int fsp_init(struct aylp_device *self)
 				"0 <= delay_frac < 1.", a == 0 ? "y" : "x");
 			return -1;
 		}
+		// Every delay-dependent ring is sized here, once. An auto delay
+		// is not known until the loop has run, so its rings are sized
+		// for the ceiling instead and the estimate is clamped to it.
+		ax->delay_alloc = ax->delay_auto
+			? data->delay_auto_max : ax->delay;
+	}
+
+	// delay_auto now means "a startup measurement is still needed", which is
+	// also true when only one axis asked for it, or when nothing asked for an
+	// auto delay but fs or the bias is resolved from the same measurement
+	data->delay_auto = data->axis[0].delay_auto || data->axis[1].delay_auto
+		|| data->fs_auto || data->delay_auto_bias_auto
+		|| data->gap_trip_auto;
+	if (data->delay_auto) {
+		double need = data->delay_auto_settle + data->delay_auto_window;
+		if (data->start_delay < need) {
+			log_warn("fsp: raising start_delay %G -> %G s: the auto "
+				"delay is measured during the hold and has to "
+				"be installed before the loop closes.",
+				data->start_delay, need);
+			data->start_delay = need;
+		}
+		// one period sample per frame, one compute sample per timing
+		// window published by the source
+		size_t cap = (size_t)(data->delay_auto_window * data->fs) + 16;
+		if (cap > 8192) cap = 8192;
+		data->auto_cap_dt = cap;
+		data->auto_cap_c = 64;
+		data->auto_dt = xcalloc(cap, sizeof(double));
+		data->auto_compute = xcalloc(data->auto_cap_c, sizeof(double));
+		log_info("fsp: delay is auto: measuring for %G s after a %G s "
+			"settle, then locking in at the end of the %G s hold "
+			"(ceiling %zu frames, assumed sensor/ZOH bias %G "
+			"frames)", data->delay_auto_window,
+			data->delay_auto_settle, data->start_delay,
+			data->delay_auto_max, data->delay_auto_bias);
+	} else {
+		data->delay_auto_done = true;
 	}
 
 	if (data->cmd_fc > 0.0) {
@@ -1607,20 +1739,22 @@ int fsp_init(struct aylp_device *self)
 		ax->transient_gain_current =
 			data->transient_modal_q_scale > 0.0;
 		// One extra command is retained for fractional-delay interpolation.
-		ax->ucmd = xcalloc(ax->delay + 1, sizeof(double));
+		// delay_alloc, not delay: with an auto delay these lengths are
+		// fixed before the delay is known (see fsp.h).
+		ax->ucmd = xcalloc(ax->delay_alloc + 1, sizeof(double));
 		if (data->broad_order) {
 			// twice the horizon the main filter runs
 			ax->dark_predict_max = data->dark_predict_max
 				? data->dark_predict_max
-				: 2 * (ax->delay + data->broad_gd);
+				: 2 * (ax->delay_alloc + data->broad_gd);
 			if (ax->dark_predict_max < 4) ax->dark_predict_max = 4;
-			ax->dark_bank_max = ax->dark_predict_max + ax->delay
-				+ data->broad_gd + 1;
+			ax->dark_bank_max = ax->dark_predict_max
+				+ ax->delay_alloc + data->broad_gd + 1;
 			// The dark bank's longest training window ends dark_bank_max
 			// samples back, which can reach deeper
 			// into the ring than the main filter's delay + broad_gd
 			// window does; the ring must hold whichever is longer.
-			size_t reach = ax->delay + data->broad_gd;
+			size_t reach = ax->delay_alloc + data->broad_gd;
 			if (data->dark_predict && ax->dark_bank_max > reach)
 				reach = ax->dark_bank_max;
 			ax->broad_hist_len = data->broad_order + reach + 2;
@@ -1662,8 +1796,10 @@ int fsp_init(struct aylp_device *self)
 			ax->demod_ph[i] = 0.0;
 		}
 		log_info("fsp: %s axis, %zu modes, K=%G, predicting %zu+%.3G "
-			"samples ahead%s", a == 0 ? "y" : "x", ax->n_modes, ax->K,
-			ax->delay, ax->delay_frac,
+			"samples ahead%s%s", a == 0 ? "y" : "x", ax->n_modes,
+			ax->K, ax->delay, ax->delay_frac,
+			ax->delay_auto ? " (provisional; auto delay lands at "
+				"the end of the hold)" : "",
 			data->adapt_period > 0 ? ", adaptive" : " (fixed)");
 		if (ax->plant_shaped)
 			log_info("fsp: %s Bode-shaped plant H(z): "
@@ -2048,6 +2184,249 @@ static void fsp_reset_after_beam_loss(struct aylp_fsp_axis *ax,
 }
 
 
+// ---- auto delay ------------------------------------------------------------
+// See fsp.h for what is measured and why the compute term has to come from the
+// source device rather than from here.
+
+static int fsp_cmp_double(const void *a, const void *b)
+{
+	double x = *(const double *)a, y = *(const double *)b;
+	return x < y ? -1 : (x > y ? 1 : 0);
+}
+
+
+// median, in place (the caller is done with the array either way)
+static double fsp_median(double *v, size_t n)
+{
+	qsort(v, n, sizeof *v, fsp_cmp_double);
+	return n & 1 ? v[n/2] : 0.5 * (v[n/2 - 1] + v[n/2]);
+}
+
+
+/** Rebuild everything that was computed from fs, after fs itself is measured.
+ * Same pieces init builds, in the same order: the mode AR coefficients (and so
+ * their Riccati gains), the per-mode command pre-compensation, the burst
+ * guard's regeneration frequency, the command low-pass, and the per-sample EWMA
+ * weights that were converted from time constants. Runs once, inside the
+ * startup hold, so a Riccati solve here costs a frame nobody is using. */
+static void fsp_rebuild_for_fs(struct aylp_fsp_data *data)
+{
+	for (int a = 0; a < 2; a++) {
+		struct aylp_fsp_axis *ax = &data->axis[a];
+		fsp_build_modes(ax, data->fs);
+		fsp_build_comp(ax, data);
+		if (data->guard_ratio > 0.0) fsp_build_guard(ax, data);
+		if (fsp_solve_gain(ax))
+			log_error("fsp: Riccati solve failed on the %s axis at "
+				"the measured fs; the previous gain stays in "
+				"place", a == 0 ? "y" : "x");
+		if (data->transient_modal_q_scale > 0.0
+				&& fsp_solve_transient_gain(ax,
+					data->transient_modal_q_scale))
+			log_error("fsp: transient modal solve failed on the %s "
+				"axis at the measured fs", a == 0 ? "y" : "x");
+	}
+	if (data->cmd_fc > 0.0) fsp_build_cmdlp(data);
+	if (data->drift_tau > 0.0)
+		data->drift_beta = 1.0 - exp(-1.0 / (data->drift_tau * data->fs));
+	if (data->transient_sigma > 0.0)
+		data->transient_beta =
+			1.0 - exp(-1.0 / (data->transient_tau * data->fs));
+	if (data->transient_shadow_mu > 0.0)
+		data->transient_shadow_beta = 1.0
+			- exp(-1.0 / (data->transient_shadow_tau * data->fs));
+}
+
+
+/** One measurement sample, taken per frame during the startup hold. */
+static void fsp_delay_auto_sample(struct aylp_fsp_data *data, double now)
+{
+	// the first frames of a run are the source's slow first frame, cold
+	// caches and page faults; none of them are the steady state
+	if (now - data->t0 < data->delay_auto_settle) return;
+	if (data->t_last > 0.0 && data->auto_n_dt < data->auto_cap_dt) {
+		double dt = now - data->t_last;
+		if (dt > 0.0) data->auto_dt[data->auto_n_dt++] = dt;
+	}
+	struct aylp_loop_timing t;
+	// each publication is already a mean over its own window; record it
+	// once, not once per frame, so the median isn't weighted by how long
+	// each window happened to stay current
+	if (aylp_timing_get(&t) && t.compute_time != data->auto_last_c
+			&& data->auto_n_c < data->auto_cap_c) {
+		data->auto_last_c = t.compute_time;
+		data->auto_compute[data->auto_n_c++] = t.compute_time;
+	}
+}
+
+
+/** Turn the samples into a delay and install it. Called once, inside the hold,
+ * as soon as the measurement window closes: from here on the delay is in use. */
+static void fsp_delay_auto_lock(struct aylp_fsp_data *data)
+{
+	data->delay_auto_done = true;
+	const char *why = 0;
+	if (!data->auto_n_c)
+		why = "no device in this pipeline published loop timing -- the "
+			"source must be one that measures its own idle time "
+			"(see libaylp/timing.h)";
+	else if (data->auto_n_dt < 32)
+		why = "too few frames arrived during the hold to measure a loop "
+			"period";
+	if (why) {
+		log_error("fsp: AUTO DELAY FAILED: %s. Falling back to %zu+%G "
+			"frames, which is a default and not a measurement of "
+			"this bench. Stop the run rather than close a loop on "
+			"it.", why, data->axis[0].delay,
+			data->axis[0].delay_frac);
+	} else {
+		double dt = fsp_median(data->auto_dt, data->auto_n_dt);
+		double comp = fsp_median(data->auto_compute, data->auto_n_c);
+		double fs_meas = 1.0 / dt;
+		if (data->fs_auto) {
+			// Everything derived from fs is rebuilt below, so this has
+			// to happen before the delay is computed in frames.
+			log_info("fsp: auto fs -> %.2f Hz (was %G configured)",
+				fs_meas, data->fs);
+			data->fs = fs_meas;
+			fsp_rebuild_for_fs(data);
+		}
+		if (data->gap_trip_auto) {
+			// 1.5 frames: a normal frame passes, a single missed one
+			// (2 periods) trips. Same ratio the 471 Hz configs used
+			// when it was written in seconds.
+			data->gap_trip = 1.5 * dt;
+			log_info("fsp: auto gap_trip -> %.2f ms (1.5 frames at "
+				"%.2f Hz)", 1e3 * data->gap_trip, 1.0 / dt);
+		}
+		if (data->delay_auto_bias_auto && data->delay_ident_auto) {
+			// No identification to work from, so MODEL the sensor
+			// path from what the source publishes: half an exposure
+			// from the integration midpoint to its end, plus a
+			// fixed pipeline term.
+			//
+			// THE 2.5 IS MEASURED, not assumed. Removing the
+			// exposure half from this bench's four Bode
+			// identifications leaves a remarkably constant
+			// remainder across an 8x range of frame rate and a 20x
+			// range of exposure:
+			//   2026-07-31  3788 Hz  exp 50us   x 2.67  y 2.53 fr
+			//   2026-08-07  2310 Hz  exp 400us  x 2.56  y 2.66 fr
+			// i.e. the camera pipelines about two frames of readout
+			// and transfer (integrate N while N-1 moves over USB,
+			// plus the SDK's queue) on top of the half-frame DAC
+			// hold. That the remainder is constant in FRAMES rather
+			// than in milliseconds is itself the finding: the delay
+			// here is dominated by frame-coupled terms.
+			//
+			// It is still a model. It cannot see actuator lag, and
+			// it assumes this camera's pipelining. Run the PRBS
+			// delay calibration and the suite replaces
+			// delay_ident_ms with a real number.
+			struct aylp_loop_timing t;
+			double expo = aylp_timing_get(&t) ? t.exposure : 0.0;
+			data->delay_auto_bias = 0.5 * expo * data->fs + 2.5;
+			data->delay_ident_ms = 1e3 * (data->delay_auto_bias
+				+ comp * data->fs) / data->fs;
+			log_warn("fsp: delay_ident_ms is auto: MODELLING the "
+				"sensor path as %.4G frames (%.3f ms "
+				"exposure/2 + 2 frames of camera pipeline + 0.5 "
+				"frame ZOH) instead of using an identification. "
+				"The 2.5 comes from this bench's own Bode fits "
+				"(2.53-2.67 frames of pipeline across 471-3788 "
+				"Hz), but it cannot see actuator lag and it "
+				"assumes this camera. Run the PRBS delay "
+				"calibration for a real number.",
+				data->delay_auto_bias, 0.5e3 * expo);
+			if (!(expo > 0.0))
+				log_warn("fsp: ... and the source published no "
+					"exposure, so even the integration term "
+					"is missing from that model.");
+		} else if (data->delay_auto_bias_auto) {
+			// The bias is a physical latency: recover it in SECONDS
+			// from the identified delay, then convert at the rate the
+			// loop actually achieved. This is what makes the whole
+			// arrangement survive a frame-rate change.
+			double bias_s = 1e-3 * data->delay_ident_ms - comp;
+			if (bias_s < 0.0) {
+				log_warn("fsp: auto bias: measured compute %.3f ms "
+					"already exceeds the identified delay "
+					"%.3f ms; clamping the bias to zero and "
+					"trusting the compute term alone. "
+					"Re-identify the delay.",
+					1e3 * comp, data->delay_ident_ms);
+				bias_s = 0.0;
+			}
+			data->delay_auto_bias = bias_s * data->fs;
+			log_info("fsp: auto delay_auto_bias -> %.4G frames "
+				"(%.3f ms identified - %.3f ms compute, at "
+				"%.2f Hz)", data->delay_auto_bias,
+				data->delay_ident_ms, 1e3 * comp, data->fs);
+		}
+		double comp_frames = comp * data->fs;
+		double total = data->delay_auto_bias + comp_frames;
+		size_t D = (size_t)total;
+		double F = total - (double)D;
+		if (D < 1) {
+			// a delay below one sample is not representable here and
+			// is not physical either: the frame in hand is already
+			// one integration old
+			D = 1;
+			F = 0.0;
+		}
+		if (D > data->delay_auto_max) {
+			log_warn("fsp: auto delay estimate %.3G frames exceeds "
+				"delay_auto_max %zu, which is what every ring "
+				"was sized for; clamping. Raise "
+				"delay_auto_max if the estimate is believable.",
+				total, data->delay_auto_max);
+			D = data->delay_auto_max;
+			F = 0.0;
+		}
+		if (!data->fs_auto && fabs(fs_meas - data->fs) > 0.1 * data->fs)
+			log_warn("fsp: the loop is running at %.1f Hz, %.0f%% "
+				"from the configured fs %G. fs sets the mode "
+				"AR coefficients, broad_lp, the drift time "
+				"constants and the frames this delay is "
+				"counted in -- all of them are off by that "
+				"factor until fs is corrected.",
+				fs_meas, 1e2 * fabs(fs_meas - data->fs)
+					/ data->fs, data->fs);
+		for (int a = 0; a < 2; a++) {
+			struct aylp_fsp_axis *ax = &data->axis[a];
+			if (!ax->delay_auto) continue;
+			ax->delay = D;
+			ax->delay_frac = F;
+			// both of these are functions of the delay
+			fsp_build_comp(ax, data);
+			if (data->guard_ratio > 0.0) fsp_build_guard(ax, data);
+			// The command ring just changed length. Everything in
+			// it is zero -- the hold parks the output there -- so
+			// restarting it clean loses nothing and keeps uhead
+			// consistent with the new modulus.
+			memset(ax->ucmd, 0,
+				(ax->delay_alloc + 1) * sizeof(double));
+			ax->uhead = 0;
+			ax->frac_x1 = 0.0;
+			ax->frac_y1 = 0.0;
+		}
+		log_info("fsp: auto delay -> %zu+%.3G frames (%.3G total) = "
+			"%.3G measured compute (%.3f ms downstream of the "
+			"source, %.3f ms frame period, %zu frames / %zu timing "
+			"windows) + %G assumed sensor/ZOH bias. THIS IS AN "
+			"ESTIMATE: the bias is assumed, and the compute term "
+			"is the whole downstream pipeline, so sinks running "
+			"after the DAC inflate it. Confirm with a Bode sweep "
+			"before trusting an attenuation number.",
+			D, F, total, comp_frames, 1e3 * comp, 1e3 * dt,
+			data->auto_n_dt, data->auto_n_c,
+			data->delay_auto_bias);
+	}
+	xfree(data->auto_dt);
+	xfree(data->auto_compute);
+}
+
+
 int fsp_proc(struct aylp_device *self, struct aylp_state *state)
 {
 	struct aylp_fsp_data *data = self->device_data;
@@ -2062,7 +2441,13 @@ int fsp_proc(struct aylp_device *self, struct aylp_state *state)
 	double now = tp.tv_sec + 1e-9 * tp.tv_nsec;
 	if (UNLIKELY(!data->t0)) data->t0 = now;
 	bool sensor_lost = state->header.status & AYLP_BEAM_LOST;
-	bool sensor_rejected = state->header.status & AYLP_FRAME_REJECTED;
+	// Both flags mean this iteration carries no trustworthy fresh centroid.
+	// center_of_mass uses NO_SIGNAL while holding through a dark pulse;
+	// FRAME_REJECTED denotes a distorted-but-present frame. Treat both as a
+	// measurement hole so held coordinates cannot train the observers or be
+	// integrated as if they were hundreds of identical real samples.
+	bool sensor_rejected = state->header.status
+		& (AYLP_FRAME_REJECTED | AYLP_NO_SIGNAL);
 	if (UNLIKELY(sensor_lost && !data->beam_lost)) {
 		data->beam_lost = true;
 		data->beam_recover_start = 0.0;
@@ -2096,6 +2481,27 @@ int fsp_proc(struct aylp_device *self, struct aylp_state *state)
 	// closed-loop authority: 0 during the startup hold, then a linear ramp
 	// from 0 to 1 over `ramp` seconds so the handover is bumpless
 	bool in_hold = (now - data->t0) < data->start_delay;
+	// An auto delay is measured during the hold and installed as soon as
+	// the measurement window closes -- NOT at the end of the hold. The
+	// broadband filter trains against a target delay + broad_gd samples
+	// ahead, so everything it learns before the delay is known is learned
+	// at the wrong horizon; installing early leaves the rest of the hold
+	// (usually all of it) training at the right one. The command ring the
+	// install resizes holds nothing but zeros either way: the hold parks
+	// the output there.
+	if (UNLIKELY(data->delay_auto && !data->delay_auto_done)) {
+		if (in_hold) {
+			fsp_delay_auto_sample(data, now);
+			if (now - data->t0 >= data->delay_auto_settle
+					+ data->delay_auto_window)
+				fsp_delay_auto_lock(data);
+		} else {
+			// the hold ended before the window did (start_delay was
+			// raised at init to prevent this, so this is a loop
+			// running far slower than its configured fs)
+			fsp_delay_auto_lock(data);
+		}
+	}
 	double precenter_frac = 0.0;
 	if (in_hold && data->precenter_clamp > 0.0
 			&& now - data->t0 >= data->precenter_delay) {
@@ -3175,6 +3581,10 @@ int fsp_fini(struct aylp_device *self)
 		log_info("fsp: push-event summary written to %s",
 			data->transient_log);
 	}
+	// a run killed during the startup hold still holds the auto-delay
+	// sample buffers
+	if (data->auto_dt) xfree(data->auto_dt);
+	if (data->auto_compute) xfree(data->auto_compute);
 	// must precede the frees below: this is the only chance to persist the
 	// learned taps, and fini runs on the SIGINT path too
 	fsp_save_wiener(data);

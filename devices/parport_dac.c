@@ -20,7 +20,7 @@
 //     reads. Nothing but wires between the card and the BP-DAC81404EVM, so
 //     this works today -- CONFIRMED 2026-07-29: the DAC drives real voltage
 //     out of DAC_VOUT_A, tracking the commanded value (see DAC POWER-UP
-//     below; contrib/conf_parport_dac_2v.json parks channel 0 at `offset`).
+//     below; contrib/calibration-scripts/configurations/conf_parport_dac_2v.json parks channel 0 at `offset`).
 //
 //   link="pico" -- the DB25 carries a byte-parallel handshake to an
 //     RP2040/RP2350 whose PIO does the SPI at 50 MHz. Four stores per sample
@@ -168,6 +168,10 @@
 //                the DAC's tSDIS/tSDIH of 10 ns at IOVDD 2.7-5.5 V (20 ns
 //                below that) -- SLASEH2A 7.6, 7.7 -- so raise this only if
 //                the wiring is long or unterminated
+//   flush_config -- issue a non-posted MMIO read after each one-shot DAC
+//                configuration frame (default false). This provides an
+//                optional completion barrier for bring-up comparisons while
+//                leaving ordinary voltage updates on the original fast path.
 //   verify    -- spi link only; after each write -- including the one-shot
 //                SPICONFIG/GENCONFIG/SYNCCONFIG/DACRANGE/DACPWDWN init
 //                sequence in dac_configure(), not just per-channel writes --
@@ -475,6 +479,15 @@ static inline void pp_write_data(struct aylp_parport_dac_data *data, uint8_t v)
 		ioctl(data->pp_fd, PPWDATA, &c);
 	}
 	pp_dwell(data);
+}
+
+/** Complete all posted data-register writes issued before this call.  PCIe
+* preserves their order, while the read completion prevents the next SPI
+* frame from starting before this one's final SYNC edge reaches the card. */
+static inline void pp_flush_data(struct aylp_parport_dac_data *data)
+{
+	if (LIKELY(data->backend == AYLP_PARPORT_MMIO))
+		(void)*data->reg_data;
 }
 
 /** Write the four control lines. `v` is in *pin* polarity (bit set = pin
@@ -869,6 +882,9 @@ static void dac_write_checked(struct aylp_parport_dac_data *data,
 		spi_frame(data, addr, value);
 		data->diag_frames++;
 	}
+	/* Optionally complete these rare configuration frames before
+	 * initialization advances. Ordinary DAC writes always use the fast path. */
+	if (UNLIKELY(data->flush_config)) pp_flush_data(data);
 }
 
 /** Write a DACx register, verified over SDO/ACK if `data->verify` is set.
@@ -1364,6 +1380,7 @@ int parport_dac_init(struct aylp_device *self)
 	data->ack_status_bit = SPP_STATUS_ACK_DEFAULT;
 	data->crc = false;
 	data->crc_active = false;
+	data->flush_config = false;
 
 	struct json_object *ch_val = NULL, *idx_val = NULL;
 	struct json_object *scale_val = NULL, *offset_val = NULL;
@@ -1442,6 +1459,8 @@ int parport_dac_init(struct aylp_device *self)
 					(int)json_object_get_int64(val);
 			} else if (!strcmp(key, "delay_ns")) {
 				data->delay_ns = (long)json_object_get_int64(val);
+			} else if (!strcmp(key, "flush_config")) {
+				data->flush_config = json_object_get_boolean(val);
 			} else if (!strcmp(key, "channel")) {
 				ch_val = val;
 			} else if (!strcmp(key, "index")) {

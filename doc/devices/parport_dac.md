@@ -16,7 +16,7 @@ broadcast to every channel), and each channel's output voltage is
 
 **Status: working — the DAC drives real voltage.** As of 2026-07-29 the `spi`
 link produces a measured output at the EVM's `DAC_VOUT_A` terminal, tracking
-the commanded value (`contrib/conf_parport_dac_2v.json`: channel 0, range
+the commanded value (`contrib/calibration-scripts/configurations/conf_parport_dac_2v.json`: channel 0, range
 `+-10`, `scale: 0.0`, so the output parks at `offset` — driven at 2 V, then
 3 V). That is the end-to-end confirmation the "DAC power-up" note below was
 missing: every earlier bench session had measured only SPI *bus* timing
@@ -519,8 +519,8 @@ Parameters
       `range: "0-5"`, `range_max: "0-10"` goes 0-5 → 0-6 → 0-10 as needed;
       0-10 is a ceiling, not a jump.
     - The selection boundaries have a standalone regression test in
-      `test/parport_dac_range.c`. For an end-to-end hardware check, use
-      `contrib/conf_parport_dac_autorange.json` only with the mirror/FSM input
+      `devices/parport_dac_range_test.c`. For an end-to-end hardware check, use
+      `contrib/calibration-scripts/configurations/conf_parport_dac_autorange.json` only with the mirror/FSM input
       disconnected: its slow ±7 V command deliberately exercises
       ±5 → ±6 → ±10 and the hysteretic return path.
     - The window also fixes the ladder's **polarity**: `0-10` does not contain
@@ -681,19 +681,20 @@ skew between them removed by a single SOFT-LDAC per iteration:
 }
 ```
 
-`contrib/conf_parport_dac_smoke.json` is a standalone bench check: a 0.2 Hz
+`contrib/legacy/outdated_scripts/conf_parport_dac_smoke.json` is a retired
+standalone bench check: a 0.2 Hz
 sine into DACA/DACB with no camera and no mirror.
 
 Measuring rise and fall time
 ----------------------------
 
-`contrib/dac_square.c` puts a square wave on one channel so the analog edge
+`contrib/camera_pcie_hardware/dac_square.c` puts a square wave on one channel so the analog edge
 can be measured on a scope. It is standalone — it maps the BAR and bit-bangs
 the same frames this device does, without anyloop in the picture:
 
 ```
 ninja -C build                           # or: gcc -O2 -o dac_square \
-                                         #       contrib/dac_square.c -lm
+                                         #       contrib/camera_pcie_hardware/dac_square.c -lm
 sudo build/dac_square                    # 1 kHz, 0 -> 5 V full-scale on DACA
 sudo build/dac_square --rt               # SCHED_FIFO, less edge jitter
 sudo build/dac_square --low 2.4 --high 2.6   # small-signal, the bode drive

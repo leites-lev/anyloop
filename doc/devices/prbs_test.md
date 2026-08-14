@@ -143,7 +143,7 @@ reported. What makes the repair cheap is that a chop is almost never locked to
 the burst period, so a window position that was dark in one burst is live in
 others and the ensemble mean fills itself in.
 
-Measured on the simulated plant in `tests/test_prbs_test.c` (a 4-frame lag,
+Measured on the simulated plant in `devices/prbs_test_test.c` (a 4-frame lag,
 25% of frames held in 13-frame streaks), masking recovers the CW answer to
 within 0.001 frames on the peak and 0.001 on rho. Correlating the held samples
 instead — `use_rejected: true` — costs:
@@ -317,7 +317,7 @@ Parameters
 Example
 -------
 
-See `contrib/conf_prbs_par_x.json` and `contrib/conf_prbs_par_y.json` for
+See `contrib/calibration-scripts/configurations/conf_prbs_par_x.json` and `contrib/calibration-scripts/configurations/conf_prbs_par_y.json` for
 complete pipelines (`asi_source → center_of_mass → prbs_test → parport_dac`).
 
 ```json
@@ -337,7 +337,7 @@ complete pipelines (`asi_source → center_of_mass → prbs_test → parport_dac
 Tests
 -----
 
-`tests/test_prbs_test.c` drives the device against a simulated plant of known
+`devices/prbs_test_test.c` drives the device against a simulated plant of known
 delay and checks that the reported onset, peak and phase-slope numbers are that
 delay — including on an inverting plant, under noise several times the
 response, and on a plant that never moves, which must be reported as a failure
