@@ -31,3 +31,6 @@ data/**
 __pycache__/
 *.py[cod]
 .~lock.*#
+
+# KiCad local history contains its own repository; keep it local.
+**/.history/
